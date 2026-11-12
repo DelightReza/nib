@@ -1,0 +1,11 @@
+# build output
+build/
+build-debug/
+# Google ML Kit libraries: fetched by tools/fetch_libs.py, not redistributed here
+libs/
+# signing keys never belong in the repo
+*.jks
+*.keystore
+keys/
+# local design mockups
+design/

@@ -1,0 +1,93 @@
+# Nib
+
+**Low-latency handwritten notes for Android tablets.** Nib draws your ink straight into the display's front
+buffer, so strokes appear under the pen tip with almost no lag. Around that sits a calm, distraction-free
+notebook: pages that fill the screen, floating tools that step aside while you write, tabs, split view and
+search that reads your handwriting.
+
+<p>
+  <img src="docs/screenshots/page-style.jpg" width="45%" alt="Page style panel: templates, line spacing, colour, margins">
+  <img src="docs/screenshots/pen.jpg" width="45%" alt="Pen panel: pen types, thickness and colours">
+</p>
+
+## Features
+
+**Writing**
+- Front-buffer ink rendering (OpenGL ES) with optional stroke prediction: ink keeps up with the pen
+- Fountain, ballpoint and fineliner pens with pressure; highlighter; whole-stroke or partial eraser
+- Hold the pen still to snap lines and shapes; ruler with angle readout and real-world drawing scales (1:100 …)
+- Lasso: move, scale, recolour, copy, cut, duplicate, delete; text boxes; images
+- Laser pointer (a fading trail, never saved)
+- Pen side buttons: first button toggles the eraser, second toggles the lasso
+- Favourite pens in the tool bar, one tap to switch
+
+**Pages**
+- Pages fill the screen and run continuously; a new page appears as soon as you write on the last one
+- Infinite canvas notebooks
+- Templates: blank, lined, narrow lined, grid, dotted, Cornell, music staff, engineering, isometric, site inspection
+- Page style: line spacing (mm), line colour and strength, left margin, header line, border; white, cream or dark paper
+- Save your own templates, and choose the style new notebooks start with
+- Bookmarks with names, page overview and outline; double-tap to fit the page width
+
+**Notebooks**
+- Tabs for open notebooks, and split view with two notebooks side by side, both editable
+- Sidebar with recent notebooks, favourites and folders
+- Handwriting search: finds words you wrote (on-device recognition, English; Punjabi optional)
+- Import PDFs (or "Open with Nib" / share from any app) and write on them; export notebooks or pages as PDF or PNG
+- Backup and restore to a folder you choose
+- Light (Clean) and dark (Graphite) themes
+
+## Install
+
+Download the APK from [Releases](../../releases) and open it on your tablet. Nib needs **Android 14 or newer**.
+Handwriting search is available on 64-bit ARM devices (nearly all current tablets).
+
+### Root and Xiaomi HyperOS
+
+**Nib does not need root.** One optional extra helps Xiaomi / Redmi / POCO tablets on HyperOS only: the system
+holds back the first ~40 ms of every pen stroke for apps that are not on its palm-rejection exemption list,
+so strokes start a fraction late. The small Magisk module in [`magisk-stylus-unblock/`](magisk-stylus-unblock)
+adds Nib to that list on rooted devices. Other tablets don't have this hold and gain nothing from root.
+
+## Privacy
+
+Nib works offline. Notebooks stay on your device, in Nib's private storage and any backup folder you pick.
+The only network use is a one-time download of Google's handwriting-recognition model when you use
+handwriting search. ML Kit's usage-statistics upload is left out of the build, so nothing about your notes or
+usage is sent anywhere.
+
+## Build from source
+
+Nib builds without Gradle, straight from the Android SDK tools.
+
+Requirements: JDK 17, Android SDK with **platform 35** and **build-tools 35.0.0** (`ANDROID_HOME` or
+`~/Android/Sdk`), Python 3, `zip`.
+
+```sh
+python3 tools/fetch_libs.py   # downloads the pinned ML Kit libraries (checksums verified) into libs/
+./build-apk.sh                # → build/nib.apk, signed with your debug key
+./build-apk.sh --install      # build, install on the connected device and open it
+```
+
+Release builds: set `NIB_KEYSTORE`, `NIB_KS_PASS` and `NIB_KEY_ALIAS`. The Magisk module zip is built with
+`tools/build-magisk-module.sh`.
+
+### Layout
+
+| Path | What |
+|---|---|
+| `src/app/nib/notes/Engine.java` | Ink engine: input, strokes, pages, undo, front-buffer rendering |
+| `src/app/nib/notes/Gl.java` | OpenGL ES: instanced SDF stroke segments, page shader (templates, page style) |
+| `src/app/nib/notes/EditorActivity.java` | Writing screen: floating tools, panels, tabs and split view |
+| `src/app/nib/notes/LibraryActivity.java` | Notebook list, folders, search, import |
+| `src/app/nib/notes/Notebook.java` | File format (`ink.bin`, NIB4) and notebook storage |
+| `src/app/nib/notes/Render.java` | Canvas rendering for thumbnails and PDF/PNG export |
+| `src/app/nib/notes/Handwriting.java` | Handwriting search (ML Kit digital ink) |
+| `tools/` | Library fetch/unpack, manifest merger, Magisk module packer |
+
+## License
+
+Nib is free software under the [GNU General Public License v3.0](LICENSE).
+
+Handwriting search uses Google ML Kit, which is not part of this repository; `tools/fetch_libs.py` downloads it
+from Google's Maven repository, under the [ML Kit Terms of Service](https://developers.google.com/ml-kit/terms).
