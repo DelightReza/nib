@@ -17,7 +17,8 @@ search that reads your handwriting.
 - Fountain, ballpoint and fineliner pens with pressure; highlighter; whole-stroke or partial eraser
 - Hold the pen still to snap lines and shapes; ruler with angle readout and real-world drawing scales (1:100 …)
 - Lasso: move, scale, recolour, copy, cut, duplicate, delete; text boxes; images
-- Laser pointer (a fading trail, never saved)
+- Laser pointer, never saved: fading trail, dot, or vanishing ink; six colours, three sizes; can follow the hovering pen
+- Tape for studying: cover answers with straight or freeform tape, tap to peel it back, tap again to cover
 - Pen side buttons: first button toggles the eraser, second toggles the lasso
 - Favourite pens in the tool bar, one tap to switch
 
@@ -30,8 +31,8 @@ search that reads your handwriting.
 - Bookmarks with names, page overview and outline; double-tap to fit the page width
 
 **Notebooks**
-- Tabs for open notebooks, and split view with two notebooks side by side, both editable
-- Sidebar with recent notebooks, favourites and folders
+- Tabs for open notebooks, and split view with two notebooks side by side or stacked, both editable; drag the divider to resize
+- Sidebar with recent notebooks, favourites and folders with subfolders
 - Handwriting search: finds words you wrote (on-device recognition, English; Punjabi optional)
 - Import PDFs (or "Open with Nib" / share from any app) and write on them; export notebooks or pages as PDF or PNG
 - Backup and restore to a folder you choose
@@ -80,7 +81,7 @@ Release builds: set `NIB_KEYSTORE`, `NIB_KS_PASS` and `NIB_KEY_ALIAS`. The Magis
 | `src/app/nib/notes/Gl.java` | OpenGL ES: instanced SDF stroke segments, page shader (templates, page style) |
 | `src/app/nib/notes/EditorActivity.java` | Writing screen: floating tools, panels, tabs and split view |
 | `src/app/nib/notes/LibraryActivity.java` | Notebook list, folders, search, import |
-| `src/app/nib/notes/Notebook.java` | File format (`ink.bin`, NIB4) and notebook storage |
+| `src/app/nib/notes/Notebook.java` | File format (`ink.bin`, NIB5) and notebook storage |
 | `src/app/nib/notes/Render.java` | Canvas rendering for thumbnails and PDF/PNG export |
 | `src/app/nib/notes/Handwriting.java` | Handwriting search (ML Kit digital ink) |
 | `tools/` | Library fetch/unpack, manifest merger, Magisk module packer |

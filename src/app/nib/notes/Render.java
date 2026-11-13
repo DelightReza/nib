@@ -256,7 +256,7 @@ final class Render {
                 b.recycle();
             }
         }
-        for (Notebook.Item it : p.items) item(c, dir, it, dark(nb));
+        for (Notebook.Item it : p.items) if (it.type != Notebook.Item.TAPE) item(c, dir, it, dark(nb));
         boolean dk = dark(nb);
         SegBuf tmp = new SegBuf();
         Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -280,13 +280,147 @@ final class Render {
                 }
             }
         }
+        for (Notebook.Item it : p.items) if (it.type == Notebook.Item.TAPE) tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f);
     }
 
     private static int scale(int c, float k) {
         return 0xff000000 | (Math.round(((c >> 16) & 255) * k) << 16) | (Math.round(((c >> 8) & 255) * k) << 8) | Math.round((c & 255) * k);
     }
 
+    /** How much of a peeled-back tape still shows (a tinted ghost, so you know there's tape there). */
+    static final float TAPE_OPEN_ALPHA = 0.2f;
+
+    /**
+     * Washi-style tape along the item's centre line: torn zigzag ends, a faint pattern, a hairline edge.
+     * alpha < 1 draws the peeled-back ghost. Plain paths only (no layers / blend modes), so PDFs get it too.
+     */
+    static void tape(Canvas c, Notebook.Item it, float alpha) {
+        if (it.pts != null) tape(c, it.pts, it.size, it.color, it.pattern(), alpha);
+    }
+
+    static void tape(Canvas c, float[] pts, float thick, int color, String pattern, float alpha) {
+        android.graphics.Path outline = tapeOutline(pts, thick);
+        if (outline == null) return;
+        int a = Math.round(alpha * 255);
+        Paint f = new Paint(Paint.ANTI_ALIAS_FLAG);
+        f.setColor(color | 0xff000000);
+        f.setAlpha(Math.round(a * 0.97f));
+        c.drawPath(outline, f);
+        int saved = c.save();
+        c.clipPath(outline);
+        // pattern in white, laid along the tape's overall direction
+        int n = pts.length / 2;
+        float ang = (float) Math.toDegrees(Math.atan2(pts[2 * n - 1] - pts[1], pts[2 * n - 2] - pts[0]));
+        if (n < 2 || Float.isNaN(ang)) ang = 0;
+        RectF bb = new RectF();
+        outline.computeBounds(bb, true);
+        float cx = bb.centerX(), cy = bb.centerY(), half = (float) Math.hypot(bb.width(), bb.height()) / 2 + thick;
+        c.rotate(ang, cx, cy);
+        Paint pt = new Paint(Paint.ANTI_ALIAS_FLAG);
+        pt.setColor(0xffffffff);
+        pt.setAlpha(Math.round(a * 0.32f));
+        pt.setStrokeWidth(Math.max(1.2f, thick * 0.08f));
+        float step = Math.max(8f, thick / 3.2f);
+        switch (pattern) {
+            case "stripes":
+                for (float d = -half; d < half; d += step) c.drawLine(cx + d, cy + half, cx + d + 2 * half * 0.7f, cy - half, pt);
+                break;
+            case "grid":
+                pt.setStrokeWidth(Math.max(0.8f, thick * 0.035f));
+                pt.setAlpha(Math.round(a * 0.4f));
+                for (float d = -half; d < half; d += step) {
+                    c.drawLine(cx + d, cy - half, cx + d, cy + half, pt);
+                    c.drawLine(cx - half, cy + d, cx + half, cy + d, pt);
+                }
+                break;
+            case "dots":
+                pt.setAlpha(Math.round(a * 0.45f));
+                for (float dy = -half; dy < half; dy += step)
+                    for (float dx = -half + ((int) ((dy + half) / step) % 2) * step / 2; dx < half; dx += step)
+                        c.drawCircle(cx + dx, cy + dy, Math.max(1.2f, thick * 0.05f), pt);
+                break;
+            default:
+                break;
+        }
+        c.restoreToCount(saved);
+        Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+        edge.setStyle(Paint.Style.STROKE);
+        edge.setStrokeJoin(Paint.Join.ROUND);
+        edge.setStrokeWidth(Math.max(0.8f, thick * 0.025f));
+        edge.setColor(0xff000000);
+        edge.setAlpha(Math.round(a * (alpha < 1f ? 0.9f : 0.12f)));
+        if (alpha < 1f) edge.setPathEffect(new android.graphics.DashPathEffect(new float[]{6, 5}, 0));
+        c.drawPath(outline, edge);
+    }
+
+    /** The strip's shape: the centre line stroked thick wide (round bends), with both ends torn in a zigzag. */
+    static android.graphics.Path tapeOutline(float[] pts, float thick) {
+        int n = pts.length / 2;
+        if (n < 2) return null;
+        android.graphics.Path line = new android.graphics.Path();
+        line.moveTo(pts[0], pts[1]);
+        if (n == 2) line.lineTo(pts[2], pts[3]);
+        else { // smooth through the midpoints
+            for (int i = 1; i < n - 1; i++)
+                line.quadTo(pts[2 * i], pts[2 * i + 1], (pts[2 * i] + pts[2 * i + 2]) / 2, (pts[2 * i + 1] + pts[2 * i + 3]) / 2);
+            line.lineTo(pts[2 * n - 2], pts[2 * n - 1]);
+        }
+        Paint st = new Paint(Paint.ANTI_ALIAS_FLAG);
+        st.setStyle(Paint.Style.STROKE);
+        st.setStrokeWidth(thick);
+        st.setStrokeCap(Paint.Cap.BUTT);
+        st.setStrokeJoin(Paint.Join.ROUND);
+        android.graphics.Path out = new android.graphics.Path();
+        st.getFillPath(line, out);
+        out.setFillType(android.graphics.Path.FillType.WINDING);
+        android.graphics.Path solid = new android.graphics.Path();
+        solid.op(out, android.graphics.Path.Op.UNION); // self-overlaps become one area (no darker crossings)
+        // zigzag: cut teeth into each end
+        for (int end = 0; end < 2; end++) {
+            int k = end == 0 ? 0 : n - 1, dir = end == 0 ? 1 : -1;
+            float ex = pts[2 * k], ey = pts[2 * k + 1];
+            // direction from a point a little way in, so a wobble at the very end doesn't skew the cut
+            int j = k;
+            float qx = ex, qy = ey;
+            while (j + dir >= 0 && j + dir < n) {
+                j += dir;
+                qx = pts[2 * j]; qy = pts[2 * j + 1];
+                if (Math.hypot(qx - ex, qy - ey) >= thick * 0.5f) break;
+            }
+            float dx = ex - qx, dy = ey - qy, len = (float) Math.hypot(dx, dy);
+            if (len < 1e-3f) continue;
+            dx /= len; dy /= len; // outward
+            float nx = -dy, ny = dx;
+            int teeth = Math.max(3, Math.round(thick / 9f));
+            float tooth = thick / teeth, depth = Math.min(len * 0.6f, Math.max(2.5f, thick * 0.07f)), hw = thick / 2 + 1.5f;
+            android.graphics.Path cut = new android.graphics.Path();
+            cut.moveTo(ex + nx * hw + dx * 4, ey + ny * hw + dy * 4);
+            cut.lineTo(ex - nx * hw + dx * 4, ey - ny * hw + dy * 4);
+            for (int i = 0; i <= teeth * 2; i++) {
+                float v = -hw + Math.min(2 * hw, i * (2 * hw) / (teeth * 2));
+                float u = (i % 2 == 1) ? -depth : 0;
+                cut.lineTo(ex + nx * v + dx * u, ey + ny * v + dy * u);
+            }
+            cut.close();
+            solid.op(cut, android.graphics.Path.Op.DIFFERENCE);
+        }
+        return solid;
+    }
+
+    /** A tape as a texture of its box: k px per unit (capped so the bitmap stays small). */
+    static Bitmap tapeBitmap(Notebook.Item it, float k) {
+        k = Math.min(k, 2048f / Math.max(it.w, it.h));
+        int bw = Math.max(1, Math.round(it.w * k)), bh = Math.max(1, Math.round(it.h * k));
+        Bitmap b = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        c.scale(bw / it.w, bh / it.h);
+        c.translate(-it.x, -it.y);
+        tape(c, it, 1f);
+        return b;
+    }
+
     static void item(Canvas c, File dir, Notebook.Item it, boolean darkPaper) {
+        if (it.type == Notebook.Item.TAPE) { tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f); return; }
         if (it.type == Notebook.Item.IMAGE) {
             Bitmap b = image(dir, it.text, 1600);
             if (b != null) {

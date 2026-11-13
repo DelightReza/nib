@@ -496,13 +496,13 @@ final class Ui {
                 }
             }
             if (laser) {
-                int red = 0xffff3b30;
+                int red = disc;
                 p.setStyle(Paint.Style.FILL);
                 if (sel) {
                     p.setColor(0xffffffff);
                     cv.drawCircle(cx, cy, dp(c, 4.5f), p);
                 } else {
-                    p.setColor(0x40ff3b30);
+                    p.setColor((red & 0x00ffffff) | 0x40000000);
                     cv.drawCircle(cx, cy, dp(c, 8), p);
                     p.setColor(red);
                     cv.drawCircle(cx, cy, dp(c, 4.2f), p);
@@ -591,6 +591,38 @@ final class Ui {
             p.setStrokeWidth(dp(getContext(), 3));
             cv.drawCircle(cx, cy, r, p);
             p.setShader(null);
+        }
+    }
+
+    /** A short strip of the current tape on a paper-coloured card. */
+    static final class TapePreview extends View {
+        private int color;
+        private String pattern = "plain";
+        private float thick = 40;
+
+        TapePreview(Context c) { super(c); }
+
+        private boolean free;
+
+        void set(int col, String pat, float th, boolean freeform) { color = col; pattern = pat; thick = th; free = freeform; invalidate(); }
+
+        @Override protected void onDraw(Canvas cv) {
+            Context c = getContext();
+            Paint bgP = new Paint(Paint.ANTI_ALIAS_FLAG);
+            bgP.setColor(color(c, R.color.surface_variant));
+            cv.drawRoundRect(0, 0, getWidth(), getHeight(), dp(c, 10), dp(c, 10), bgP);
+            // a line of "writing" under the tape
+            Paint ln = new Paint(Paint.ANTI_ALIAS_FLAG);
+            ln.setColor(color(c, R.color.on_surface_variant));
+            ln.setStrokeWidth(dp(c, 2));
+            ln.setStrokeCap(Paint.Cap.ROUND);
+            float cy = getHeight() / 2f;
+            cv.drawLine(dp(c, 18), cy, getWidth() - dp(c, 18), cy, ln);
+            float k = dp(c, 0.55f), w = getWidth() * 0.62f, x0 = (getWidth() - w) / 2f;
+            float[] pts = free
+                    ? new float[]{x0, cy + dp(c, 6), x0 + w * 0.25f, cy - dp(c, 8), x0 + w * 0.5f, cy + dp(c, 4), x0 + w * 0.75f, cy - dp(c, 6), x0 + w, cy + dp(c, 2)}
+                    : new float[]{x0, cy, x0 + w, cy};
+            Render.tape(cv, pts, thick * k, color, pattern, 1f);
         }
     }
 }

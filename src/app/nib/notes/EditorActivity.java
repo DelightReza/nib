@@ -75,13 +75,22 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private int penSlot, hlSlot, textSize = 1, penType, prediction;
     private float penW, hlW, eraserDp;
     private boolean fingerDraw, hud, partialErase, shapeSnap, penButton;
+    private static final int[] LASER_COLORS = {0xffff3b30, 0xff34c759, 0xff0a84ff, 0xffaf52de, 0xffff9f0a, 0xffff2d92};
+    private static final String[] LASER_COLOR_NAMES = {"Red", "Green", "Blue", "Purple", "Orange", "Pink"};
+    private int laserCol, laserMode, laserSizeIdx = 1, laserTrail, laserInkWait;
+    private boolean laserHover;
+    private static final int[] TAPE_COLORS = {0xff9ecbf2, 0xffa8e6c8, 0xfff5dc7a, 0xfff7b89a, 0xfff3a6c8, 0xffc5b3f0, 0xffc9ccd3, 0xffd9b98c};
+    private static final String[] TAPE_COLOR_NAMES = {"Sky", "Mint", "Butter", "Peach", "Pink", "Lavender", "Grey", "Kraft"};
+    private static final float[] TAPE_THICK = {28f, 42f, 64f};
+    private int tapeCol, tapePat = 1, tapeThickIdx = 1;
+    private boolean tapeFree;
 
     // Zen layout: no bars; three floating capsules that fade while the pen is writing.
     private static final int CAP_DP = 48, TOOLCAP_DP = 60, EDGE_DP = 16;
     private FrameLayout root;
     private LinearLayout capLeft, capRight, capTools;
     private TextView hudView, toastView, pasteChip;
-    private Ui.ToolDisc penB, hlB, eraserB, lassoB, laserB, textB;
+    private Ui.ToolDisc penB, hlB, eraserB, lassoB, laserB, textB, tapeB;
     private Ui.IconButton undoB, redoB, pagesB, bookmarkB;
     private LinearLayout favRow;
     private Ruler ruler;
@@ -108,7 +117,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (dirPath == null) { finish(); return; }
         prefs = getSharedPreferences("nib", MODE_PRIVATE);
         tool = prefs.getInt("tool", Engine.TOOL_PEN);
-        if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_TEXT || tool == Engine.TOOL_LASER) tool = Engine.TOOL_PEN;
+        if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_TEXT || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) tool = Engine.TOOL_PEN;
         penSlot = prefs.getInt("penColor", 0);
         hlSlot = prefs.getInt("hlColor", 0);
         penW = prefs.getFloat("penW", 2.6f);
@@ -127,6 +136,16 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         shapeSnap = prefs.getBoolean("shapeSnap", true);
         penButton = prefs.getBoolean("penButton", true);
         autoHide = prefs.getBoolean("autoHide", true);
+        laserCol = prefs.getInt("laserCol", 0);
+        tapeCol = Math.min(TAPE_COLORS.length - 1, prefs.getInt("tapeCol", 0));
+        tapePat = prefs.getInt("tapePat", 1);
+        tapeThickIdx = prefs.getInt("tapeThick", 1);
+        tapeFree = prefs.getBoolean("tapeFree", false);
+        laserMode = prefs.getInt("laserMode", Engine.LASER_TRAIL_MODE);
+        laserSizeIdx = prefs.getInt("laserSize", 1);
+        laserTrail = prefs.getInt("laserTrail", 520);
+        laserInkWait = prefs.getInt("laserInkWait", 1500);
+        laserHover = prefs.getBoolean("laserHover", true);
         loadFavs();
 
         preferFastestDisplayMode();
@@ -138,12 +157,16 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         panes[1] = new Pane(1);
         splitDivider = new View(this);
         splitDivider.setBackgroundColor(Ui.color(this, R.color.outline));
-        paneRow.addView(panes[0], new LinearLayout.LayoutParams(0, -1, 1f));
-        paneRow.addView(splitDivider, new LinearLayout.LayoutParams(Math.max(2, Ui.dp(this, 1)), -1));
-        paneRow.addView(panes[1], new LinearLayout.LayoutParams(0, -1, 1f));
+        paneRow.addView(panes[0]);
+        paneRow.addView(splitDivider);
+        paneRow.addView(panes[1]);
+        splitVert = prefs.getBoolean("splitVert", false);
+        splitRatio = prefs.getFloat("splitRatio", 0.5f);
+        layoutSplit();
         splitDivider.setVisibility(View.GONE);
         panes[1].setVisibility(View.GONE);
         root.addView(paneRow, new FrameLayout.LayoutParams(-1, -1));
+        buildSplitKnob();
         restoreTabs(new File(dirPath), getIntent().getIntExtra("page", 0), getIntent().getBooleanExtra("split", false));
         ruler = new Ruler(this, this);
         root.addView(ruler, new FrameLayout.LayoutParams(-1, -1));
@@ -160,6 +183,130 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setOptions(prediction, fingerDraw, hud, partialErase, shapeSnap);
         engine.setEraserSize(eraserDp);
         engine.setPenType(penType);
+        pushLaser();
+        pushTape();
+    }
+
+    private void pushTape() {
+        engine.setTape(TAPE_COLORS[tapeCol], Notebook.Item.TAPE_PATTERNS[tapePat], TAPE_THICK[tapeThickIdx], tapeFree);
+        prefs.edit().putInt("tapeCol", tapeCol).putInt("tapePat", tapePat).putInt("tapeThick", tapeThickIdx).putBoolean("tapeFree", tapeFree).apply();
+    }
+
+    private void showTapePanel(View anchor) {
+        Ui.Popover p = newPop(372).title("Tape");
+        p.add(Ui.text(this, "Draw over answers to cover them. Tap tape to peel it back, tap again to cover. Erase or lasso it like ink.",
+                12.5f, Ui.color(this, R.color.on_surface_variant), null));
+        Ui.TapePreview prev = new Ui.TapePreview(this);
+        Runnable refresh = () -> prev.set(TAPE_COLORS[tapeCol], Notebook.Item.TAPE_PATTERNS[tapePat], TAPE_THICK[tapeThickIdx], tapeFree);
+        refresh.run();
+        LinearLayout.LayoutParams pl = fullW(64);
+        pl.topMargin = Ui.dp(this, 12);
+        prev.setLayoutParams(pl);
+        p.add(prev);
+        p.section("Shape");
+        p.add(Ui.segmented(this, new String[]{"Straight", "Freeform"}, tapeFree ? 1 : 0, i -> { tapeFree = i == 1; pushTape(); refresh.run(); }));
+        p.section("Pattern");
+        p.add(Ui.segmented(this, new String[]{"Plain", "Stripes", "Grid", "Dots"}, tapePat, i -> { tapePat = i; pushTape(); refresh.run(); }));
+        p.section("Thickness");
+        p.add(Ui.segmented(this, new String[]{"Thin", "Medium", "Thick"}, tapeThickIdx, i -> { tapeThickIdx = i; pushTape(); refresh.run(); }));
+        p.section("Colour");
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        Ui.Swatch[] dots = new Ui.Swatch[TAPE_COLORS.length];
+        for (int i = 0; i < TAPE_COLORS.length; i++) {
+            final int idx = i;
+            dots[i] = new Ui.Swatch(this);
+            dots[i].set(TAPE_COLORS[i], i == tapeCol);
+            dots[i].setContentDescription(TAPE_COLOR_NAMES[i]);
+            dots[i].setOnClickListener(v -> {
+                tapeCol = idx;
+                for (int k = 0; k < dots.length; k++) dots[k].set(TAPE_COLORS[k], k == idx);
+                pushTape();
+                applyTool();
+                refresh.run();
+                if (state != null && state.hasSelection) engine.selRecolor(TAPE_COLORS[idx]);
+            });
+            row.addView(dots[i], new LinearLayout.LayoutParams(0, Ui.dp(this, 44), 1f));
+        }
+        p.add(row);
+        p.section("This page");
+        LinearLayout acts = new LinearLayout(this);
+        acts.setOrientation(LinearLayout.VERTICAL);
+        acts.addView(Ui.actionRow(this, R.drawable.ic_tape, "Cover all", "Puts every tape on this page back", v -> { pop.dismiss(); engine.tapeAll(0); }));
+        acts.addView(Ui.actionRow(this, R.drawable.ic_search, "Reveal all", "Peels back every tape on this page", v -> { pop.dismiss(); engine.tapeAll(1); }));
+        acts.addView(Ui.actionRow(this, R.drawable.ic_trash, "Remove all tape", "Takes the tape off this page (undo brings it back)", v -> { pop.dismiss(); engine.tapeAll(2); }));
+        p.add(acts);
+        p.show(anchor);
+    }
+
+    private static final float[] LASER_SIZES = {0.65f, 1f, 1.6f};
+
+    private void pushLaser() {
+        engine.setLaser(LASER_COLORS[laserCol], laserMode, laserMode == Engine.LASER_INK ? laserInkWait : laserTrail,
+                LASER_SIZES[laserSizeIdx], laserHover);
+        prefs.edit().putInt("laserCol", laserCol).putInt("laserMode", laserMode).putInt("laserSize", laserSizeIdx)
+                .putInt("laserTrail", laserTrail).putInt("laserInkWait", laserInkWait).putBoolean("laserHover", laserHover).apply();
+    }
+
+    private void showLaserPanel(View anchor) {
+        Ui.Popover p = newPop(360).title("Laser pointer");
+        p.add(Ui.text(this, "Never saved: it's for showing, not writing.", 12.5f, Ui.color(this, R.color.on_surface_variant), null));
+        p.section("Style");
+        TextView[] lenLabel = new TextView[1];
+        android.widget.SeekBar[] lenBar = new android.widget.SeekBar[1];
+        Runnable lenText = () -> lenLabel[0].setText(laserMode == Engine.LASER_INK
+                ? String.format(java.util.Locale.US, "Vanishes %.1f s after you stop", laserInkWait / 1000f)
+                : laserMode == Engine.LASER_DOT ? "Dot only: no trail"
+                : String.format(java.util.Locale.US, "Trail lasts %.1f s", laserTrail / 1000f));
+        p.add(Ui.segmented(this, new String[]{"Trail", "Dot", "Vanishing ink"}, laserMode, i -> {
+            laserMode = i;
+            pushLaser();
+            lenText.run();
+            lenBar[0].setEnabled(i != Engine.LASER_DOT);
+            lenBar[0].setAlpha(i == Engine.LASER_DOT ? 0.4f : 1f);
+            lenBar[0].setProgress(i == Engine.LASER_INK ? (laserInkWait - 500) / 100 : (laserTrail - 200) / 50);
+            applyTool();
+        }));
+        lenLabel[0] = Ui.text(this, "", 12.5f, Ui.color(this, R.color.on_surface_variant), Ui.medium());
+        lenLabel[0].setPadding(0, Ui.dp(this, 14), 0, Ui.dp(this, 4));
+        p.add(lenLabel[0]);
+        // trail: 0.2–2.2 s in 50 ms steps; vanishing ink: 0.5–4.5 s in 100 ms steps (both 40 steps)
+        lenBar[0] = Ui.slider(this, 40, laserMode == Engine.LASER_INK ? (laserInkWait - 500) / 100 : (laserTrail - 200) / 50, v -> {
+            if (laserMode == Engine.LASER_INK) laserInkWait = 500 + v * 100; else laserTrail = 200 + v * 50;
+            pushLaser();
+            lenText.run();
+        });
+        lenBar[0].setEnabled(laserMode != Engine.LASER_DOT);
+        lenBar[0].setAlpha(laserMode == Engine.LASER_DOT ? 0.4f : 1f);
+        p.add(lenBar[0]);
+        lenText.run();
+        p.section("Size");
+        p.add(Ui.segmented(this, new String[]{"Small", "Medium", "Large"}, laserSizeIdx, i -> { laserSizeIdx = i; pushLaser(); }));
+        p.section("Colour");
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        Ui.Swatch[] dots = new Ui.Swatch[LASER_COLORS.length];
+        for (int i = 0; i < LASER_COLORS.length; i++) {
+            final int idx = i;
+            dots[i] = new Ui.Swatch(this);
+            dots[i].set(LASER_COLORS[i], i == laserCol);
+            dots[i].setContentDescription(LASER_COLOR_NAMES[i]);
+            dots[i].setOnClickListener(v -> {
+                laserCol = idx;
+                for (int k = 0; k < dots.length; k++) dots[k].set(LASER_COLORS[k], k == idx);
+                pushLaser();
+                applyTool();
+            });
+            row.addView(dots[i], new LinearLayout.LayoutParams(Ui.dp(this, 44), Ui.dp(this, 44)));
+        }
+        p.add(row);
+        LinearLayout.LayoutParams hl = fullW(-1);
+        hl.topMargin = Ui.dp(this, 10);
+        View hov = Ui.switchRow(this, "Point without touching", "The dot follows the pen while it hovers over the screen",
+                laserHover, on -> { laserHover = on; pushLaser(); });
+        hov.setLayoutParams(hl);
+        p.add(hov);
+        p.show(anchor);
     }
 
     // ---- documents: tabs, and two panes for split view inside this window ------------------------
@@ -345,7 +492,140 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         panes[1].setVisibility(View.VISIBLE);
         splitDivider.setVisibility(View.VISIBLE);
         showInPane(1, d);
+        placeKnob();
     }
+
+    // ---- the split separator: a thin rule with a small handle (orientation, swap, close; drag to resize) ----
+
+    private boolean splitVert;   // true: notebooks stacked top and bottom; false: side by side
+    private float splitRatio;    // share of the window the first pane gets
+    private LinearLayout splitKnob;
+    private Ui.IconButton knobOrient;
+    private View splitGuide;     // accent line that follows the finger while the handle is dragged
+
+    private void layoutSplit() {
+        paneRow.setOrientation(splitVert ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        int t = Math.max(2, Ui.dp(this, 1));
+        float r = Math.max(0.2f, Math.min(0.8f, splitRatio));
+        panes[0].setLayoutParams(splitVert ? new LinearLayout.LayoutParams(-1, 0, r) : new LinearLayout.LayoutParams(0, -1, r));
+        splitDivider.setLayoutParams(splitVert ? new LinearLayout.LayoutParams(-1, t) : new LinearLayout.LayoutParams(t, -1));
+        panes[1].setLayoutParams(splitVert ? new LinearLayout.LayoutParams(-1, 0, 1f - r) : new LinearLayout.LayoutParams(0, -1, 1f - r));
+    }
+
+    private void buildSplitKnob() {
+        splitGuide = new View(this);
+        splitGuide.setBackgroundColor(Ui.color(this, R.color.accent));
+        splitGuide.setVisibility(View.GONE);
+        root.addView(splitGuide, new FrameLayout.LayoutParams(Ui.dp(this, 3), -1));
+        splitKnob = new LinearLayout(this) {
+            float downX, downY;
+            boolean drag;
+            @Override public boolean onInterceptTouchEvent(MotionEvent e) {
+                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { downX = e.getRawX(); downY = e.getRawY(); drag = false; }
+                else if (e.getActionMasked() == MotionEvent.ACTION_MOVE && Math.hypot(e.getRawX() - downX, e.getRawY() - downY) > Ui.dp(EditorActivity.this, 8)) drag = true;
+                return drag;
+            }
+            @Override public boolean onTouchEvent(MotionEvent e) {
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN) { downX = e.getRawX(); downY = e.getRawY(); return true; }
+                float total = splitVert ? paneRow.getHeight() : paneRow.getWidth();
+                float pos = splitVert ? e.getRawY() - rootTop() : e.getRawX();
+                float r = Math.max(0.2f, Math.min(0.8f, pos / Math.max(1f, total)));
+                if (a == MotionEvent.ACTION_MOVE) {
+                    drag = true;
+                    showGuide(r * total);
+                } else if (a == MotionEvent.ACTION_UP && drag) {
+                    splitGuide.setVisibility(View.GONE);
+                    splitRatio = Math.abs(r - 0.5f) < 0.03f ? 0.5f : r; // snaps to equal halves
+                    prefs.edit().putFloat("splitRatio", splitRatio).apply();
+                    layoutSplit();
+                    paneRow.post(this::requestLayout);
+                    paneRow.post(EditorActivity.this::placeKnob);
+                } else if (a == MotionEvent.ACTION_CANCEL) splitGuide.setVisibility(View.GONE);
+                return true;
+            }
+        };
+        splitKnob.setGravity(Gravity.CENTER);
+        int pad = Ui.dp(this, 3);
+        splitKnob.setPadding(pad, pad, pad, pad);
+        Ui.capsule(splitKnob, this, 20);
+        knobOrient = new Ui.IconButton(this, R.drawable.ic_split_rows, "Stack top and bottom");
+        knobOrient.setOnClickListener(v -> setSplitVert(!splitVert));
+        Ui.IconButton swap = new Ui.IconButton(this, R.drawable.ic_swap, "Swap sides");
+        swap.setOnClickListener(v -> swapPanes());
+        Ui.IconButton close = new Ui.IconButton(this, R.drawable.ic_close, "Close split view");
+        close.setOnClickListener(v -> closeSplit(focusPane));
+        for (Ui.IconButton b : new Ui.IconButton[]{knobOrient, swap, close}) {
+            b.setTooltipText(b.getContentDescription());
+            splitKnob.addView(b, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 36)));
+        }
+        splitKnob.setVisibility(View.GONE);
+        root.addView(splitKnob, new FrameLayout.LayoutParams(-2, -2));
+        paneRow.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeKnob());
+    }
+
+    private float rootTop() {
+        int[] loc = new int[2];
+        root.getLocationOnScreen(loc);
+        return loc[1];
+    }
+
+    private void showGuide(float at) {
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) splitGuide.getLayoutParams();
+        int t = Ui.dp(this, 3);
+        lp.width = splitVert ? -1 : t;
+        lp.height = splitVert ? t : -1;
+        splitGuide.setLayoutParams(lp);
+        splitGuide.setTranslationX(splitVert ? 0 : at - t / 2f);
+        splitGuide.setTranslationY(splitVert ? at - t / 2f : 0);
+        splitGuide.setVisibility(View.VISIBLE);
+    }
+
+    private void setSplitVert(boolean v) {
+        splitVert = v;
+        prefs.edit().putBoolean("splitVert", v).apply();
+        layoutSplit();
+        placeKnob();
+        toast(v ? "Stacked top and bottom" : "Side by side");
+    }
+
+    private void swapPanes() {
+        Doc a = shown[0], b = shown[1];
+        if (b == null) return;
+        Doc act = cur;
+        shown[0] = b;
+        shown[1] = a;
+        panes[0].show(b);
+        panes[1].show(a);
+        focusPane = act == b ? 0 : 1;
+        activate(act);
+    }
+
+    /** Centres the handle on the rule between the panes; it lies along the rule. */
+    private void placeKnob() {
+        if (splitKnob == null) return;
+        boolean on = shown[1] != null;
+        splitKnob.setVisibility(on ? View.VISIBLE : View.GONE);
+        if (!on) return;
+        splitKnob.setOrientation(splitVert ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        knobOrient.setImageResource(splitVert ? R.drawable.ic_split_cols : R.drawable.ic_split_rows);
+        knobOrient.setContentDescription(splitVert ? "Side by side" : "Stack top and bottom");
+        knobOrient.setTooltipText(knobOrient.getContentDescription());
+        splitKnob.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int kw = splitKnob.getMeasuredWidth(), kh = splitKnob.getMeasuredHeight();
+        if (splitVert) {
+            float y = splitDivider.getTop() + splitDivider.getHeight() / 2f;
+            // off-centre to the right so it never sits on the tool capsule's column or the middle of the writing
+            splitKnob.setTranslationX(root.getWidth() - kw - Ui.dp(this, EDGE_DP));
+            splitKnob.setTranslationY(y - kh / 2f);
+        } else {
+            float x = splitDivider.getLeft() + splitDivider.getWidth() / 2f;
+            splitKnob.setTranslationX(x - kw / 2f);
+            splitKnob.setTranslationY((root.getHeight() - kh) / 2f);
+        }
+    }
+
+    private float paneTop() { return panes[focusPane] == null ? 0 : panes[focusPane].getTop(); }
 
     /** Leaves split view, keeping pane `keep`'s notebook full width. */
     private void closeSplit(int keep) {
@@ -355,6 +635,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         panes[1].show(null);
         panes[1].setVisibility(View.GONE);
         splitDivider.setVisibility(View.GONE);
+        splitKnob.setVisibility(View.GONE);
         shown[0] = k;
         panes[0].show(k);
         focusPane = 0;
@@ -478,7 +759,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void onPen(boolean down) {
         if (!autoHide) return;
         ui.removeCallbacks(showChrome);
-        boolean writing = tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER;
+        boolean writing = tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE;
         if (down && writing) {
             for (View v : new View[]{capLeft, capRight, capTools}) v.animate().alpha(0f).setDuration(90).start();
         } else if (!down) {
@@ -588,6 +869,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         hlB = toolDisc(R.drawable.ic_highlighter, "Highlighter", Engine.TOOL_HL, false);
         eraserB = toolDisc(R.drawable.ic_eraser, "Eraser", Engine.TOOL_ERASER, false);
         lassoB = toolDisc(R.drawable.ic_lasso, "Lasso select", Engine.TOOL_LASSO, false);
+        tapeB = toolDisc(R.drawable.ic_tape, "Tape", Engine.TOOL_TAPE, false);
         laserB = toolDisc(0, "Laser pointer", Engine.TOOL_LASER, true);
         textB = toolDisc(R.drawable.ic_text, "Text", Engine.TOOL_TEXT, false);
         Ui.IconButton img = icon(R.drawable.ic_image, "Insert image");
@@ -658,7 +940,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             case Engine.TOOL_ERASER: showEraserPanel(anchor); break;
             case Engine.TOOL_TEXT: showTextPanel(anchor); break;
             case Engine.TOOL_LASSO: toast("Circle ink, text or images to select them"); break;
-            case Engine.TOOL_LASER: toast("Point with the pen · the trail fades by itself"); break;
+            case Engine.TOOL_LASER: showLaserPanel(anchor); break;
+            case Engine.TOOL_TAPE: showTapePanel(anchor); break;
         }
     }
 
@@ -669,7 +952,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void pickSlot(int i) {
         if (tool == Engine.TOOL_HL) hlSlot = i;
         else penSlot = i;
-        if (tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER) tool = Engine.TOOL_PEN;
+        if (tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) tool = Engine.TOOL_PEN;
         if (state != null && state.hasSelection) engine.selRecolor(slotColors()[i]);
         applyTool();
     }
@@ -687,17 +970,18 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         hlB.set(tool == Engine.TOOL_HL, hlColors[hlSlot], hlColors[hlSlot]);
         eraserB.set(tool == Engine.TOOL_ERASER, 0, 0);
         lassoB.set(tool == Engine.TOOL_LASSO, 0, 0);
-        laserB.set(tool == Engine.TOOL_LASER, 0xffff3b30, 0);
+        laserB.set(tool == Engine.TOOL_LASER, LASER_COLORS[laserCol], 0);
+        tapeB.set(tool == Engine.TOOL_TAPE, TAPE_COLORS[tapeCol], 0);
         textB.set(tool == Engine.TOOL_TEXT, 0, 0);
         boolean hl = tool == Engine.TOOL_HL;
         int[] cols = slotColors();
         int sel = hl ? hlSlot : penSlot;
-        for (int i = 0; i < 4; i++) sw[i].set(cols[i], tool != Engine.TOOL_ERASER && tool != Engine.TOOL_LASSO && tool != Engine.TOOL_LASER && i == sel);
+        for (int i = 0; i < 4; i++) sw[i].set(cols[i], tool != Engine.TOOL_ERASER && tool != Engine.TOOL_LASSO && tool != Engine.TOOL_LASER && tool != Engine.TOOL_TAPE && i == sel);
         float frac = hl ? (hlW - HL_MIN) / (HL_MAX - HL_MIN) : tool == Engine.TOOL_TEXT ? textSize / 2f
                 : tool == Engine.TOOL_ERASER ? (eraserDp - 6) / 24f : (penW - PEN_MIN) / (PEN_MAX - PEN_MIN);
         sizeB.set(Math.max(0, Math.min(1, frac)));
-        sizeB.setVisibility(tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER ? View.GONE : View.VISIBLE);
-        palette.animate().alpha(tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER ? 0.4f : 1f).setDuration(120).start();
+        sizeB.setVisibility(tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE ? View.GONE : View.VISIBLE);
+        palette.animate().alpha(tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE ? 0.4f : 1f).setDuration(120).start();
         engine.setTool(tool);
         engine.setColor(Engine.TOOL_PEN, penColors[penSlot]);
         engine.setColor(Engine.TOOL_HL, hlColors[hlSlot]);
@@ -814,7 +1098,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         int avail = root.getWidth() - Ui.dp(this, 2 * EDGE_DP);
         for (View v : order) if (v != null && v != favRow && v != favSep) v.setVisibility(View.VISIBLE);
         renderFavs();
-        if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER) sizeB.setVisibility(View.GONE);
+        if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) sizeB.setVisibility(View.GONE);
         for (View v : order) {
             capTools.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED), View.MeasureSpec.makeMeasureSpec(Ui.dp(this, TOOLCAP_DP), View.MeasureSpec.EXACTLY));
             if (capTools.getMeasuredWidth() <= avail) break;
@@ -842,7 +1126,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     @Override public void rulerChanged() {
-        engine.setRuler(ruler.getVisibility() == View.VISIBLE, ruler.cx - paneLeft(), ruler.cy, ruler.angle, ruler.halfLen, ruler.halfThick);
+        engine.setRuler(ruler.getVisibility() == View.VISIBLE, ruler.cx - paneLeft(), ruler.cy - paneTop(), ruler.angle, ruler.halfLen, ruler.halfThick);
     }
 
     @Override public float pxPerUnit() { return state != null && state.z > 0 ? state.z : 1f; }
@@ -1806,8 +2090,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         float bw = selBar.getMeasuredWidth(), bh = selBar.getMeasuredHeight();
         float px = paneLeft();
         float x = Math.max(px + Ui.dp(this, 12), Math.min(px + panes[focusPane].getWidth() - bw - Ui.dp(this, 12), px + r.centerX() - bw / 2));
-        float y = r.top - bh - Ui.dp(this, 24);
-        if (y < Ui.dp(this, EDGE_DP + CAP_DP + 8)) y = Math.min(r.bottom + Ui.dp(this, 26), root.getHeight() - bh - Ui.dp(this, 70));
+        float pt = paneTop();
+        float y = pt + r.top - bh - Ui.dp(this, 24);
+        if (y < Math.max(pt, Ui.dp(this, EDGE_DP + CAP_DP + 8))) y = Math.min(pt + r.bottom + Ui.dp(this, 26), root.getHeight() - bh - Ui.dp(this, 70));
         selBar.setTranslationX(x);
         selBar.setTranslationY(y);
     }
@@ -1837,7 +2122,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         textEdit.setBackground(g);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(Math.round(e.width * e.zoom) + 4, -2);
         lp.leftMargin = Math.round(e.screenX + paneLeft());
-        lp.topMargin = Math.round(e.screenY);
+        lp.topMargin = Math.round(e.screenY + paneTop());
         root.addView(textEdit, lp);
         textEdit.requestFocus();
         textEdit.setSelection(textEdit.getText().length());

@@ -34,7 +34,10 @@ final class InkView extends SurfaceView implements SurfaceHolder.Callback {
     @Override
     public boolean onHoverEvent(MotionEvent ev) {
         int tt = ev.getToolType(0);
-        if (tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER) engine.hover();
+        if (tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER) {
+            int a = ev.getActionMasked();
+            engine.hoverAt(ev.getX(), ev.getY(), a == MotionEvent.ACTION_HOVER_EXIT);
+        }
         return true;
     }
 

@@ -41,7 +41,7 @@ import java.util.concurrent.TimeUnit;
  */
 final class Engine implements Choreographer.FrameCallback {
     static final float PW = Notebook.PW, GAP = 0f; // continuous pages: each one starts where the last ends
-    static final int TOOL_PEN = 0, TOOL_HL = 1, TOOL_ERASER = 2, TOOL_LASSO = 3, TOOL_TEXT = 4, TOOL_LASER = 5;
+    static final int TOOL_PEN = 0, TOOL_HL = 1, TOOL_ERASER = 2, TOOL_LASSO = 3, TOOL_TEXT = 4, TOOL_LASER = 5, TOOL_TAPE = 6;
     static final float[] TEXT_SIZES = {20f, 28f, 42f};
 
     static final class State {
@@ -113,9 +113,17 @@ final class Engine implements Choreographer.FrameCallback {
     private int predLevel = 1, penType = Stroke.PEN;
     private float eraserDp = 11f;
     private boolean fingerDraw, hud, partialErase, shapeSnap = true, tempEraser;
+    private int tapeColor = 0xff9ecbf2;
+    private String tapePattern = "stripes";
+    private float tapeThick = 40f;
+    private boolean tapeFree;
+    private int tapePage;
+    private float tx0, ty0, tx1, ty1; // tape being laid down (doc units): start, pen now
+    private float[] tpts = new float[256]; // freeform: centre line so far (doc units)
+    private int tn;
 
     // gestures
-    private static final int G_NONE = 0, G_INK = 1, G_ERASE = 2, G_PAN = 3, G_IGNORE = 4, G_LASSO = 5, G_SEL = 6, G_TAP = 7, G_LASER = 8;
+    private static final int G_NONE = 0, G_INK = 1, G_ERASE = 2, G_PAN = 3, G_IGNORE = 4, G_LASSO = 5, G_SEL = 6, G_TAP = 7, G_LASER = 8, G_TAPE = 9;
     private int gest = G_NONE;
     private volatile long penNear;
 
@@ -220,8 +228,37 @@ final class Engine implements Choreographer.FrameCallback {
         h.post(() -> {
             if (t != tool) {
                 if (t != TOOL_LASSO) clearSelection();
+                if (t != TOOL_LASER && hovering) { hovering = false; laserUpAt = SystemClock.uptimeMillis(); requestFrame(); }
                 tool = t;
             }
+        });
+    }
+
+    /** Tape tool: colour, pattern (Notebook.Item.TAPE_PATTERNS) and strip thickness in page units. */
+    void setTape(int color, String pattern, float thick, boolean freeform) {
+        h.post(() -> { tapeColor = color; tapePattern = pattern; tapeThick = thick; tapeFree = freeform; });
+    }
+
+    /** Tape on the current page: 0 = cover all, 1 = reveal all, 2 = remove all (undoable). */
+    void tapeAll(int op) {
+        h.post(() -> {
+            if (book == null) return;
+            Notebook.Page p = book.pages.get(currentPage());
+            Object[] before = pageState(p);
+            boolean any = false;
+            for (int i = p.items.size() - 1; i >= 0; i--) {
+                Notebook.Item it = p.items.get(i);
+                if (it.type != Notebook.Item.TAPE) continue;
+                any = true;
+                if (op == 2) p.items.remove(i);
+                else p.items.set(i, it.withRevealed(op == 1));
+            }
+            if (!any) { toast("No tape on this page"); return; }
+            if (op == 2) push(new PageEdit(p, before, pageState(p)));
+            needCache = true;
+            wantFront = true;
+            requestFrame();
+            docChanged();
         });
     }
 
@@ -448,7 +485,7 @@ final class Engine implements Choreographer.FrameCallback {
             ArrayList<Stroke> ns = new ArrayList<>();
             ArrayList<Notebook.Item> ni = new ArrayList<>();
             for (Stroke s : selStrokes) ns.add(s.tool == Stroke.HL ? s : s.withColor(color));
-            for (Notebook.Item it : selItems) ni.add(it.type == Notebook.Item.TEXT ? it.withColor(color) : it);
+            for (Notebook.Item it : selItems) ni.add(it.type == Notebook.Item.TEXT || it.type == Notebook.Item.TAPE ? it.withColor(color) : it);
             replaceSelection(ns, ni, true);
         });
     }
@@ -752,8 +789,8 @@ final class Engine implements Choreographer.FrameCallback {
         frameNo++;
         if (flinging) stepFling(frameTimeNanos);
         if (needRebuild) rebuild();
-        boolean laser = laserActive();
-        if (gesturing || flinging || dragging() || laser) {
+        boolean laser = laserActive(), taping = gest == G_TAPE;
+        if (gesturing || flinging || dragging() || laser || taping) {
             if (front) gl.requestFront(false);
             wantFront = false;
             gl.setView(ox, oy, z);
@@ -761,6 +798,7 @@ final class Engine implements Choreographer.FrameCallback {
             gl.noScissor();
             drawScene();
             if (laser) drawLaser();
+            if (taping) drawTapeDraft();
             gl.swap();
             setFront(gl.isFront(), dragging() ? "moving selection" : flinging ? "fling" : "pan/zoom");
             checkPage();
@@ -775,10 +813,50 @@ final class Engine implements Choreographer.FrameCallback {
 
     // ---- laser pointer: a glowing trail that fades; never saved --------------------------------
 
-    private static final long LASER_TRAIL = 520, LASER_TIP = 350;
-    private final ArrayList<float[]> laserPts = new ArrayList<>(); // doc x, doc y, time (ms)
-    private boolean laserDown;
+    static final int LASER_TRAIL_MODE = 0, LASER_DOT = 1, LASER_INK = 2;
+    private static final long LASER_TIP = 350, INK_FADE = 380;
+    private int laserColor = 0xff3b30, laserMode = LASER_TRAIL_MODE;
+    private long laserLen = 520;       // trail: how long a point stays; vanishing ink: wait after the last lift
+    private float laserSize = 1f;
+    private boolean laserHover;
+    private final ArrayList<float[]> laserPts = new ArrayList<>(); // doc x, doc y, time (ms); x = NaN breaks the line
+    private boolean laserDown, hovering;
+    private float[] hoverPt;
     private long laserUpAt;
+
+    /** colour (rgb), style, trail length / ink wait in ms, size factor, follow the hovering pen. */
+    void setLaser(int rgb, int mode, int lenMs, float size, boolean hover) {
+        h.post(() -> {
+            laserColor = rgb & 0xffffff;
+            laserMode = mode;
+            laserLen = lenMs;
+            laserSize = size;
+            laserHover = hover;
+            laserPts.clear();
+        });
+    }
+
+    /** Pen hovering over the page (x,y in view px); exit = it moved away. */
+    void hoverAt(float x, float y, boolean exit) {
+        penNear = SystemClock.uptimeMillis();
+        h.post(() -> {
+            if (!laserHover || tool != TOOL_LASER || gest == G_LASER || gl == null || book == null) return;
+            if (exit) {
+                if (hovering) { hovering = false; laserUpAt = SystemClock.uptimeMillis(); laserBreak(); requestFrame(); }
+                return;
+            }
+            hovering = true;
+            float[] pt = {ox + x / z, oy + y / z, SystemClock.uptimeMillis()};
+            if (laserMode == LASER_TRAIL_MODE) laserPts.add(pt); else hoverPt = pt; // dot / vanishing ink: hover only points
+
+            requestFrame();
+        });
+    }
+
+    private void laserBreak() {
+        if (!laserPts.isEmpty() && !Float.isNaN(laserPts.get(laserPts.size() - 1)[0]))
+            laserPts.add(new float[]{Float.NaN, Float.NaN, SystemClock.uptimeMillis()});
+    }
 
     private void laserAdd(MotionEvent ev) {
         int hs = ev.getHistorySize();
@@ -789,38 +867,214 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private boolean laserActive() {
-        return laserDown || !laserPts.isEmpty() || SystemClock.uptimeMillis() - laserUpAt < LASER_TIP;
+        if (hovering && SystemClock.uptimeMillis() - penNear > 400) { hovering = false; laserUpAt = penNear; } // no hover-exit came
+        if (!laserDown && !hovering && hoverPt != null && SystemClock.uptimeMillis() - laserUpAt >= LASER_TIP) hoverPt = null;
+        return laserDown || hovering || !laserPts.isEmpty() || SystemClock.uptimeMillis() - laserUpAt < LASER_TIP;
     }
 
     private void drawLaser() {
         long now = SystemClock.uptimeMillis();
-        while (laserPts.size() > 1 && now - laserPts.get(0)[2] > LASER_TRAIL) laserPts.remove(0);
-        if (!laserDown && laserPts.size() == 1 && now - laserPts.get(0)[2] > LASER_TRAIL) laserPts.clear();
-        float tipA = laserDown ? 1f : Math.max(0f, 1f - (now - laserUpAt) / (float) LASER_TIP);
+        boolean live = laserDown || hovering;
+        float inkA = 1f; // vanishing ink: everything fades together once the pen has rested long enough
+        if (laserMode == LASER_INK) {
+            if (!live && now - laserUpAt > laserLen) {
+                inkA = Math.max(0f, 1f - (now - laserUpAt - laserLen) / (float) INK_FADE);
+                if (inkA <= 0f) laserPts.clear();
+            }
+        } else {
+            long keep = laserMode == LASER_DOT ? 0 : laserLen;
+            while (laserPts.size() > 1 && now - laserPts.get(0)[2] > keep) laserPts.remove(0);
+            if (!live && laserPts.size() == 1 && now - laserPts.get(0)[2] > Math.max(keep, LASER_TIP)) laserPts.clear();
+        }
+        while (!laserPts.isEmpty() && Float.isNaN(laserPts.get(laserPts.size() - 1)[0]) && !live && laserMode != LASER_INK)
+            laserPts.remove(laserPts.size() - 1);
+        float tipA = live ? 1f : Math.max(0f, 1f - (now - laserUpAt) / (float) LASER_TIP);
         SegBuf b = gl.laser;
         b.clear();
         int n = laserPts.size();
-        float px = 1f / z;
-        // three passes: soft glow, red core, hot white centre
-        float[][] pass = {{dp(9), 0.22f}, {dp(2.6f), 1f}, {dp(1.1f), 0.9f}};
-        int[] col = {0xff3b30, 0xff3b30, 0xffffff};
+        float px = laserSize / z;
+        // three passes: soft glow, coloured core, hot white centre
+        float[][] pass = laserMode == LASER_INK ? new float[][]{{dp(6), 0.25f}, {dp(2.2f), 1f}, {dp(0.8f), 0.85f}}
+                : new float[][]{{dp(9), 0.22f}, {dp(2.6f), 1f}, {dp(1.1f), 0.9f}};
+        int[] col = {laserColor, laserColor, 0xffffff};
+        float[] last = null;
+        for (int i = n - 1; i >= 0; i--) if (!Float.isNaN(laserPts.get(i)[0])) { last = laserPts.get(i); break; }
+        boolean tipOnLine = n > 0 && !Float.isNaN(laserPts.get(n - 1)[0]);
+        if (hovering && hoverPt != null && laserMode != LASER_TRAIL_MODE) { last = hoverPt; tipOnLine = true; }
+        else if (!hovering && hoverPt != null && !laserDown && laserMode != LASER_TRAIL_MODE && now - laserUpAt < LASER_TIP && (n == 0 || laserPts.get(n - 1)[2] < hoverPt[2])) { last = hoverPt; tipOnLine = true; }
         for (int k = 0; k < 3; k++) {
             float r = pass[k][0] * px, a0 = pass[k][1];
-            for (int i = 1; i < n; i++) {
+            if (laserMode != LASER_DOT) for (int i = 1; i < n; i++) {
                 float[] p0 = laserPts.get(i - 1), p1 = laserPts.get(i);
-                float a = a0 * Math.max(0f, 1f - (now - p1[2]) / (float) LASER_TRAIL);
+                if (Float.isNaN(p0[0]) || Float.isNaN(p1[0])) continue;
+                float a = laserMode == LASER_INK ? a0 * inkA : a0 * Math.max(0f, 1f - (now - p1[2]) / (float) laserLen);
                 if (a <= 0.01f) continue;
-                b.put(p0[0], p0[1], p1[0], p1[1], r * 0.8f, r, ((int) (a * 255) << 24) | col[k]);
+                b.put(p0[0], p0[1], p1[0], p1[1], laserMode == LASER_INK ? r : r * 0.8f, r, ((int) (a * 255) << 24) | col[k]);
             }
-            if (n > 0 && tipA > 0) {
-                float[] t = laserPts.get(n - 1);
+            if (last != null && tipOnLine && tipA > 0) {
                 float tr = r * (k == 0 ? 1.6f : 1.5f);
-                b.put(t[0], t[1], t[0], t[1], tr, tr, ((int) (a0 * tipA * 255) << 24) | col[k]);
+                b.put(last[0], last[1], last[0], last[1], tr, tr, ((int) (a0 * tipA * 255) << 24) | col[k]);
             }
         }
         gl.drawSegs(b, 0, b.count, 0);
         if (laserActive()) requestFrame();
         else { wantFront = true; needPresent = true; requestFrame(); } // back to front-buffer inking
+    }
+
+    // ---- tape: strips that hide what's under them until tapped -----------------------------------
+
+    /** Straight tape's far end: snaps level / upright when the pen is within ~8° of it. */
+    private float[] straightEnd() {
+        float dx = tx1 - tx0, dy = ty1 - ty0;
+        double ang = Math.toDegrees(Math.atan2(dy, dx)), m = ((ang % 90) + 90) % 90;
+        if (m < 8 || m > 82) {
+            if (Math.abs(dx) >= Math.abs(dy)) return new float[]{tx1, ty0};
+            return new float[]{tx0, ty1};
+        }
+        return new float[]{tx1, ty1};
+    }
+
+    private void drawTapeDraft() {
+        SegBuf b = gl.laser;
+        b.clear();
+        float r = tapeThick / 2;
+        int col = 0xff000000 | (tapeColor & 0xffffff);
+        if (!tapeFree) {
+            float[] e = straightEnd();
+            b.put(tx0, ty0, e[0], e[1], r, r, col);
+        } else {
+            if (tn == 1) b.put(tpts[0], tpts[1], tpts[0], tpts[1], r, r, col);
+            for (int i = 1; i < tn; i++) b.put(tpts[2 * i - 2], tpts[2 * i - 1], tpts[2 * i], tpts[2 * i + 1], r, r, col);
+            if (tn > 0) b.put(tpts[2 * tn - 2], tpts[2 * tn - 1], tx1, ty1, r, r, col);
+        }
+        gl.drawSegs(b, 0, b.count, 0);
+    }
+
+    private void tapeAdd(float x, float y, boolean force) {
+        if (tn > 0 && !force && Math.hypot(x - tpts[2 * tn - 2], y - tpts[2 * tn - 1]) < Math.max(2.5f, tapeThick * 0.12f)) return;
+        if (2 * tn + 2 > tpts.length) tpts = java.util.Arrays.copyOf(tpts, tpts.length * 2);
+        tpts[2 * tn] = x;
+        tpts[2 * tn + 1] = y;
+        tn++;
+    }
+
+    private void tapeBegin(MotionEvent ev) {
+        tx0 = tx1 = ox + ev.getX() / z;
+        ty0 = ty1 = oy + ev.getY() / z;
+        tn = 0;
+        tapeAdd(tx0, ty0, true);
+        tapePage = pageAt(ty0);
+        requestFrame();
+    }
+
+    private void tapeEvent(MotionEvent ev, int a) {
+        int hs = ev.getHistorySize();
+        for (int i = 0; i < hs; i++) tapeAdd(ox + ev.getHistoricalX(i) / z, oy + ev.getHistoricalY(i) / z, false);
+        tx1 = ox + ev.getX() / z;
+        ty1 = oy + ev.getY() / z;
+        tapeAdd(tx1, ty1, false);
+        if (a == MotionEvent.ACTION_CANCEL) { gest = G_NONE; endTapeFrame(); return; }
+        if (a != MotionEvent.ACTION_UP) { requestFrame(); return; }
+        gest = G_NONE;
+        float far = 0; // how far the pen got from where it started
+        for (int i = 0; i < tn; i++) far = Math.max(far, (float) Math.hypot(tpts[2 * i] - tx0, tpts[2 * i + 1] - ty0));
+        if (far * z < dp(8)) { // a tap: peel / re-cover the tape under the pen
+            if (!toggleTapeAt(tx0, ty0, false)) toast("Drag across what you want to cover");
+            endTapeFrame();
+            return;
+        }
+        float top = tops[tapePage];
+        float[] pts;
+        if (!tapeFree) {
+            float[] e = straightEnd();
+            pts = new float[]{tx0, ty0 - top, e[0], e[1] - top};
+        } else {
+            if (Math.hypot(tx1 - tpts[2 * tn - 2], ty1 - tpts[2 * tn - 1]) > 0.5f) tapeAdd(tx1, ty1, true);
+            pts = simplify(tpts, tn, 1.2f);
+            for (int i = 1; i < pts.length; i += 2) pts[i] -= top;
+        }
+        float len = 0;
+        for (int i = 2; i + 1 < pts.length; i += 2) len += (float) Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+        if (len < tapeThick * 0.8f) { endTapeFrame(); return; } // too short to be a strip
+        Notebook.Page p = book.pages.get(tapePage);
+        Object[] before = pageState(p);
+        p.items.add(Notebook.Item.tape(pts, tapeThick, tapePattern, tapeColor));
+        push(new PageEdit(p, before, pageState(p)));
+        if (tapePage == book.pages.size() - 1) ensureTrailingPage();
+        docChanged();
+        notifyState();
+        endTapeFrame();
+    }
+
+    /** Ramer–Douglas–Peucker: drops points that lie within tol of the line through their neighbours. */
+    private static float[] simplify(float[] p, int n, float tol) {
+        if (n <= 2) return java.util.Arrays.copyOf(p, 2 * n);
+        boolean[] keep = new boolean[n];
+        keep[0] = keep[n - 1] = true;
+        java.util.ArrayDeque<int[]> st = new java.util.ArrayDeque<>();
+        st.push(new int[]{0, n - 1});
+        while (!st.isEmpty()) {
+            int[] r = st.pop();
+            float ax = p[2 * r[0]], ay = p[2 * r[0] + 1], bx = p[2 * r[1]], by = p[2 * r[1] + 1];
+            float dx = bx - ax, dy = by - ay, l = (float) Math.hypot(dx, dy);
+            int best = -1;
+            float bd = tol;
+            for (int i = r[0] + 1; i < r[1]; i++) {
+                float d = l < 1e-4f ? (float) Math.hypot(p[2 * i] - ax, p[2 * i + 1] - ay)
+                        : Math.abs((p[2 * i] - ax) * dy - (p[2 * i + 1] - ay) * dx) / l;
+                if (d > bd) { bd = d; best = i; }
+            }
+            if (best >= 0) {
+                keep[best] = true;
+                st.push(new int[]{r[0], best});
+                st.push(new int[]{best, r[1]});
+            }
+        }
+        int m = 0;
+        for (boolean k : keep) if (k) m++;
+        float[] out = new float[2 * m];
+        int j = 0;
+        for (int i = 0; i < n; i++) if (keep[i]) { out[j++] = p[2 * i]; out[j++] = p[2 * i + 1]; }
+        return out;
+    }
+
+    private void endTapeFrame() {
+        gl.laser.clear();
+        needCache = true;
+        wantFront = true;
+        needPresent = true;
+        requestFrame();
+        penNear = SystemClock.uptimeMillis();
+    }
+
+    /** Topmost tape at doc point x,y: {page index, item index}, or null. */
+    private int[] tapeAt(float x, float y) {
+        if (book == null || tops.length == 0) return null;
+        float pad = dp(3) / z;
+        int p0 = Math.max(0, pageAt(y) - 1), p1 = Math.min(book.pages.size() - 1, pageAt(y) + 1);
+        for (int pi = p1; pi >= p0; pi--) {
+            ArrayList<Notebook.Item> items = book.pages.get(pi).items;
+            for (int i = items.size() - 1; i >= 0; i--) {
+                Notebook.Item it = items.get(i);
+                if (it.type == Notebook.Item.TAPE && it.contains(x, y - tops[pi], pad)) return new int[]{pi, i};
+            }
+        }
+        return null;
+    }
+
+    /** Flips the tape at x,y between covering and peeled back (not an undo step: it's how you study). */
+    private boolean toggleTapeAt(float x, float y, boolean onlyCovered) {
+        int[] hit = tapeAt(x, y);
+        if (hit == null) return false;
+        ArrayList<Notebook.Item> items = book.pages.get(hit[0]).items;
+        Notebook.Item it = items.get(hit[1]);
+        if (onlyCovered && it.revealed()) return false;
+        items.set(hit[1], it.withRevealed(!it.revealed()));
+        needCache = true;
+        wantFront = true;
+        requestFrame();
+        docChanged();
+        return true;
     }
 
     private void drawScene() {
@@ -848,7 +1102,7 @@ final class Engine implements Choreographer.FrameCallback {
                 if (t != null) gl.tex(t.id, 0, tops[i], PW, p.h, 1);
             }
             for (Notebook.Item it : p.items) {
-                if (it == editing || (i == selPage && selItems.contains(it))) continue;
+                if (it == editing || it.type == Notebook.Item.TAPE || (i == selPage && selItems.contains(it))) continue;
                 drawItem(it, tops[i]);
             }
         }
@@ -860,18 +1114,36 @@ final class Engine implements Choreographer.FrameCallback {
         }
         gl.drawSegs(gl.hl, 0, gl.hl.count, 1);
         gl.drawSegs(gl.pen, 0, gl.pen.count, 0);
+        // tape goes over the ink it hides
+        for (int i = first; i <= last; i++)
+            for (Notebook.Item it : book.pages.get(i).items)
+                if (it.type == Notebook.Item.TAPE && !(i == selPage && selItems.contains(it))) drawItem(it, tops[i]);
         if (hasSel()) {
             // selection buffers are page-local; the transform adds the page top
             gl.setXform(spx, spy, ss, stx, sty + tops[selPage]);
-            for (Notebook.Item it : selItems) drawItem(it, 0);
+            for (Notebook.Item it : selItems) if (it.type != Notebook.Item.TAPE) drawItem(it, 0);
             gl.drawSegs(gl.selHl, 0, gl.selHl.count, 1);
             gl.drawSegs(gl.selPen, 0, gl.selPen.count, 0);
+            for (Notebook.Item it : selItems) if (it.type == Notebook.Item.TAPE) drawItem(it, 0);
             gl.resetXform();
         }
     }
 
     private void drawItem(Notebook.Item it, float top) {
         Tex t;
+        if (it.type == Notebook.Item.TAPE) {
+            final int lvl = z * 1.3f <= 2 ? 2 : z * 1.3f <= 4 ? 4 : 6;
+            final Notebook.Item item = it;
+            // keyed by look, not identity: covering / revealing reuses the same texture
+            String base = "tape:" + Integer.toHexString(it.color) + ":" + it.pattern() + ":" + java.util.Arrays.hashCode(it.pts) + ":" + it.size + ":";
+            t = tex(base + lvl, () -> Render.tapeBitmap(item, lvl));
+            if (t == null) for (int l : new int[]{2, 4, 6}) {
+                Tex o = texs.get(base + l);
+                if (o != null) { t = o; break; }
+            }
+            if (t != null) gl.tex(t.id, it.x, it.y + top, it.w, it.h, it.revealed() ? Render.TAPE_OPEN_ALPHA : 1f);
+            return;
+        }
         if (it.type == Notebook.Item.IMAGE) {
             final String name = it.text;
             t = tex("img:" + name, () -> Render.image(dir, name, 2048));
@@ -1106,7 +1378,13 @@ final class Engine implements Choreographer.FrameCallback {
                 } else if (tool == TOOL_LASER) {
                     gest = G_LASER;
                     laserDown = true;
+                    hovering = false;
+                    hoverPt = null;
+                    if (laserMode == LASER_INK || laserMode == LASER_DOT) laserBreak();
                     laserAdd(ev);
+                } else if (tool == TOOL_TAPE) {
+                    gest = G_TAPE;
+                    tapeBegin(ev);
                 } else if (tool == TOOL_LASSO) {
                     clearSelection();
                     gest = G_LASSO;
@@ -1152,11 +1430,15 @@ final class Engine implements Choreographer.FrameCallback {
                 if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
                     laserDown = false;
                     laserUpAt = SystemClock.uptimeMillis();
+                    if (laserMode == LASER_INK) laserBreak();
                     gest = G_NONE;
                 }
                 break;
             case G_LASSO:
                 lassoEvent(ev, a);
+                break;
+            case G_TAPE:
+                tapeEvent(ev, a);
                 break;
             case G_SEL:
                 selEvent(ev, a);
@@ -1309,8 +1591,24 @@ final class Engine implements Choreographer.FrameCallback {
                 stN, live.n, dur, stN * 1000f / dur, stN > 1 ? stStep / (stN - 1) : 0, stPmin, stPsum / Math.max(1, stN), stPmax,
                 z / fitZ * 100, stFront, stSwap, snapped ? " (shape)" : ""));
         Notebook.Page p = book.pages.get(livePage);
+        if (!snapped && dur < 260 && live.n > 0 && live.r - live.l < live.width + 6 && live.b - live.t < live.width + 6
+                && toggleTapeAt(live.x(0), live.y(0) + liveTop, true)) {
+            buf().truncate(liveFirst); // the tap only peeled the tape back; no dot
+            live = null;
+            overlay = false;
+            gest = G_NONE;
+            needCache = true;
+            requestFrame();
+            return;
+        }
         Object[] before = pageState(p);
         p.strokes.add(live);
+        for (Notebook.Item it : p.items) // ink written over covering tape goes under it
+            if (it.type == Notebook.Item.TAPE && !it.revealed() && RectF.intersects(new RectF(it.x, it.y, it.x + it.w, it.y + it.h), new RectF(live.l, live.t, live.r, live.b))) {
+                needCache = true;
+                requestFrame();
+                break;
+            }
         push(new PageEdit(p, before, pageState(p)));
         if (livePage == book.pages.size() - 1 && ensureTrailingPage()) {
             needCache = true;
@@ -1546,6 +1844,26 @@ final class Engine implements Choreographer.FrameCallback {
                     if (!eraseBefore.containsKey(page)) eraseBefore.put(page, pageState(page));
                     list.remove(i);
                     any = true;
+                }
+            }
+        }
+        for (int pi = p0; pi <= p1; pi++) { // tape comes off whole
+            float top = tops[pi];
+            Notebook.Page page = book.pages.get(pi);
+            for (int i = page.items.size() - 1; i >= 0; i--) {
+                Notebook.Item it = page.items.get(i);
+                if (it.type != Notebook.Item.TAPE) continue;
+                float len = (float) Math.hypot(x1 - x0, y1 - y0);
+                int steps = Math.max(1, (int) Math.ceil(len / Math.max(1f, er / 2)));
+                for (int k = 0; k <= steps; k++) {
+                    float t = k / (float) steps;
+                    if (it.contains(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t - top, er * 0.6f)) {
+                        if (!eraseBefore.containsKey(page)) eraseBefore.put(page, pageState(page));
+                        page.items.remove(i);
+                        any = true;
+                        needCache = true;
+                        break;
+                    }
                 }
             }
         }
@@ -1878,7 +2196,9 @@ final class Engine implements Choreographer.FrameCallback {
                 if (!moved && ev.getEventTime() - downT < 300) {
                     if (maxPtr == 2) doUndo(true);
                     else if (maxPtr == 3) doRedo(true);
-                    else if (maxPtr == 1) {
+                    else if (maxPtr == 1 && toggleTapeAt(ox + ev.getX() / z, oy + ev.getY() / z, false)) {
+                        lastTapT = 0; // a tap on tape peels it; it doesn't start a double-tap
+                    } else if (maxPtr == 1) {
                         float x = ev.getX(), y = ev.getY();
                         if (ev.getEventTime() - lastTapT < 330 && Math.hypot(x - lastTapX, y - lastTapY) < dp(40)) {
                             lastTapT = 0;

@@ -55,6 +55,8 @@ public final class LibraryActivity extends Activity {
     private SharedPreferences prefs;
     private Ui.Grid grid;
     private TextView subtitle, pageTitle, empty;
+    private LinearLayout crumbs;
+    private Ui.Grid folderGrid;
     private View sidePanel, sideRule, navButton, searchBox, newCompact;
     private LinearLayout headerRow, searchRow;
     private static final String RECENT = "⏱";
@@ -146,6 +148,12 @@ public final class LibraryActivity extends Activity {
         subtitle = Ui.text(this, "", 12.5f, Ui.color(this, R.color.on_surface_variant), null);
         LinearLayout.LayoutParams stl = new LinearLayout.LayoutParams(-2, -2);
         stl.topMargin = Ui.dp(this, 3);
+        crumbs = new LinearLayout(this);
+        crumbs.setGravity(Gravity.CENTER_VERTICAL);
+        crumbs.setVisibility(View.GONE);
+        LinearLayout.LayoutParams cbl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 24));
+        cbl.bottomMargin = Ui.dp(this, 2);
+        titles.addView(crumbs, cbl);
         titles.addView(pageTitle);
         titles.addView(subtitle, stl);
         header.addView(titles, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -184,6 +192,10 @@ public final class LibraryActivity extends Activity {
         srl.topMargin = Ui.dp(this, 14);
         col.addView(searchRow, srl);
         searchRow.setVisibility(View.GONE);
+        folderGrid = new Ui.Grid(this, 190, 12);
+        LinearLayout.LayoutParams fgl = new LinearLayout.LayoutParams(-1, -2);
+        fgl.topMargin = Ui.dp(this, 24);
+        col.addView(folderGrid, fgl);
         grid = new Ui.Grid(this, 118, 18);
         LinearLayout.LayoutParams gl = new LinearLayout.LayoutParams(-1, -2);
         gl.topMargin = Ui.dp(this, 26);
@@ -269,12 +281,63 @@ public final class LibraryActivity extends Activity {
 
     // ---- listing -----------------------------------------------------------------------------
 
+    // Folders are paths: "School/Physics" is the folder Physics inside School. A notebook's meta 'folder' holds
+    // its folder's path; empty folders live in prefs 'folders'. Every ancestor of a path counts as a folder too.
+
+    /** Every folder, parents before their children, siblings alphabetical. */
+    private ArrayList<String> folders() {
+        TreeSet<String> set = new TreeSet<>(LibraryActivity::comparePaths);
+        ArrayList<String> raw = new ArrayList<>(prefs.getStringSet("folders", new HashSet<>()));
+        for (Notebook.Entry e : all) if (!e.folder.isEmpty()) raw.add(e.folder);
+        for (String f : raw) {
+            String[] parts = f.split("/");
+            StringBuilder b = new StringBuilder();
+            for (String part : parts) {
+                if (part.trim().isEmpty()) continue;
+                if (b.length() > 0) b.append('/');
+                b.append(part.trim());
+                set.add(b.toString());
+            }
+        }
+        return new ArrayList<>(set);
+    }
+
+    /** Orders paths depth-first: a folder, then everything inside it, then its next sibling. */
+    private static int comparePaths(String a, String b) {
+        String[] x = a.split("/"), y = b.split("/");
+        for (int i = 0; i < Math.min(x.length, y.length); i++) {
+            int c = x[i].compareToIgnoreCase(y[i]);
+            if (c == 0) c = x[i].compareTo(y[i]);
+            if (c != 0) return c;
+        }
+        return Integer.compare(x.length, y.length);
+    }
+
+    static String leaf(String path) { return path.substring(path.lastIndexOf('/') + 1); }
+
+    static String parentOf(String path) { int i = path.lastIndexOf('/'); return i < 0 ? "" : path.substring(0, i); }
+
+    static int depth(String path) { int d = 0; for (char ch : path.toCharArray()) if (ch == '/') d++; return d; }
+
+    static boolean within(String path, String folder) { return path.equals(folder) || path.startsWith(folder + "/"); }
+
+    /** "School/Physics" → "School › Physics" */
+    static String pretty(String path) { return path.replace("/", " › "); }
+
+    private boolean isFolderFilter() { return !filter.isEmpty() && !filter.equals(FAV) && !filter.equals(RECENT); }
+
+    private ArrayList<String> childrenOf(ArrayList<String> fl, String parent) {
+        ArrayList<String> out = new ArrayList<>();
+        for (String f : fl) if (parentOf(f).equals(parent)) out.add(f);
+        return out;
+    }
+
+    private HashSet<String> openFolders() { return new HashSet<>(prefs.getStringSet("openFolders", new HashSet<>())); }
+
     private void refresh() {
         all = Notebook.list(this);
-        TreeSet<String> folders = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        for (Notebook.Entry e : all) if (!e.folder.isEmpty()) folders.add(e.folder);
-        folders.addAll(prefs.getStringSet("folders", new HashSet<>()));
-        if (!filter.isEmpty() && !filter.equals(FAV) && !filter.equals(RECENT) && !folders.contains(filter)) filter = "";
+        ArrayList<String> folders = folders();
+        if (isFolderFilter() && !folders.contains(filter)) filter = "";
         int favs = 0, recent = 0;
         long week = System.currentTimeMillis() - 7L * 24 * 3600_000;
         for (Notebook.Entry e : all) { if (e.favorite) favs++; if (e.modified > week) recent++; }
@@ -285,11 +348,16 @@ public final class LibraryActivity extends Activity {
         TextView sect = Ui.text(this, "Folders", 12, Ui.color(this, R.color.on_surface_variant), Ui.medium());
         sect.setPadding(Ui.dp(this, 12), Ui.dp(this, 20), 0, Ui.dp(this, 6));
         chips.addView(sect);
+        HashSet<String> open = openFolders();
+        if (isFolderFilter()) for (String a = parentOf(filter); !a.isEmpty(); a = parentOf(a)) open.add(a); // show where you are
         for (String f : folders) {
+            boolean visible = true;
+            for (String a = parentOf(f); !a.isEmpty(); a = parentOf(a)) if (!open.contains(a)) { visible = false; break; }
+            if (!visible) continue;
             int n = 0;
-            for (Notebook.Entry e : all) if (f.equals(e.folder)) n++;
-            View c = navItem(R.drawable.ic_folder, f, n, filter.equals(f), v -> setFilter(f));
-            c.setOnLongClickListener(v -> { folderMenu(v, f); return true; });
+            for (Notebook.Entry e : all) if (within(e.folder, f)) n++;
+            boolean kids = !childrenOf(folders, f).isEmpty();
+            View c = folderNavItem(f, n, kids, open.contains(f), filter.equals(f));
             chips.addView(c);
         }
         View nf = navItem(R.drawable.ic_plus, "New folder", -1, false, v -> newFolder(null));
@@ -302,6 +370,31 @@ public final class LibraryActivity extends Activity {
         filter = f;
         prefs.edit().putString("filter", f).apply();
         refresh();
+    }
+
+    /** Sidebar folder row: indented by depth, with a chevron that opens / closes its subfolders. */
+    private View folderNavItem(String f, int count, boolean kids, boolean open, boolean sel) {
+        LinearLayout row = (LinearLayout) navItem(R.drawable.ic_folder, leaf(f), count, sel, v -> setFilter(f));
+        row.setOnLongClickListener(v -> { folderMenu(v, f); return true; });
+        int d = depth(f);
+        ImageView chev = new ImageView(this);
+        chev.setImageResource(R.drawable.ic_chevron);
+        chev.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.on_surface_variant)));
+        chev.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        chev.setPadding(Ui.dp(this, 3), Ui.dp(this, 3), Ui.dp(this, 3), Ui.dp(this, 3));
+        chev.setRotation(open ? 90 : 0);
+        chev.setVisibility(kids ? View.VISIBLE : View.INVISIBLE);
+        chev.setContentDescription(open ? "Hide subfolders" : "Show subfolders");
+        chev.setBackground(Ui.ripple(this, null, Ui.dp(this, 10)));
+        if (kids) chev.setOnClickListener(v -> {
+            HashSet<String> o = openFolders();
+            if (!o.remove(f)) o.add(f);
+            prefs.edit().putStringSet("openFolders", o).apply();
+            refresh();
+        });
+        row.addView(chev, 0, new LinearLayout.LayoutParams(Ui.dp(this, 20), Ui.dp(this, 20)));
+        row.setPadding(Ui.dp(this, 4 + 14 * d), 0, Ui.dp(this, 12), 0);
+        return row;
     }
 
     /** Sidebar row: icon, label, count; the selected row is a raised surface. */
@@ -337,11 +430,8 @@ public final class LibraryActivity extends Activity {
         m.add(0, 1, 0, "All notes");
         m.add(0, 2, 1, "Recent");
         m.add(0, 3, 2, "Favourites");
-        TreeSet<String> folders = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        for (Notebook.Entry e : all) if (!e.folder.isEmpty()) folders.add(e.folder);
-        folders.addAll(prefs.getStringSet("folders", new HashSet<>()));
-        ArrayList<String> fl = new ArrayList<>(folders);
-        for (int i = 0; i < fl.size(); i++) m.add(1, 100 + i, 10 + i, "📁  " + fl.get(i));
+        ArrayList<String> fl = folders();
+        for (int i = 0; i < fl.size(); i++) m.add(1, 100 + i, 10 + i, "\u2003".repeat(depth(fl.get(i))) + "📁  " + leaf(fl.get(i)));
         m.add(2, 4, 100, "New folder…");
         m.add(2, 5, 101, "Settings & backup…");
         pm.setOnMenuItemClickListener(it -> {
@@ -380,7 +470,8 @@ public final class LibraryActivity extends Activity {
         for (Notebook.Entry e : all) {
             if (filter.equals(FAV) && !e.favorite) continue;
             if (filter.equals(RECENT) && e.modified < System.currentTimeMillis() - 7L * 24 * 3600_000) continue;
-            if (!filter.isEmpty() && !filter.equals(FAV) && !filter.equals(RECENT) && !filter.equals(e.folder)) continue;
+            // in a folder: its own notebooks; while searching, everything inside it (subfolders too)
+            if (isFolderFilter() && !(query.isEmpty() ? filter.equals(e.folder) : within(e.folder, filter))) continue;
             if (!query.isEmpty() && !e.title.toLowerCase().contains(query) && !e.folder.toLowerCase().contains(query)) {
                 Handwriting.Hit hit = Handwriting.enabled(this) ? Handwriting.find(e.dir, query) : null;
                 if (hit == null) continue;
@@ -390,12 +481,78 @@ public final class LibraryActivity extends Activity {
         }
         if (sort == 1) shown.sort(Comparator.comparing((Notebook.Entry e) -> e.title.toLowerCase()));
         else if (sort == 2) shown.sort(Comparator.comparingLong((Notebook.Entry e) -> e.created).reversed());
-        pageTitle.setText(filter.isEmpty() ? "All notes" : filter.equals(FAV) ? "Favourites" : filter.equals(RECENT) ? "Recent" : filter);
-        subtitle.setText(shown.size() + (shown.size() == 1 ? " notebook" : " notebooks") + (filter.equals(RECENT) ? " · last 7 days" : ""));
+        pageTitle.setText(filter.isEmpty() ? "All notes" : filter.equals(FAV) ? "Favourites" : filter.equals(RECENT) ? "Recent" : leaf(filter));
+        ArrayList<String> subs = isFolderFilter() && query.isEmpty() ? childrenOf(folders(), filter) : new ArrayList<>();
+        subtitle.setText((subs.isEmpty() ? "" : subs.size() + (subs.size() == 1 ? " folder · " : " folders · "))
+                + shown.size() + (shown.size() == 1 ? " notebook" : " notebooks") + (filter.equals(RECENT) ? " · last 7 days" : ""));
+        renderCrumbs();
+        folderGrid.removeAllViews();
+        for (String f : subs) folderGrid.addView(folderCard(f));
+        folderGrid.setVisibility(subs.isEmpty() ? View.GONE : View.VISIBLE);
+        ((LinearLayout.LayoutParams) grid.getLayoutParams()).topMargin = Ui.dp(this, subs.isEmpty() ? 26 : 22);
         empty.setText(all.isEmpty() ? "No notebooks yet. Tap New to start writing."
                 : !query.isEmpty() ? "Nothing matches “" + query + "”" : filter.equals(FAV) ? "Long-press a notebook to add it to favourites" : "Nothing here yet");
-        empty.setVisibility(shown.isEmpty() ? View.VISIBLE : View.GONE);
+        empty.setVisibility(shown.isEmpty() && subs.isEmpty() ? View.VISIBLE : View.GONE);
         for (Notebook.Entry e : shown) grid.addView(card(e));
+    }
+
+    /** "All notes › School ›" above a folder's title; each part opens that level. */
+    private void renderCrumbs() {
+        crumbs.removeAllViews();
+        if (!isFolderFilter()) { crumbs.setVisibility(View.GONE); return; }
+        crumbs.setVisibility(View.VISIBLE);
+        ArrayList<String> levels = new ArrayList<>();
+        levels.add("");
+        for (String a = parentOf(filter); !a.isEmpty(); a = parentOf(a)) levels.add(1, a);
+        for (String lv : levels) {
+            TextView t = Ui.text(this, lv.isEmpty() ? "All notes" : leaf(lv), 13f, Ui.color(this, R.color.accent), Ui.medium());
+            t.setGravity(Gravity.CENTER_VERTICAL);
+            t.setPadding(Ui.dp(this, 2), 0, Ui.dp(this, 2), 0);
+            t.setBackground(Ui.ripple(this, null, Ui.dp(this, 6)));
+            t.setOnClickListener(v -> setFilter(lv));
+            crumbs.addView(t, new LinearLayout.LayoutParams(-2, -1));
+            ImageView chev = new ImageView(this);
+            chev.setImageResource(R.drawable.ic_chevron);
+            chev.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.on_surface_variant)));
+            crumbs.addView(chev, new LinearLayout.LayoutParams(Ui.dp(this, 14), Ui.dp(this, 14)));
+        }
+    }
+
+    /** A subfolder tile: folder glyph, name, what's inside. Long-press for folder actions. */
+    private View folderCard(String f) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 10), 0);
+        GradientDrawable g = Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 10));
+        g.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
+        row.setBackground(Ui.ripple(this, g, Ui.dp(this, 10)));
+        ImageView iv = new ImageView(this);
+        iv.setImageResource(R.drawable.ic_folder);
+        iv.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.accent)));
+        row.addView(iv, new LinearLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24)));
+        LinearLayout txt = new LinearLayout(this);
+        txt.setOrientation(LinearLayout.VERTICAL);
+        txt.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 4), 0);
+        TextView t = Ui.text(this, leaf(f), 14.5f, Ui.color(this, R.color.on_surface), Ui.medium());
+        t.setSingleLine(true);
+        t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        txt.addView(t);
+        int nb = 0;
+        for (Notebook.Entry e : all) if (within(e.folder, f)) nb++;
+        int sub = childrenOf(folders(), f).size();
+        TextView m = Ui.text(this, (sub > 0 ? sub + (sub == 1 ? " folder · " : " folders · ") : "") + nb + (nb == 1 ? " notebook" : " notebooks"),
+                12f, Ui.color(this, R.color.on_surface_variant), null);
+        m.setSingleLine(true);
+        txt.addView(m);
+        row.addView(txt, new LinearLayout.LayoutParams(0, -2, 1f));
+        Ui.IconButton more = new Ui.IconButton(this, R.drawable.ic_more, "Folder actions");
+        more.setOnClickListener(v -> folderMenu(v, f));
+        row.addView(more, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 36)));
+        row.setOnClickListener(v -> setFilter(f));
+        row.setOnLongClickListener(v -> { folderMenu(v, f); return true; });
+        row.setLayoutParams(new android.view.ViewGroup.LayoutParams(-1, Ui.dp(this, 64)));
+        row.setMinimumHeight(Ui.dp(this, 64));
+        return row;
     }
 
     private View card(Notebook.Entry e) {
@@ -445,7 +602,7 @@ public final class LibraryActivity extends Activity {
         String when = now - e.modified < 60_000 ? "Just now"
                 : DateUtils.getRelativeTimeSpanString(e.modified, now, DateUtils.MINUTE_IN_MILLIS).toString();
         String meta = (e.canvas ? "Canvas · " : e.pages + (e.pages == 1 ? " page · " : " pages · ")) + when;
-        if (!e.folder.isEmpty() && !filter.equals(e.folder)) meta = e.folder + " · " + meta;
+        if (!e.folder.isEmpty() && !filter.equals(e.folder)) meta = (isFolderFilter() ? e.folder.substring(Math.min(e.folder.length(), filter.length() + 1)) : leaf(e.folder)) .replace("/", " › ") + " · " + meta;
         if (hit != null) meta = "p. " + (hit.page + 1) + " · " + hit.snippet; // matched in the handwriting
         TextView mt = Ui.text(this, meta, 12, Ui.color(this, R.color.on_surface_variant), null);
         mt.setSingleLine(true);
@@ -467,12 +624,10 @@ public final class LibraryActivity extends Activity {
         m.add(0, 3, 2, e.favorite ? "Remove from favourites" : "Add to favourites");
         SubMenu mv = m.addSubMenu(0, 0, 3, "Move to folder");
         mv.add(1, 10, 0, "No folder").setCheckable(true).setChecked(e.folder.isEmpty());
-        TreeSet<String> folders = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        for (Notebook.Entry x : all) if (!x.folder.isEmpty()) folders.add(x.folder);
-        folders.addAll(prefs.getStringSet("folders", new HashSet<>()));
-        ArrayList<String> fl = new ArrayList<>(folders);
-        for (int i = 0; i < fl.size(); i++) mv.add(1, 100 + i, i + 1, fl.get(i)).setCheckable(true).setChecked(fl.get(i).equals(e.folder));
-        mv.add(2, 11, fl.size() + 1, "New folder…");
+        ArrayList<String> fl = folders();
+        for (int i = 0; i < fl.size(); i++)
+            mv.add(1, 100 + i, i + 1, "\u2003".repeat(depth(fl.get(i))) + leaf(fl.get(i))).setCheckable(true).setChecked(fl.get(i).equals(e.folder));
+        mv.add(2, 11, fl.size() + 1, isFolderFilter() ? "New subfolder in " + leaf(filter) + "…" : "New folder…");
         m.add(0, 4, 4, "Duplicate");
         m.add(0, 5, 5, "Export as PDF");
         m.add(0, 6, 6, "Delete");
@@ -488,7 +643,7 @@ public final class LibraryActivity extends Activity {
                 else if (id == 3) { Notebook.setMeta(e.dir, "favorite", Boolean.toString(!e.favorite)); refresh(); }
                 else if (id == 10) { Notebook.setMeta(e.dir, "folder", ""); refresh(); }
                 else if (id >= 100) { Notebook.setMeta(e.dir, "folder", fl.get(id - 100)); refresh(); }
-                else if (id == 11) newFolder(e);
+                else if (id == 11) newFolder(isFolderFilter() ? filter : "", e);
                 else if (id == 4) duplicate(e);
                 else if (id == 5) exportPdf(e);
                 else if (id == 6) confirmDelete(e);
@@ -531,57 +686,116 @@ public final class LibraryActivity extends Activity {
         et.requestFocus();
     }
 
-    /** Creates a folder; if e is given, moves that notebook into it. */
-    private void newFolder(Notebook.Entry e) {
+    private void newFolder(Notebook.Entry e) { newFolder("", e); }
+
+    /** Creates a folder inside parent ("" = top level); if e is given, moves that notebook into it. */
+    private void newFolder(String parent, Notebook.Entry e) {
         EditText et = field("", "Folder name");
-        new AlertDialog.Builder(this).setTitle("New folder").setView(wrap(et))
+        new AlertDialog.Builder(this).setTitle(parent.isEmpty() ? "New folder" : "New subfolder in " + leaf(parent)).setView(wrap(et))
                 .setPositiveButton("Create", (d, w) -> {
-                    String s = et.getText().toString().trim().replace(FAV, "");
+                    String s = cleanName(et.getText().toString());
                     if (s.isEmpty()) return;
+                    String path = parent.isEmpty() ? s : parent + "/" + s;
                     HashSet<String> set = new HashSet<>(prefs.getStringSet("folders", new HashSet<>()));
-                    set.add(s);
-                    prefs.edit().putStringSet("folders", set).apply();
-                    try { if (e != null) Notebook.setMeta(e.dir, "folder", s); } catch (Exception ignored) {}
-                    if (e == null) filter = s;
+                    set.add(path);
+                    HashSet<String> open = openFolders();
+                    if (!parent.isEmpty()) open.add(parent);
+                    prefs.edit().putStringSet("folders", set).putStringSet("openFolders", open).apply();
+                    try { if (e != null) Notebook.setMeta(e.dir, "folder", path); } catch (Exception ignored) {}
+                    if (e == null) filter = path;
                     refresh();
                 })
                 .setNegativeButton("Cancel", null).show();
         et.requestFocus();
     }
 
+    /** Folder names can't contain the path separator or the list markers. */
+    private static String cleanName(String s) { return s.replace("/", "-").replace(FAV, "").replace(RECENT, "").trim(); }
+
     private void folderMenu(View anchor, String f) {
         PopupMenu pm = new PopupMenu(this, anchor);
-        pm.getMenu().add(0, 1, 0, "Rename folder");
-        pm.getMenu().add(0, 2, 1, "Remove folder (keeps notebooks)");
+        Menu m = pm.getMenu();
+        m.add(0, 3, 0, "Add subfolder");
+        m.add(0, 1, 1, "Rename folder");
+        SubMenu mv = m.addSubMenu(0, 0, 2, "Move folder to");
+        ArrayList<String> targets = new ArrayList<>();
+        if (!parentOf(f).isEmpty()) { targets.add(""); mv.add(1, 100, 0, "Top level"); }
+        for (String t : folders()) {
+            if (within(t, f) || t.equals(parentOf(f))) continue; // not into itself, not where it already is
+            mv.add(1, 100 + targets.size(), targets.size(), "\u2003".repeat(depth(t)) + leaf(t));
+            targets.add(t);
+        }
+        if (targets.isEmpty()) mv.add(1, 99, 0, "No other folders").setEnabled(false);
+        m.add(0, 2, 3, "Remove folder (keeps notebooks)");
         pm.setOnMenuItemClickListener(it -> {
-            if (it.getItemId() == 1) {
-                EditText et = field(f, "Folder name");
+            int id = it.getItemId();
+            if (id == 3) newFolder(f, null);
+            else if (id == 1) {
+                EditText et = field(leaf(f), "Folder name");
                 new AlertDialog.Builder(this).setTitle("Rename folder").setView(wrap(et))
                         .setPositiveButton("Save", (d, w) -> {
-                            String s = et.getText().toString().trim();
+                            String s = cleanName(et.getText().toString());
                             if (s.isEmpty()) return;
-                            moveFolder(f, s);
-                            if (filter.equals(f)) filter = s;
-                            refresh();
+                            String p = parentOf(f);
+                            moveFolder(f, p.isEmpty() ? s : p + "/" + s);
                         }).setNegativeButton("Cancel", null).show();
-            } else {
-                moveFolder(f, "");
-                if (filter.equals(f)) filter = "";
-                refresh();
-            }
+            } else if (id >= 100) {
+                String to = targets.get(id - 100);
+                moveFolder(f, to.isEmpty() ? leaf(f) : to + "/" + leaf(f));
+            } else if (id == 2) {
+                int n = 0;
+                for (Notebook.Entry e : all) if (within(e.folder, f)) n++;
+                String where = parentOf(f).isEmpty() ? "No folder" : leaf(parentOf(f));
+                new AlertDialog.Builder(this).setTitle("Remove “" + leaf(f) + "”?")
+                        .setMessage(n == 0 ? "The folder is empty." : "Its " + n + (n == 1 ? " notebook moves" : " notebooks move")
+                                + " to " + where + ", keeping any subfolders. Nothing is deleted.")
+                        .setPositiveButton("Remove", (d, w) -> removeFolder(f))
+                        .setNegativeButton("Cancel", null).show();
+            } else return false;
             return true;
         });
         pm.show();
     }
 
+    /** Renames / moves folder `from` (and everything inside it) to path `to`. */
     private void moveFolder(String from, String to) {
-        for (Notebook.Entry e : all) if (e.folder.equals(from)) {
-            try { Notebook.setMeta(e.dir, "folder", to); } catch (Exception ignored) {}
+        if (to.equals(from)) return;
+        if (folders().contains(to)) { Toast.makeText(this, "There's already a folder called " + leaf(to) + " there", Toast.LENGTH_SHORT).show(); return; }
+        for (Notebook.Entry e : all) if (within(e.folder, from)) {
+            try { Notebook.setMeta(e.dir, "folder", to + e.folder.substring(from.length())); } catch (Exception ignored) {}
         }
-        HashSet<String> set = new HashSet<>(prefs.getStringSet("folders", new HashSet<>()));
-        set.remove(from);
-        if (!to.isEmpty()) set.add(to);
+        prefs.edit().putStringSet("folders", repath(prefs.getStringSet("folders", new HashSet<>()), from, to))
+                .putStringSet("openFolders", repath(openFolders(), from, to)).apply();
+        if (isFolderFilter() && within(filter, from)) filter = to + filter.substring(from.length());
+        prefs.edit().putString("filter", filter).apply();
+        refresh();
+    }
+
+    private static HashSet<String> repath(java.util.Set<String> in, String from, String to) {
+        HashSet<String> out = new HashSet<>();
+        for (String s : in) out.add(within(s, from) ? to + s.substring(from.length()) : s);
+        return out;
+    }
+
+    /** Removes folder f: its notebooks and subfolders move up one level. */
+    private void removeFolder(String f) {
+        String up = parentOf(f);
+        for (Notebook.Entry e : all) if (within(e.folder, f)) {
+            String rest = e.folder.substring(f.length()); // "" or "/Sub/..."
+            String np = rest.isEmpty() ? up : (up.isEmpty() ? rest.substring(1) : up + rest);
+            try { Notebook.setMeta(e.dir, "folder", np); } catch (Exception ignored) {}
+        }
+        HashSet<String> set = new HashSet<>();
+        for (String s : prefs.getStringSet("folders", new HashSet<>())) {
+            if (s.equals(f)) continue;
+            if (within(s, f)) { String rest = s.substring(f.length() + 1); s = up.isEmpty() ? rest : up + "/" + rest; }
+            set.add(s);
+        }
+        if (!up.isEmpty()) set.add(up); // the parent stays even if it's now empty
         prefs.edit().putStringSet("folders", set).apply();
+        if (isFolderFilter() && within(filter, f)) filter = up;
+        prefs.edit().putString("filter", filter).apply();
+        refresh();
     }
 
     private void duplicate(Notebook.Entry e) {

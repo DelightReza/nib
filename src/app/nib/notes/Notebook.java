@@ -28,30 +28,72 @@ final class Notebook {
             "Engineering", "Isometric", "Site inspection"};
     static final int PAPER_WHITE = 0, PAPER_CREAM = 1, PAPER_DARK = 2;
     static final String[] PAPER_NAMES = {"White paper", "Cream paper", "Dark paper"};
-    private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234; // NIB3 +bookmarks, NIB4 +page style
+    private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235; // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths
     static final int MARGIN_LEFT = 1, MARGIN_HEADER = 2, MARGIN_BORDER = 4;
 
     /** Text box or picture placed on a page (page-local units). */
     static final class Item {
-        static final int TEXT = 0, IMAGE = 1;
+        static final int TEXT = 0, IMAGE = 1, TAPE = 2;
+        static final String[] TAPE_PATTERNS = {"plain", "stripes", "grid", "dots"};
         final int type;
         final float x, y, w, h;
         final String text;   // TEXT: the text; IMAGE: file name under images/
         final float size;    // TEXT: font size in units
-        final int color;     // TEXT colour
+        final int color;     // TEXT / TAPE colour
+        final float[] pts;   // TAPE: the centre line x0,y0,x1,y1,… (page-local); size = its thickness
 
         Item(int type, float x, float y, float w, float h, String text, float size, int color) {
+            this(type, x, y, w, h, text, size, color, null);
+        }
+
+        Item(int type, float x, float y, float w, float h, String text, float size, int color, float[] pts) {
             this.type = type; this.x = x; this.y = y; this.w = w; this.h = h;
-            this.text = text; this.size = size; this.color = color;
+            this.text = text; this.size = size; this.color = color; this.pts = pts;
+        }
+
+        /** A tape along centre line pts, thick units wide; its box covers the whole strip. */
+        static Item tape(float[] pts, float thick, String pattern, int color) {
+            float l = Float.MAX_VALUE, t = Float.MAX_VALUE, r = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
+            for (int i = 0; i + 1 < pts.length; i += 2) {
+                l = Math.min(l, pts[i]); r = Math.max(r, pts[i]);
+                t = Math.min(t, pts[i + 1]); b = Math.max(b, pts[i + 1]);
+            }
+            float m = thick / 2 + 1;
+            return new Item(TAPE, l - m, t - m, r - l + 2 * m, b - t + 2 * m, pattern, thick, color, pts);
         }
 
         Item moved(float px, float py, float s, float tx, float ty) {
-            return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size * s, color);
+            float[] np = null;
+            if (pts != null) {
+                np = new float[pts.length];
+                for (int i = 0; i + 1 < pts.length; i += 2) { np[i] = (pts[i] - px) * s + px + tx; np[i + 1] = (pts[i + 1] - py) * s + py + ty; }
+            }
+            return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size * s, color, np);
         }
 
-        Item withText(String t, float nh) { return new Item(type, x, y, w, nh, t, size, color); }
+        Item withText(String t, float nh) { return new Item(type, x, y, w, nh, t, size, color, pts); }
 
-        Item withColor(int c) { return new Item(type, x, y, w, h, text, size, c); }
+        Item withColor(int c) { return new Item(type, x, y, w, h, text, size, c, pts); }
+
+        /** TAPE: text holds the pattern, plus "|open" while the tape is peeled back to show what's under it. */
+        boolean revealed() { return type == TAPE && text.endsWith("|open"); }
+
+        String pattern() { return type == TAPE ? (revealed() ? text.substring(0, text.length() - 5) : text) : ""; }
+
+        Item withRevealed(boolean r) { return new Item(type, x, y, w, h, pattern() + (r ? "|open" : ""), size, color, pts); }
+
+        boolean contains(float px, float py, float pad) {
+            if (px < x - pad || px > x + w + pad || py < y - pad || py > y + h + pad) return false;
+            if (type != TAPE || pts == null) return true;
+            float rr = size / 2 + pad; // on the strip: near its centre line
+            if (pts.length == 2) return Math.hypot(px - pts[0], py - pts[1]) <= rr;
+            for (int i = 0; i + 3 < pts.length; i += 2) {
+                float ax = pts[i], ay = pts[i + 1], dx = pts[i + 2] - ax, dy = pts[i + 3] - ay, l2 = dx * dx + dy * dy;
+                float h = l2 > 1e-6f ? Math.max(0f, Math.min(1f, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0f;
+                if (Math.hypot(px - ax - dx * h, py - ay - dy * h) <= rr) return true;
+            }
+            return false;
+        }
 
         String key() { return type + ":" + System.identityHashCode(this); }
     }
@@ -111,8 +153,8 @@ final class Notebook {
         if (f.exists()) {
             try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f), 1 << 16))) {
                 int magic = in.readInt();
-                if (magic != MAGIC1 && magic != MAGIC2 && magic != MAGIC3 && magic != MAGIC4) throw new IOException("bad magic");
-                boolean v2 = magic != MAGIC1, v3 = magic == MAGIC3 || magic == MAGIC4, v4 = magic == MAGIC4;
+                if (magic != MAGIC1 && magic != MAGIC2 && magic != MAGIC3 && magic != MAGIC4 && magic != MAGIC5) throw new IOException("bad magic");
+                boolean v2 = magic != MAGIC1, v3 = magic == MAGIC3 || magic == MAGIC4 || magic == MAGIC5, v4 = magic == MAGIC4 || magic == MAGIC5, v5 = magic == MAGIC5;
                 int pages = in.readInt();
                 for (int i = 0; i < pages; i++) {
                     Page p = new Page(in.readInt());
@@ -135,7 +177,17 @@ final class Notebook {
                             String text = in.readUTF();
                             float size = in.readFloat();
                             int color = in.readInt();
-                            p.items.add(new Item(type, x, y, w, h, text, size, color));
+                            float[] pts = null;
+                            if (v5) {
+                                int np = in.readInt();
+                                if (np > 0) { pts = new float[np]; for (int q = 0; q < np; q++) pts[q] = in.readFloat(); }
+                            }
+                            if (type == Item.TAPE && pts == null) { // first tape build: an axis-aligned box
+                                boolean hz = w >= h;
+                                pts = hz ? new float[]{x, y + h / 2, x + w, y + h / 2} : new float[]{x + w / 2, y, x + w / 2, y + h};
+                                size = hz ? h : w;
+                            }
+                            p.items.add(new Item(type, x, y, w, h, text, size, color, pts));
                         }
                     }
                     if (v3 && in.readBoolean()) p.mark = in.readUTF();
@@ -173,7 +225,7 @@ final class Notebook {
         dir.mkdirs();
         File tmp = new File(dir, "ink.bin.tmp");
         try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(tmp), 1 << 16))) {
-            out.writeInt(MAGIC4);
+            out.writeInt(MAGIC5);
             out.writeInt(pages.size());
             for (Page p : pages) {
                 out.writeInt(p.bg);
@@ -201,6 +253,8 @@ final class Notebook {
                     out.writeUTF(it.text);
                     out.writeFloat(it.size);
                     out.writeInt(it.color);
+                    out.writeInt(it.pts == null ? 0 : it.pts.length);
+                    if (it.pts != null) for (float f : it.pts) out.writeFloat(f);
                 }
                 out.writeBoolean(p.mark != null);
                 if (p.mark != null) out.writeUTF(p.mark);
