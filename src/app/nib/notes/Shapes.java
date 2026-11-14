@@ -113,7 +113,7 @@ final class Shapes {
     }
 
     /** Polyline → points every ~2.5 units, so the spline renderer keeps corners crisp. */
-    private static float[] densify(float[] v, boolean closed) {
+    static float[] densify(float[] v, boolean closed) {
         ArrayList<Float> out = new ArrayList<>();
         int m = v.length / 2;
         for (int i = 0; i + 1 < m; i++) {

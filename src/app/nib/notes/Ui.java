@@ -268,7 +268,18 @@ final class Ui {
             int x = loc[0] + anchor.getWidth() / 2 - width / 2;
             x = Math.max(dp(c, 12), Math.min(screenW - width - dp(c, 12), x));
             int y;
-            if (loc[1] > screenH / 2) {
+            View bar = (View) anchor.getParent(); // the floating capsule the button sits in
+            while (bar != null && bar.getParent() instanceof android.widget.LinearLayout) bar = (View) bar.getParent();
+            if (bar instanceof android.widget.LinearLayout && ((android.widget.LinearLayout) bar).getOrientation() == android.widget.LinearLayout.VERTICAL
+                    && bar.getHeight() > bar.getWidth() * 2) { // a tool column on the left / right edge: open beside it
+                int[] bl = new int[2];
+                bar.getLocationOnScreen(bl);
+                body.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+                boolean leftEdge = bl[0] + bar.getWidth() / 2 < screenW / 2;
+                x = leftEdge ? bl[0] + bar.getWidth() + dp(c, 10) : bl[0] - width - dp(c, 10);
+                y = loc[1] + anchor.getHeight() / 2 - body.getMeasuredHeight() / 2;
+                y = Math.max(dp(c, 12), Math.min(screenH - body.getMeasuredHeight() - dp(c, 12), y));
+            } else if (loc[1] > screenH / 2) {
                 // measure so the card's bottom edge lands just above the capsule
                 View host = (View) anchor.getParent(); // climb to the floating capsule itself
                 while (host != null && host.getParent() instanceof android.widget.LinearLayout) host = (View) host.getParent();
@@ -417,15 +428,12 @@ final class Ui {
             }
             SegBuf b = new SegBuf();
             s.emitAll(0, b);
-            if (tool == Stroke.HL) p.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DARKEN));
+            if (Stroke.isHl(tool)) p.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DARKEN));
             else p.setXfermode(null);
             p.setColor(color);
             cv.save();
             cv.scale(k, k);
-            for (int i = 0; i < b.count; i++) {
-                p.setStrokeWidth(b.get(i, 4) + b.get(i, 5));
-                cv.drawLine(b.get(i, 0), b.get(i, 1), b.get(i, 2), b.get(i, 3), p);
-            }
+            Render.segs(cv, b, p);
             cv.restore();
         }
     }
@@ -458,7 +466,7 @@ final class Ui {
             if (icon != 0) setImageResource(icon);
             setScaleType(ScaleType.CENTER);
             setContentDescription(desc);
-            setLayoutParams(new ViewGroup.MarginLayoutParams(dp(c, 46), dp(c, 46)));
+            setLayoutParams(new ViewGroup.MarginLayoutParams(dp(c, 44), dp(c, 46)));
             setBackground(ripple(c, null, dp(c, 23)));
             set(false, 0, 0);
         }

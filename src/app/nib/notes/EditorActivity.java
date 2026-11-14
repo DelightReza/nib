@@ -75,6 +75,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private int penSlot, hlSlot, textSize = 1, penType, prediction;
     private float penW, hlW, eraserDp;
     private boolean fingerDraw, hud, partialErase, shapeSnap, penButton;
+    private boolean hlFlat, holdErase, erasePreview;
+    private int hlStraight;
     private static final int[] LASER_COLORS = {0xffff3b30, 0xff34c759, 0xff0a84ff, 0xffaf52de, 0xffff9f0a, 0xffff2d92};
     private static final String[] LASER_COLOR_NAMES = {"Red", "Green", "Blue", "Purple", "Orange", "Pink"};
     private int laserCol, laserMode, laserSizeIdx = 1, laserTrail, laserInkWait;
@@ -94,7 +96,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private Ui.IconButton undoB, redoB, pagesB, bookmarkB;
     private LinearLayout favRow;
     private Ruler ruler;
-    private Ui.ToolDisc rulerB;
+    private Ui.ToolDisc rulerB, fingerB;
     private int drawScale; // 1:N for this notebook; 0 = none
     private View favSep;
     private final java.util.ArrayList<int[]> favs = new java.util.ArrayList<>(); // tool, penType, colour, width bits
@@ -136,6 +138,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         shapeSnap = prefs.getBoolean("shapeSnap", true);
         penButton = prefs.getBoolean("penButton", true);
         autoHide = prefs.getBoolean("autoHide", true);
+        hlFlat = prefs.getBoolean("hlFlat", false);
+        hlStraight = prefs.getInt("hlStraight", 1);
+        holdErase = prefs.getBoolean("holdErase", true);
+        erasePreview = prefs.getBoolean("erasePreview", true);
         laserCol = prefs.getInt("laserCol", 0);
         tapeCol = Math.min(TAPE_COLORS.length - 1, prefs.getInt("tapeCol", 0));
         tapePat = prefs.getInt("tapePat", 1);
@@ -173,6 +179,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         buildTopCapsules();
         buildToolCapsule();
         buildBottom();
+        dock = prefs.getInt("toolDock", DOCK_BOTTOM);
+        applyDock();
         buildSelectionBar();
         setContentView(root);
         activate(cur);
@@ -183,6 +191,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setOptions(prediction, fingerDraw, hud, partialErase, shapeSnap);
         engine.setEraserSize(eraserDp);
         engine.setPenType(penType);
+        engine.setHighlighter(hlFlat, hlStraight);
+        engine.setEraseOptions(holdErase, erasePreview);
         pushLaser();
         pushTape();
     }
@@ -332,7 +342,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             if (engine != null) return;
             engine = new Engine(EditorActivity.this, dir, this);
             // the page fills the screen; the insets only let its ends scroll clear of the floating bars
-            engine.setInsets(Ui.dp(EditorActivity.this, EDGE_DP + CAP_DP + 8), Ui.dp(EditorActivity.this, EDGE_DP + TOOLCAP_DP + 12));
+            engine.setInsets(insetTop(), insetBottom());
             engine.setTheme(Ui.color(EditorActivity.this, R.color.desk), Ui.dark(EditorActivity.this) ? 0.45f : 0.11f);
             if (page > 0) engine.openAtPage(page);
             page = 0;
@@ -355,6 +365,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         @Override public void onToast(String s) { if (on()) toast(s); }
         @Override public void onTool(int t) { if (on()) EditorActivity.this.onTool(t); }
         @Override public void onRulerLength(float u, boolean done) { if (on()) EditorActivity.this.onRulerLength(u, done); }
+        @Override public void onHandles(float[] hs, boolean line) { sel.setHandles(hs, line); }
+        @Override public void onHaptic() { root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); }
     }
 
     /** A side of the window. Touching it makes its notebook the one the tools act on. */
@@ -779,6 +791,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         capLeft.addView(back);
         tabScroll = new android.widget.HorizontalScrollView(this);
         tabScroll.setHorizontalScrollBarEnabled(false);
+        tabScroll.setHorizontalFadingEdgeEnabled(true); // a tab half scrolled out fades instead of being cut off
+        tabScroll.setFadingEdgeLength(Ui.dp(this, 28));
         tabRow = new LinearLayout(this);
         tabRow.setGravity(Gravity.CENTER_VERTICAL);
         tabScroll.addView(tabRow);
@@ -879,6 +893,15 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         rulerB.setOnClickListener(v -> toggleRuler());
         rulerB.setTooltipText("Ruler");
         capTools.addView(rulerB);
+        fingerB = new Ui.ToolDisc(this, R.drawable.ic_touch, "Write with finger", false);
+        fingerB.setTooltipText("Write with finger");
+        fingerB.setOnClickListener(v -> {
+            fingerDraw = !fingerDraw;
+            saveOptions();
+            toast(fingerDraw ? "Fingers write · use two fingers to scroll and zoom" : "Only the pen writes · fingers scroll");
+        });
+        fingerB.set(fingerDraw, 0, 0);
+        capTools.addView(fingerB);
         favSep = Ui.divider(this);
         capTools.addView(favSep);
         favRow = new LinearLayout(this);
@@ -900,12 +923,165 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         palette.addView(moreCol);
         sizeB = new Ui.SizeDot(this);
         sizeB.setLayoutParams(new ViewGroup.MarginLayoutParams(Ui.dp(this, 40), Ui.dp(this, 44)));
-        sizeB.setOnClickListener(v -> openToolPanel(v));
-        palette.addView(sizeB);
+        sizeB.setOnClickListener(v -> openToolPanel(v)); // no longer in the bar: tapping the active tool again opens the same panel
         capTools.addView(palette);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, Ui.dp(this, TOOLCAP_DP), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        lp.bottomMargin = Ui.dp(this, EDGE_DP + 4);
-        root.addView(capTools, lp);
+        grip = new Ui.IconButton(this, R.drawable.ic_grip, "Move tool bar: drag to any edge");
+        grip.setTooltipText("Drag to move the tool bar");
+        grip.setLayoutParams(new ViewGroup.MarginLayoutParams(Ui.dp(this, 22), Ui.dp(this, 44)));
+        grip.setOnTouchListener(this::dragToolbar);
+        capTools.addView(grip);
+        root.addView(capTools, new FrameLayout.LayoutParams(-2, Ui.dp(this, TOOLCAP_DP), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+    }
+
+    // ---- the tool bar can sit on any edge: drag its grip there, or pick in Settings ---------------
+
+    static final int DOCK_BOTTOM = 0, DOCK_TOP = 1, DOCK_LEFT = 2, DOCK_RIGHT = 3;
+    private int dock;
+    private Ui.IconButton grip;
+    private float dragX, dragY;
+
+    private boolean dockVertical() { return dock == DOCK_LEFT || dock == DOCK_RIGHT; }
+
+    /** How far the page may scroll past the floating bars at its top and bottom. */
+    private int insetTop() { return Ui.dp(this, EDGE_DP + CAP_DP + 8 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 : 0)); }
+
+    private int insetBottom() { return Ui.dp(this, EDGE_DP + 12 + (dock == DOCK_BOTTOM ? TOOLCAP_DP : 0)); }
+
+    private boolean dragToolbar(View v, MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                dragX = e.getRawX();
+                dragY = e.getRawY();
+                capTools.animate().cancel();
+                capTools.animate().scaleX(1.04f).scaleY(1.04f).alpha(0.9f).setDuration(100).start();
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                trackFinger(e);
+                capTools.setTranslationX(e.getRawX() - dragX);
+                capTools.setTranslationY(e.getRawY() - dragY);
+                if (Math.hypot(e.getRawX() - dragX, e.getRawY() - dragY) > Ui.dp(this, 24)) showDockHint(dropTarget());
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL: {
+                trackFinger(e);
+                boolean moved = Math.hypot(e.getRawX() - dragX, e.getRawY() - dragY) > Ui.dp(this, 24);
+                int to = moved && e.getActionMasked() == MotionEvent.ACTION_UP ? dropTarget() : dock;
+                if (!moved) toast("Drag the grip to the top, bottom, left or right edge");
+                if (dockHint != null) dockHint.setVisibility(View.GONE);
+                capTools.setTranslationX(0);
+                capTools.setTranslationY(0);
+                capTools.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(120).start();
+                if (to != dock) setDock(to);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private View dockHint;
+
+    private float fingerX, fingerY; // where the finger holding the grip is (root px)
+
+    /** Where the bar would land: finger in the top quarter → top, bottom quarter → bottom, else the side it's on. */
+    private int dropTarget() {
+        float w = root.getWidth(), h = root.getHeight();
+        if (fingerY < h * 0.25f) return DOCK_TOP;
+        if (fingerY > h * 0.75f) return DOCK_BOTTOM;
+        return fingerX < w / 2 ? DOCK_LEFT : DOCK_RIGHT;
+    }
+
+    private void trackFinger(MotionEvent e) {
+        int[] o = new int[2];
+        root.getLocationOnScreen(o);
+        fingerX = e.getRawX() - o[0];
+        fingerY = e.getRawY() - o[1];
+    }
+
+    /** A faint outline where the bar will land when it's let go. */
+    private void showDockHint(int d) {
+        if (dockHint == null) {
+            dockHint = new View(this);
+            int acc = Ui.color(this, R.color.accent);
+            GradientDrawable g = Ui.round((acc & 0x00ffffff) | 0x1f000000, Ui.dp(this, 20));
+            g.setStroke(Ui.dp(this, 2), (acc & 0x00ffffff) | 0x99000000, Ui.dp(this, 8), Ui.dp(this, 6));
+            dockHint.setBackground(g);
+            root.addView(dockHint, root.indexOfChild(capTools)); // under the bar being dragged
+        }
+        int tc = Ui.dp(this, TOOLCAP_DP), edge = Ui.dp(this, EDGE_DP);
+        int len = Math.min(Math.max(capTools.getWidth(), capTools.getHeight()),
+                (d == DOCK_LEFT || d == DOCK_RIGHT) ? root.getHeight() - Ui.dp(this, 2 * (EDGE_DP + CAP_DP + 12)) : root.getWidth() - 2 * edge);
+        FrameLayout.LayoutParams lp;
+        switch (d) {
+            case DOCK_TOP: lp = new FrameLayout.LayoutParams(len, tc, Gravity.TOP | Gravity.CENTER_HORIZONTAL); lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12); break;
+            case DOCK_LEFT: lp = new FrameLayout.LayoutParams(tc, len, Gravity.START | Gravity.CENTER_VERTICAL); lp.leftMargin = edge; break;
+            case DOCK_RIGHT: lp = new FrameLayout.LayoutParams(tc, len, Gravity.END | Gravity.CENTER_VERTICAL); lp.rightMargin = edge; break;
+            default: lp = new FrameLayout.LayoutParams(len, tc, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL); lp.bottomMargin = Ui.dp(this, EDGE_DP + 4);
+        }
+        dockHint.setLayoutParams(lp);
+        dockHint.setVisibility(View.VISIBLE);
+    }
+
+    private void setDock(int d) {
+        dock = d;
+        prefs.edit().putInt("toolDock", d).apply();
+        applyDock();
+    }
+
+    /** Lays the tool bar along its edge: a row at the top / bottom, a column on the left / right. */
+    private void applyDock() {
+        boolean vert = dockVertical();
+        capTools.setOrientation(vert ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        capTools.setGravity(Gravity.CENTER);
+        if (vert) capTools.setPadding(0, Ui.dp(this, 8), 0, Ui.dp(this, 6));
+        else capTools.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 6), 0);
+        for (LinearLayout g : new LinearLayout[]{palette, favRow}) {
+            g.setOrientation(vert ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+            g.setGravity(Gravity.CENTER);
+        }
+        for (LinearLayout g : new LinearLayout[]{capTools, palette, favRow})
+            for (int i = 0; i < g.getChildCount(); i++) if (!(g.getChildAt(i) == palette || g.getChildAt(i) == favRow)) orient(g.getChildAt(i), vert);
+        orient(grip, vert);
+        FrameLayout.LayoutParams lp;
+        int tc = Ui.dp(this, TOOLCAP_DP), edge = Ui.dp(this, EDGE_DP);
+        switch (dock) {
+            case DOCK_TOP:
+                lp = new FrameLayout.LayoutParams(-2, tc, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12); // under the tabs / undo bar
+                break;
+            case DOCK_LEFT:
+                lp = new FrameLayout.LayoutParams(tc, -2, Gravity.START | Gravity.CENTER_VERTICAL);
+                lp.leftMargin = edge;
+                break;
+            case DOCK_RIGHT:
+                lp = new FrameLayout.LayoutParams(tc, -2, Gravity.END | Gravity.CENTER_VERTICAL);
+                lp.rightMargin = edge;
+                break;
+            default:
+                lp = new FrameLayout.LayoutParams(-2, tc, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                lp.bottomMargin = Ui.dp(this, EDGE_DP + 4);
+        }
+        capTools.setLayoutParams(lp);
+        // toast and paste chip sit above the bar when it's at the bottom, else near the bottom edge
+        int above = Ui.dp(this, dock == DOCK_BOTTOM ? EDGE_DP + TOOLCAP_DP + 16 : EDGE_DP + 8);
+        if (pasteChip != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) pasteChip.getLayoutParams(); c.bottomMargin = above; pasteChip.setLayoutParams(c); }
+        if (toastView != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) toastView.getLayoutParams(); c.bottomMargin = above + Ui.dp(this, 2); toastView.setLayoutParams(c); }
+        for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
+        ui.post(this::fitCapsule);
+    }
+
+    /** Lays a bar item out for a row (as built) or a column (width / height and margins swapped). */
+    private static void orient(View v, boolean vert) {
+        ViewGroup.LayoutParams cur = v.getLayoutParams();
+        int[] row = (int[]) v.getTag(R.id.nib_row_lp);
+        if (row == null) { // first time: remember the row layout it was built with
+            ViewGroup.MarginLayoutParams m = cur instanceof ViewGroup.MarginLayoutParams ? (ViewGroup.MarginLayoutParams) cur : null;
+            row = new int[]{cur == null ? -2 : cur.width, cur == null ? -2 : cur.height,
+                    m == null ? 0 : m.leftMargin, m == null ? 0 : m.topMargin, m == null ? 0 : m.rightMargin, m == null ? 0 : m.bottomMargin};
+            v.setTag(R.id.nib_row_lp, row);
+        }
+        LinearLayout.LayoutParams lp = vert ? new LinearLayout.LayoutParams(row[1], row[0]) : new LinearLayout.LayoutParams(row[0], row[1]);
+        if (vert) lp.setMargins(row[3], row[2], row[5], row[4]); else lp.setMargins(row[2], row[3], row[4], row[5]);
+        v.setLayoutParams(lp);
     }
 
     private Ui.ToolDisc toolDisc(int icon, String desc, int t, boolean laser) {
@@ -939,7 +1115,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             case Engine.TOOL_HL: showPenPanel(anchor, true); break;
             case Engine.TOOL_ERASER: showEraserPanel(anchor); break;
             case Engine.TOOL_TEXT: showTextPanel(anchor); break;
-            case Engine.TOOL_LASSO: toast("Circle ink, text or images to select them"); break;
+            case Engine.TOOL_LASSO: toast("Circle ink, text or images to select them · tap a shape to pull its handles"); break;
             case Engine.TOOL_LASER: showLaserPanel(anchor); break;
             case Engine.TOOL_TAPE: showTapePanel(anchor); break;
         }
@@ -964,6 +1140,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (state != null && state.hasSelection) engine.selRecolor(c);
         applyTool();
     }
+
+    private int appliedTool = -1;
 
     private void applyTool() {
         penB.set(tool == Engine.TOOL_PEN, penColors[penSlot], penColors[penSlot]);
@@ -990,7 +1168,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setTextSize(Engine.TEXT_SIZES[textSize]);
         engine.setPenType(penType);
         engine.setEraserSize(eraserDp);
-        if (tool != Engine.TOOL_LASSO) hideSelection();
+        // only a tool change drops the selection (colour / size changes recolour or keep a fresh shape's handles)
+        if (tool != appliedTool && tool != Engine.TOOL_LASSO) hideSelection();
+        appliedTool = tool;
         updatePaste();
         renderFavs();
         SharedPreferences.Editor e = prefs.edit().putInt("tool", tool).putInt("penColor", penSlot).putInt("hlColor", hlSlot)
@@ -1015,8 +1195,12 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void showPenPanel(View anchor, boolean hl) {
         Ui.Popover p = newPop(372).title(hl ? "Highlighter" : "Pen");
         Ui.StrokePreview prev = new Ui.StrokePreview(this);
-        Runnable refresh = () -> prev.set(hl ? Stroke.HL : penType, curColor(), hl ? hlW : penW);
+        Runnable refresh = () -> prev.set(hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType, curColor(), hl ? hlW : penW);
         refresh.run();
+        if (hl) {
+            p.section("Tip");
+            p.add(Ui.segmented(this, new String[]{"Round", "Flat"}, hlFlat ? 1 : 0, i -> { hlFlat = i == 1; saveOptions(); refresh.run(); }));
+        }
         if (!hl) {
             p.section("Type");
             int sel = 0;
@@ -1053,6 +1237,15 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
         presets.addView(sb, new LinearLayout.LayoutParams(0, -2, 1f));
         p.add(presets);
+        if (hl) {
+            p.section("Straighten on lift");
+            p.add(Ui.segmented(this, new String[]{"Off", "Auto", "Always"}, hlStraight,
+                    i -> { hlStraight = i; saveOptions(); }));
+            TextView sh = Ui.text(this, "Auto: a nearly straight swipe becomes a straight line when you lift", 12f,
+                    Ui.color(this, R.color.on_surface_variant), null);
+            sh.setPadding(0, Ui.dp(this, 6), 0, 0);
+            p.add(sh);
+        }
         p.section("Colour");
         p.add(Ui.colorGrid(this, hl ? HL_PALETTE : INK_PALETTE, curColor(), c -> { setColor(c); refresh.run(); pop.dismiss(); }));
         LinearLayout.LayoutParams fl = fullW(-1);
@@ -1094,14 +1287,16 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     /** Narrow windows (split screen): drop the least-needed controls until the tool capsule fits. */
     private void fitCapsule() {
         if (capTools == null || root.getWidth() == 0) return;
-        View[] order = {favRow, favSep, sw[0], sw[1], sw[2], sw[3], sizeB, rulerB};
-        int avail = root.getWidth() - Ui.dp(this, 2 * EDGE_DP);
+        View[] order = {favRow, favSep, sw[0], sw[1], sw[2], sw[3], rulerB, fingerB};
+        boolean vert = dockVertical();
+        // a column must clear the top bars; a row must fit the width
+        int avail = vert ? root.getHeight() - Ui.dp(this, 2 * (EDGE_DP + CAP_DP + 12)) : root.getWidth() - Ui.dp(this, 2 * EDGE_DP);
         for (View v : order) if (v != null && v != favRow && v != favSep) v.setVisibility(View.VISIBLE);
         renderFavs();
-        if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) sizeB.setVisibility(View.GONE);
+        int tc = View.MeasureSpec.makeMeasureSpec(Ui.dp(this, TOOLCAP_DP), View.MeasureSpec.EXACTLY), free = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
         for (View v : order) {
-            capTools.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED), View.MeasureSpec.makeMeasureSpec(Ui.dp(this, TOOLCAP_DP), View.MeasureSpec.EXACTLY));
-            if (capTools.getMeasuredWidth() <= avail) break;
+            if (vert) capTools.measure(tc, free); else capTools.measure(free, tc);
+            if ((vert ? capTools.getMeasuredHeight() : capTools.getMeasuredWidth()) <= avail) break;
             if (v != null) v.setVisibility(View.GONE);
         }
         // narrow window: bookmark + pages leave the top-right capsule (both stay in ⋯ / the page counter)
@@ -1210,6 +1405,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 return true;
             });
             favRow.addView(d);
+            if (capTools != null && dockVertical()) orient(d, true);
         }
         int vis = favs.isEmpty() ? View.GONE : View.VISIBLE;
         favRow.setVisibility(vis);
@@ -1288,6 +1484,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }));
         p.section("Size");
         p.add(Ui.slider(this, 24, Math.round(eraserDp - 6), v -> { eraserDp = 6 + v; applyTool(); }));
+        LinearLayout.LayoutParams ol = fullW(-1);
+        ol.topMargin = Ui.dp(this, 6);
+        View prevRow = Ui.switchRow(this, "Grey out, delete on lift", "See what you're erasing before it goes",
+                erasePreview, v -> { erasePreview = v; saveOptions(); });
+        prevRow.setLayoutParams(ol);
+        p.add(prevRow);
+        p.add(Ui.switchRow(this, "Hold pen to erase", "Rest the pen where it lands for half a second: it erases until you lift",
+                holdErase, v -> { holdErase = v; saveOptions(); }));
         LinearLayout.LayoutParams sp = fullW(-1);
         sp.topMargin = Ui.dp(this, 12);
         View clear = Ui.actionRow(this, R.drawable.ic_trash, "Clear this page", "Removes all ink, text and images on it",
@@ -1617,9 +1821,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void saveTo() {
         toast("Preparing PDF…");
+        final File dir = engine.dir;
         engine.snapshot(nb -> bg.execute(() -> {
             try {
-                File f = Exporter.pdf(this, nb, engine.dir, -1);
+                File f = Exporter.pdf(this, nb, dir, -1);
                 ui.post(() -> {
                     pendingSave = f;
                     startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
@@ -1634,9 +1839,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void export(int page, boolean png) {
         toast("Exporting…");
+        final File dir = engine.dir;
         engine.snapshot(nb -> bg.execute(() -> {
             try {
-                File f = png ? Exporter.png(this, nb, engine.dir, page) : Exporter.pdf(this, nb, engine.dir, page);
+                File f = png ? Exporter.png(this, nb, dir, page) : Exporter.pdf(this, nb, dir, page);
                 ui.post(() -> Exporter.share(this, f, png ? "image/png" : "application/pdf"));
             } catch (Exception e) {
                 Log.e(Gl.TAG, "export", e);
@@ -1683,12 +1889,17 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         ph.setPadding(0, Ui.dp(this, 3), 0, Ui.dp(this, 10));
         col.addView(ph);
         col.addView(Ui.segmented(this, new String[]{"Off", "Gentle", "Strong"}, prediction, i -> { prediction = i; saveOptions(); }));
-        col.addView(Ui.switchRow(this, "Shape snapping", "Hold the pen still at the end of a line or shape to straighten it",
+        col.addView(Ui.switchRow(this, "Shape snapping", "Hold the pen still at the end of a line or shape to straighten it, then keep moving to stretch or resize it",
                 shapeSnap, v -> { shapeSnap = v; saveOptions(); }));
-        col.addView(Ui.switchRow(this, "Draw with finger", "Off: fingers scroll and zoom, only the pen writes",
+        col.addView(Ui.switchRow(this, "Write with finger", "Fingers write like the pen; two fingers scroll and zoom. Also in the tool bar (hand button)",
                 fingerDraw, v -> { fingerDraw = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Hide tools while writing", "The floating bars fade while the pen is on the page",
                 autoHide, v -> { autoHide = v; if (!v) showChrome.run(); prefs.edit().putBoolean("autoHide", v).apply(); }));
+        col.addView(sectionLabel("Tool bar"));
+        col.addView(Ui.segmented(this, new String[]{"Bottom", "Top", "Left", "Right"}, dock, this::setDock));
+        TextView th = Ui.text(this, "Or drag the grip at the end of the tool bar to any edge", 12.5f, Ui.color(this, R.color.on_surface_variant), null);
+        th.setPadding(0, Ui.dp(this, 6), 0, 0);
+        col.addView(th);
         col.addView(sectionLabel("Appearance"));
         col.addView(Ui.segmented(this, new String[]{"System", "Light · Clean", "Dark · Graphite"}, Theme.get(this), i -> Theme.set(this, i)));
         col.addView(sectionLabel("Pen"));
@@ -1696,6 +1907,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 penButton, v -> { penButton = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Partial eraser", "Erase just the part of a stroke you touch",
                 partialErase, v -> { partialErase = v; saveOptions(); }));
+        col.addView(Ui.switchRow(this, "Hold pen to erase", "Rest the pen where it lands for half a second: it erases until you lift",
+                holdErase, v -> { holdErase = v; saveOptions(); }));
+        col.addView(Ui.switchRow(this, "Grey out, delete on lift", "Erased ink turns grey and goes when the pen lifts",
+                erasePreview, v -> { erasePreview = v; saveOptions(); }));
         col.addView(sectionLabel("Gestures"));
         TextView gest = Ui.text(this, "Two-finger tap  ·  undo\nThree-finger tap  ·  redo\nLong-press undo  ·  history slider\n"
                 + "One finger  ·  scroll      Pinch  ·  zoom\nDouble-tap  ·  fit page width", 14,
@@ -1746,10 +1961,13 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void saveOptions() {
+        prefs.edit().putBoolean("hlFlat", hlFlat).putInt("hlStraight", hlStraight).putBoolean("holdErase", holdErase)
+                .putBoolean("erasePreview", erasePreview).apply();
         prefs.edit().putInt("predLevel", prediction).putBoolean("finger", fingerDraw).putBoolean("hud", hud)
                 .putBoolean("partialErase", partialErase).putBoolean("shapeSnap", shapeSnap)
                 .putBoolean("penButton", penButton).apply();
         pushOptions();
+        if (fingerB != null) fingerB.set(fingerDraw, 0, 0);
     }
 
     private void closeSettings() {
@@ -2021,11 +2239,27 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         RectF r;
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         SelectionView(EditorActivity a) { super(a); }
-        void set(RectF nr) { r = nr; invalidate(); }
+        float[] handles; // a lone shape's stretch handles (view px)
+        boolean line;
+        void set(RectF nr) { r = nr; if (nr == null) handles = null; invalidate(); }
+        void setHandles(float[] h, boolean ln) { handles = h; line = ln; invalidate(); }
         @Override protected void onDraw(Canvas c) {
             if (r == null) return;
             float d = getResources().getDisplayMetrics().density;
             int acc = getContext().getColor(R.color.accent);
+            if (handles != null) { // a shape: knobs on its own corners / ends, nothing else in the way
+                for (int i = 0; i + 1 < handles.length; i += 2) {
+                    float rad = 9 * d;
+                    p.setStyle(Paint.Style.FILL);
+                    p.setColor(0xffffffff);
+                    c.drawCircle(handles[i], handles[i + 1], rad, p);
+                    p.setStyle(Paint.Style.STROKE);
+                    p.setStrokeWidth(2.2f * d);
+                    p.setColor(acc);
+                    c.drawCircle(handles[i], handles[i + 1], rad, p);
+                }
+                return;
+            }
             RectF b = new RectF(r.left - 8 * d, r.top - 8 * d, r.right + 8 * d, r.bottom + 8 * d);
             p.setStyle(Paint.Style.FILL);
             p.setColor((acc & 0x00ffffff) | 0x10000000);
@@ -2168,6 +2402,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
         if (req != REQ_IMAGE || res != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
+        final Engine target = engine; // the notebook you were in when you picked it, even if you switch tabs meanwhile
         toast("Adding image…");
         bg.execute(() -> {
             try {
@@ -2176,7 +2411,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                     if (m > 2400) dec.setTargetSize(w * 2400 / m, h * 2400 / m);
                     dec.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
                 });
-                File dir = new File(engine.dir, "images");
+                File dir = new File(target.dir, "images");
                 dir.mkdirs();
                 boolean alpha = b.hasAlpha();
                 String name = UUID.randomUUID() + (alpha ? ".png" : ".jpg");
@@ -2186,9 +2421,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 int w = b.getWidth(), h = b.getHeight();
                 b.recycle();
                 ui.post(() -> {
-                    engine.insertImage(name, w, h);
-                    tool = Engine.TOOL_LASSO;
-                    applyTool();
+                    target.insertImage(name, w, h);
+                    if (target == engine) { tool = Engine.TOOL_LASSO; applyTool(); }
                 });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "image", e);

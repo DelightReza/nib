@@ -168,7 +168,7 @@ final class Handwriting {
             Ink.Builder ib = Ink.builder();
             long tms = 0;
             for (Stroke s : line) { // in the order you wrote them, with plausible pen timing
-                if (s.tool == Stroke.HL || s.n == 0) continue;
+                if (s.hl() || s.n == 0) continue;
                 Ink.Stroke.Builder sbld = Ink.Stroke.builder();
                 for (int k = 0; k < s.n; k++) sbld.addPoint(Ink.Point.create(s.x(k), s.y(k), tms += 5));
                 ib.addStroke(sbld.build());
@@ -199,7 +199,7 @@ final class Handwriting {
      */
     private static List<List<Stroke>> lines(List<Stroke> strokes) {
         List<Stroke> ss = new ArrayList<>();
-        for (Stroke s : strokes) if (s.tool != Stroke.HL && s.n > 0) ss.add(s);
+        for (Stroke s : strokes) if (!s.hl() && s.n > 0) ss.add(s);
         int n = ss.size();
         if (n == 0) return new ArrayList<>();
         RectF[] b = new RectF[n];

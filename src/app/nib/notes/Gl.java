@@ -335,11 +335,12 @@ final class Gl {
             + "vec2 xf(vec2 p){ return (p-uXf.xy)*uXf.z+uXf.xy+uXt; }\n"
             + "void main(){\n"
             + "  vec2 a=(xf(aSeg.xy)-uView.xy)*uView.z; vec2 b=(xf(aSeg.zw)-uView.xy)*uView.z;\n"
-            + "  vec2 r=max(aRad*uXf.z*uView.z, vec2(0.6)); float R=max(r.x,r.y)+1.5;\n"
+            + "  bool bx=aRad.y<0.0;\n" // chisel highlighter: a box (half sizes) swept along the segment
+            + "  vec2 r=max(abs(aRad)*uXf.z*uView.z, vec2(0.6)); float R=(bx? length(r) : max(r.x,r.y))+1.5;\n"
             + "  vec2 d=b-a; float L=length(d); vec2 dir=L>1e-4? d/L : vec2(1.0,0.0);\n"
             + "  vec2 n=vec2(-dir.y,dir.x);\n"
             + "  vec2 p=(a+b)*0.5 + dir*(aCorner.x*(L*0.5+R)) + n*(aCorner.y*R);\n"
-            + "  vP=p; vSeg=vec4(a,b); vRad=r; vColor=aColor;\n"
+            + "  vP=p; vSeg=vec4(a,b); vRad=bx? vec2(r.x,-r.y) : r; vColor=aColor;\n"
             + "  gl_Position=vec4(p.x/uSize.x*2.0-1.0, 1.0-p.y/uSize.y*2.0, 0.0, 1.0);\n"
             + "}\n";
 
@@ -352,7 +353,22 @@ final class Gl {
             + "  float wx=vP.x/uView.z+uView.x; if(wx<uClip.x||wx>uClip.y) discard;\n" // ink stays on the page
             + "  vec2 a=vSeg.xy; vec2 ba=vSeg.zw-a; vec2 pa=vP-a;\n"
             + "  float h=clamp(dot(pa,ba)/max(dot(ba,ba),1e-6),0.0,1.0);\n"
-            + "  float d=length(pa-ba*h)-mix(vRad.x,vRad.y,h);\n"
+            + "  float d;\n"
+            + "  if(vRad.y<0.0){\n" // swept box = box at a ∪ box at b ∪ the parallelogram between them
+            + "    vec2 hb=vec2(vRad.x,-vRad.y);\n"
+            + "    vec2 q=abs(pa)-hb; d=length(max(q,0.0))+min(max(q.x,q.y),0.0);\n"
+            + "    q=abs(vP-vSeg.zw)-hb; d=min(d, length(max(q,0.0))+min(max(q.x,q.y),0.0));\n"
+            + "    float L=length(ba);\n"
+            + "    if(L>1e-3){\n"
+            + "      vec2 n=vec2(-ba.y,ba.x)/L; vec2 cm=vec2(n.x>=0.0?hb.x:-hb.x, n.y>=0.0?hb.y:-hb.y); vec2 D=2.0*cm;\n"
+            + "      vec2 rel=pa+cm; float det=ba.x*D.y-ba.y*D.x;\n"
+            + "      if(abs(det)>1e-4){\n"
+            + "        float s=(rel.x*D.y-rel.y*D.x)/det, t=(ba.x*rel.y-ba.y*rel.x)/det;\n"
+            + "        float hs=abs(det)/length(D), ht=abs(det)/L;\n"
+            + "        d=min(d, max(max(-s,s-1.0)*hs, max(-t,t-1.0)*ht));\n"
+            + "      }\n"
+            + "    }\n"
+            + "  } else d=length(pa-ba*h)-mix(vRad.x,vRad.y,h);\n"
             + "  float cov=clamp(0.5-d,0.0,1.0);\n"
             + "  if(cov<=0.0) discard;\n"
             + "  vec3 c=vColor.rgb;\n"

@@ -2,10 +2,19 @@ package app.nib.notes;
 
 /** One ink stroke in page-local units. Immutable once committed to a page. */
 final class Stroke {
-    static final int PEN = 0, HL = 1, BALL = 2, FINE = 3; // PEN = fountain pen
+    static final int PEN = 0, HL = 1, BALL = 2, FINE = 3, HL_FLAT = 4; // PEN = fountain pen; HL_FLAT = chisel highlighter
+    /** Chisel tip: a flat nib held upright, FLAT_T of the width thick (half-size, ×width). */
+    static final float FLAT_T = 0.12f;
+
+    static boolean isHl(int tool) { return tool == HL || tool == HL_FLAT; }
+
+    boolean hl() { return isHl(tool); }
 
     final int tool, color;
     final float width;
+    /** Clean shape this stroke is: 0 freehand, LINE, or CLOSED (snapped circle / polygon). Shapes keep handles. */
+    int shape;
+    static final int LINE = 1, CLOSED = 2;
     float[] p = new float[4 * 64]; // x, y, pressure(smoothed), radius
     int n;
     float l = Float.MAX_VALUE, t = Float.MAX_VALUE, r = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
@@ -17,7 +26,7 @@ final class Stroke {
     }
 
     float radius(float pr) {
-        if (tool == HL) return width * 0.5f;
+        if (isHl(tool)) return width * 0.5f;
         // Xiaomi Smart Pen: light writing ~0.15, normal ~0.5, firm ~0.65 (measured). Map that span
         // onto the full width range so normal handwriting sits near the nominal width.
         float pn = Math.max(0f, Math.min(1f, pr / 0.65f));
@@ -44,13 +53,19 @@ final class Stroke {
         if (y + rad > b) b = y + rad;
     }
 
+    /** One piece of ink; the chisel highlighter draws a swept box (flagged by a negative second radius). */
+    private void seg(SegBuf buf, float x0, float y0, float x1, float y1, float r0, float r1, int c) {
+        if (tool == HL_FLAT) buf.put(x0, y0, x1, y1, width * FLAT_T, -width * 0.5f, c);
+        else buf.put(x0, y0, x1, y1, r0, r1, c);
+    }
+
     float x(int i) { return p[4 * i]; }
     float y(int i) { return p[4 * i + 1]; }
     float rad(int i) { return p[4 * i + 3]; }
 
     /** Dot at the first point (covers single taps). */
     void emitDot(float top, SegBuf buf) {
-        buf.put(x(0), y(0) + top, x(0), y(0) + top, rad(0), rad(0), color);
+        seg(buf, x(0), y(0) + top, x(0), y(0) + top, rad(0), rad(0), color);
         bl = x(0) - rad(0); bt = y(0) + top - rad(0); br = x(0) + rad(0); bb = y(0) + top + rad(0);
     }
 
@@ -76,7 +91,7 @@ final class Stroke {
         bl = Math.min(x1, x2); br = Math.max(x1, x2); bt = Math.min(y1, y2); bb = Math.max(y1, y2);
         float px = x1, py = y1, pr = r1;
         if (d12 < 1e-4f || segs == 1) {
-            buf.put(x1, y1 + top, x2, y2 + top, r1, r2, color);
+            seg(buf, x1, y1 + top, x2, y2 + top, r1, r2, color);
         } else {
             if (d01 < 1e-4f) d01 = d12;
             if (d23 < 1e-4f) d23 = d12;
@@ -92,7 +107,7 @@ final class Stroke {
                 float qx = h00 * x1 + h10 * m1x + h01 * x2 + h11 * m2x;
                 float qy = h00 * y1 + h10 * m1y + h01 * y2 + h11 * m2y;
                 float qr = r1 + (r2 - r1) * t;
-                buf.put(px, py + top, qx, qy + top, pr, qr, color);
+                seg(buf, px, py + top, qx, qy + top, pr, qr, color);
                 if (qx < bl) bl = qx; if (qx > br) br = qx; if (qy < bt) bt = qy; if (qy > bb) bb = qy;
                 px = qx; py = qy; pr = qr;
             }
@@ -110,12 +125,14 @@ final class Stroke {
     /** Copy scaled by s around (px,py) then shifted by (tx,ty); width scales too. */
     Stroke transformed(float px, float py, float sc, float tx, float ty) {
         Stroke o = new Stroke(tool, color, width * sc);
+        o.shape = shape;
         for (int i = 0; i < n; i++) o.add((x(i) - px) * sc + px + tx, (y(i) - py) * sc + py + ty, p[4 * i + 2]);
         return o;
     }
 
     Stroke withColor(int c) {
         Stroke o = new Stroke(tool, c, width);
+        o.shape = shape;
         for (int i = 0; i < n; i++) o.add(x(i), y(i), p[4 * i + 2]);
         return o;
     }

@@ -43,8 +43,21 @@ final class Backup {
         return tree(c) != null && System.currentTimeMillis() - prefs(c).getLong(PREF_LAST, 0) > AUTO_EVERY;
     }
 
-    /** Returns the backup's file name. */
+    private static final java.util.concurrent.atomic.AtomicBoolean RUNNING = new java.util.concurrent.atomic.AtomicBoolean();
+    /** Library settings that live outside the notebooks (empty folders, saved page templates), stored in the zip. */
+    static final String LIBRARY = "nib-library.json";
+
+    /** Returns the backup's file name (null if a backup is already running). */
     static String run(Context c) throws IOException {
+        if (!RUNNING.compareAndSet(false, true)) return null; // the notes screen reopened mid-backup: one is enough
+        try {
+            return runOnce(c);
+        } finally {
+            RUNNING.set(false);
+        }
+    }
+
+    private static String runOnce(Context c) throws IOException {
         Uri tree = tree(c);
         if (tree == null) throw new IOException("No backup folder chosen");
         ContentResolver cr = c.getContentResolver();
@@ -56,6 +69,9 @@ final class Backup {
             File root = Notebook.root(c);
             File[] dirs = root.listFiles(File::isDirectory);
             if (dirs != null) for (File d : dirs) addDir(zip, d, d.getName() + "/");
+            zip.putNextEntry(new ZipEntry(LIBRARY));
+            zip.write(libraryJson(c).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.closeEntry();
         }
         prefs(c).edit().putLong(PREF_LAST, System.currentTimeMillis()).apply();
         prune(c, tree);
@@ -99,6 +115,35 @@ final class Backup {
         }
     }
 
+    private static String libraryJson(Context c) {
+        SharedPreferences p = prefs(c);
+        try {
+            org.json.JSONObject o = new org.json.JSONObject();
+            o.put("folders", new org.json.JSONArray(p.getStringSet("folders", new java.util.HashSet<>())));
+            o.put("myTpl", new org.json.JSONArray(p.getString("myTpl", "[]")));
+            return o.toString();
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    /** Adds a backup's empty folders and saved templates to what's here (nothing is replaced). */
+    private static void mergeLibrary(Context c, String json) {
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(json);
+            SharedPreferences p = prefs(c);
+            java.util.HashSet<String> folders = new java.util.HashSet<>(p.getStringSet("folders", new java.util.HashSet<>()));
+            org.json.JSONArray f = o.optJSONArray("folders");
+            if (f != null) for (int i = 0; i < f.length(); i++) folders.add(f.getString(i));
+            org.json.JSONArray mine = new org.json.JSONArray(p.getString("myTpl", "[]")), add = o.optJSONArray("myTpl");
+            java.util.HashSet<String> have = new java.util.HashSet<>();
+            for (int i = 0; i < mine.length(); i++) have.add(mine.get(i).toString());
+            if (add != null) for (int i = 0; i < add.length(); i++) if (have.add(add.get(i).toString())) mine.put(add.get(i));
+            p.edit().putStringSet("folders", folders).putString("myTpl", mine.toString()).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
     /** Unpacks a backup; notebooks that already exist are restored as copies. Returns count. */
     static int restore(Context c, Uri zipUri) throws IOException {
         File root = Notebook.root(c);
@@ -107,6 +152,12 @@ final class Backup {
             ZipEntry e;
             while ((e = zin.getNextEntry()) != null) {
                 String n = e.getName();
+                if (n.equals(LIBRARY)) {
+                    java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+                    Io.pipe(zin, b);
+                    mergeLibrary(c, b.toString("UTF-8"));
+                    continue;
+                }
                 if (e.isDirectory() || n.contains("..")) continue;
                 int slash = n.indexOf('/');
                 if (slash <= 0) continue;

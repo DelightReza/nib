@@ -265,7 +265,7 @@ final class Render {
         if (!forPdf) hl.setXfermode(new PorterDuffXfermode(dk ? PorterDuff.Mode.LIGHTEN : PorterDuff.Mode.DARKEN));
         for (int pass = 0; pass < 2; pass++) {
             for (Stroke s : p.strokes) {
-                boolean isHl = s.tool == Stroke.HL;
+                boolean isHl = s.hl();
                 if ((pass == 0) != isHl) continue;
                 Paint pt = isHl ? hl : ink;
                 int col = isHl ? s.color : inkColor(s.color, dk);
@@ -274,13 +274,42 @@ final class Render {
                 pt.setColor(col);
                 tmp.clear();
                 s.emitAll(0, tmp);
-                for (int i = 0; i < tmp.count; i++) {
-                    pt.setStrokeWidth(tmp.get(i, 4) + tmp.get(i, 5));
-                    c.drawLine(tmp.get(i, 0), tmp.get(i, 1), tmp.get(i, 2), tmp.get(i, 3), pt);
-                }
+                segs(c, tmp, pt);
             }
         }
         for (Notebook.Item it : p.items) if (it.type == Notebook.Item.TAPE) tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f);
+    }
+
+    /** Draws emitted segments: round capsules, or for the chisel highlighter one filled outline (no overlaps darken). */
+    static void segs(Canvas c, SegBuf b, Paint pt) {
+        if (b.count > 0 && b.get(0, 5) < 0) {
+            android.graphics.Path path = new android.graphics.Path();
+            for (int i = 0; i < b.count; i++) {
+                float ax = b.get(i, 0), ay = b.get(i, 1), bx = b.get(i, 2), by = b.get(i, 3), hx = b.get(i, 4), hy = -b.get(i, 5);
+                path.addRect(ax - hx, ay - hy, ax + hx, ay + hy, android.graphics.Path.Direction.CW);
+                float dx = bx - ax, dy = by - ay;
+                if (dx * dx + dy * dy < 1e-6f) continue;
+                path.addRect(bx - hx, by - hy, bx + hx, by + hy, android.graphics.Path.Direction.CW);
+                float cx = -dy >= 0 ? hx : -hx, cy = dx >= 0 ? hy : -hy; // the corner furthest to the left of travel
+                float[] q = {ax + cx, ay + cy, bx + cx, by + cy, bx - cx, by - cy, ax - cx, ay - cy};
+                float area = 0;
+                for (int k = 0; k < 4; k++) area += q[2 * k] * q[(2 * k + 3) % 8] - q[(2 * k + 2) % 8] * q[2 * k + 1];
+                if (area < 0) q = new float[]{q[6], q[7], q[4], q[5], q[2], q[3], q[0], q[1]}; // same turning as the rects
+                path.moveTo(q[0], q[1]);
+                path.lineTo(q[2], q[3]);
+                path.lineTo(q[4], q[5]);
+                path.lineTo(q[6], q[7]);
+                path.close();
+            }
+            Paint f = new Paint(pt);
+            f.setStyle(Paint.Style.FILL);
+            c.drawPath(path, f);
+            return;
+        }
+        for (int i = 0; i < b.count; i++) {
+            pt.setStrokeWidth(b.get(i, 4) + b.get(i, 5));
+            c.drawLine(b.get(i, 0), b.get(i, 1), b.get(i, 2), b.get(i, 3), pt);
+        }
     }
 
     private static int scale(int c, float k) {
@@ -457,7 +486,6 @@ final class Render {
         return BitmapFactory.decodeFile(f.getPath(), o);
     }
 
-    /** A page rendered to a bitmap widthPx wide. */
     /** Bounding box of everything on a page (stroke points padded by their width, plus items). */
     static RectF canvasBounds(Notebook.Page p) {
         RectF r = new RectF();
@@ -476,6 +504,7 @@ final class Render {
         return r;
     }
 
+    /** A page rendered to a bitmap widthPx wide. */
     static Bitmap pageBitmap(Notebook nb, File dir, Notebook.Page p, Pdf pdf, int widthPx) {
         float s = widthPx / Notebook.PW;
         Bitmap bm = Bitmap.createBitmap(widthPx, Math.max(1, Math.round(p.h * s)), Bitmap.Config.ARGB_8888);

@@ -899,7 +899,7 @@ public final class LibraryActivity extends Activity {
         bg.execute(() -> {
             try {
                 String name = Backup.run(this);
-                ui.post(() -> Toast.makeText(this, "Saved " + name, Toast.LENGTH_LONG).show());
+                ui.post(() -> Toast.makeText(this, name == null ? "A backup is already running" : "Saved " + name, Toast.LENGTH_LONG).show());
             } catch (Exception e) {
                 Log.e(Gl.TAG, "backup", e);
                 ui.post(() -> Toast.makeText(this, "Backup failed: " + e.getMessage(), Toast.LENGTH_LONG).show());

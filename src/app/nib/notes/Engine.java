@@ -73,6 +73,9 @@ final class Engine implements Choreographer.FrameCallback {
         void onTool(int tool);
         /** Length (page units) of the line being drawn along the ruler; < 0 when the line is finished. */
         default void onRulerLength(float units, boolean done) {}
+        default void onHaptic() {}
+        /** Stretch handles of a lone selected shape, in view px (null = none); line: just its two ends. */
+        default void onHandles(float[] screen, boolean line) {}
     }
 
     private final HandlerThread thread = new HandlerThread("nib-ink");
@@ -113,6 +116,8 @@ final class Engine implements Choreographer.FrameCallback {
     private int predLevel = 1, penType = Stroke.PEN;
     private float eraserDp = 11f;
     private boolean fingerDraw, hud, partialErase, shapeSnap = true, tempEraser;
+    private boolean hlFlat, holdErase = true, erasePreview = true;
+    private int hlStraight = 1; // straighten highlighter on lift: 0 off, 1 when nearly straight, 2 always
     private int tapeColor = 0xff9ecbf2;
     private String tapePattern = "stripes";
     private float tapeThick = 40f;
@@ -125,7 +130,9 @@ final class Engine implements Choreographer.FrameCallback {
     // gestures
     private static final int G_NONE = 0, G_INK = 1, G_ERASE = 2, G_PAN = 3, G_IGNORE = 4, G_LASSO = 5, G_SEL = 6, G_TAP = 7, G_LASER = 8, G_TAPE = 9;
     private int gest = G_NONE;
-    private volatile long penNear;
+    private volatile long penNear, stylusAt; // stylusAt: only the real pen (hover / touch), for palm rejection
+    private boolean fingerGest;             // the current gesture was started by a finger (finger drawing on)
+    private static final float FINGER_P = 0.5f; // fingers report contact size, not pressure: draw at the nominal width
 
     // live stroke
     private Stroke live;
@@ -137,6 +144,10 @@ final class Engine implements Choreographer.FrameCallback {
 
     // erase
     private IdentityHashMap<Notebook.Page, Object[]> eraseBefore;
+    // erase preview: what this eraser stroke has touched; drawn grey, removed when the pen lifts
+    private final java.util.Set<Stroke> doomed = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    private final java.util.Set<Notebook.Item> doomedItems = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    private final IdentityHashMap<Stroke, ArrayList<Stroke>> pieces = new IdentityHashMap<>(); // partial: what's left of a touched stroke
     private float ex, ey;
 
     // lasso + selection (selection coordinates are page-local)
@@ -205,6 +216,7 @@ final class Engine implements Choreographer.FrameCallback {
             gl = new Gl();
             gl.init();
             book = Notebook.load(dir);
+            if (book.loadFailed) toast("Part of this notebook couldn't be read · the original file was kept, nothing is lost yet");
             gl.clipX0 = book.canvas ? -1e9f : 0f;
             gl.clipX1 = book.canvas ? 1e9f : PW;
             ensureTrailingPage();
@@ -290,6 +302,12 @@ final class Engine implements Choreographer.FrameCallback {
         });
     }
 
+    /** Highlighter tip (flat = chisel) and straighten-on-lift (0 off, 1 when nearly straight, 2 always). */
+    void setHighlighter(boolean flat, int straighten) { h.post(() -> { hlFlat = flat; hlStraight = straighten; }); }
+
+    /** Hold the pen still at the start of a stroke to erase; erased ink greys out until the pen lifts. */
+    void setEraseOptions(boolean hold, boolean preview) { h.post(() -> { holdErase = hold; erasePreview = preview; }); }
+
     /** Held pen side button (or any eraser key) → erase while held. */
     void setTempEraser(boolean on) { h.post(() -> tempEraser = on); }
 
@@ -364,7 +382,6 @@ final class Engine implements Choreographer.FrameCallback {
         });
     }
 
-    /** Page operation; i == -2 means the page currently in view. */
     /** Bookmark the page (title may be ""), or remove its bookmark with title == null. i = -2: current page. */
     void setBookmark(int i0, String title) {
         h.post(() -> {
@@ -376,6 +393,7 @@ final class Engine implements Choreographer.FrameCallback {
         });
     }
 
+    /** Page operation; i == -2 means the page currently in view. */
     void pageOp(String op, int i0, int arg) {
         h.post(() -> {
             int i = i0 == -2 ? currentPage() : i0;
@@ -387,9 +405,14 @@ final class Engine implements Choreographer.FrameCallback {
                     if (book.pages.size() <= 1) { toast("A notebook needs at least one page"); return; }
                     book.pages.remove(i);
                     break;
-                case "duplicate":
-                    book.pages.add(i + 1, book.pages.get(i).copyShallow());
+                case "duplicate": { // its own copies of the ink: edits on one page never touch the other
+                    Notebook.Page d = book.pages.get(i).copyShallow();
+                    ArrayList<Stroke> own = new ArrayList<>();
+                    for (Stroke s : d.strokes) own.add(s.shifted(0, 0));
+                    d.strokes = own;
+                    book.pages.add(i + 1, d);
                     break;
+                }
                 case "move": {
                     int to = Math.max(0, Math.min(book.pages.size() - 1, arg));
                     if (to == i) return;
@@ -484,7 +507,7 @@ final class Engine implements Choreographer.FrameCallback {
             if (!hasSel()) return;
             ArrayList<Stroke> ns = new ArrayList<>();
             ArrayList<Notebook.Item> ni = new ArrayList<>();
-            for (Stroke s : selStrokes) ns.add(s.tool == Stroke.HL ? s : s.withColor(color));
+            for (Stroke s : selStrokes) ns.add(s.hl() ? s : s.withColor(color));
             for (Notebook.Item it : selItems) ni.add(it.type == Notebook.Item.TEXT || it.type == Notebook.Item.TAPE ? it.withColor(color) : it);
             replaceSelection(ns, ni, true);
         });
@@ -629,7 +652,7 @@ final class Engine implements Choreographer.FrameCallback {
         });
     }
 
-    void hover() { penNear = SystemClock.uptimeMillis(); }
+    void hover() { penNear = stylusAt = SystemClock.uptimeMillis(); }
 
     // ---- ruler: a straight edge in screen space; strokes started next to an edge follow it ----------
 
@@ -838,7 +861,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     /** Pen hovering over the page (x,y in view px); exit = it moved away. */
     void hoverAt(float x, float y, boolean exit) {
-        penNear = SystemClock.uptimeMillis();
+        penNear = stylusAt = SystemClock.uptimeMillis();
         h.post(() -> {
             if (!laserHover || tool != TOOL_LASER || gest == G_LASER || gl == null || book == null) return;
             if (exit) {
@@ -1141,7 +1164,8 @@ final class Engine implements Choreographer.FrameCallback {
                 Tex o = texs.get(base + l);
                 if (o != null) { t = o; break; }
             }
-            if (t != null) gl.tex(t.id, it.x, it.y + top, it.w, it.h, it.revealed() ? Render.TAPE_OPEN_ALPHA : 1f);
+            float al = doomedItems.contains(it) ? 0.28f : it.revealed() ? Render.TAPE_OPEN_ALPHA : 1f;
+            if (t != null) gl.tex(t.id, it.x, it.y + top, it.w, it.h, al);
             return;
         }
         if (it.type == Notebook.Item.IMAGE) {
@@ -1330,8 +1354,16 @@ final class Engine implements Choreographer.FrameCallback {
         for (int i = 0; i < book.pages.size(); i++) {
             float top = tops[i];
             for (Stroke s : book.pages.get(i).strokes) {
-                if (i == selPage && sel.containsKey(s)) s.emitAll(0, s.tool == Stroke.HL ? gl.selHl : gl.selPen);
-                else s.emitAll(top, s.tool == Stroke.HL ? gl.hl : gl.pen);
+                if (gest == G_ERASE && (doomed.contains(s) || pieces.containsKey(s))) {
+                    boolean dk = book.paper == Notebook.PAPER_DARK;
+                    int grey = s.hl() ? (dk ? 0xff3a3d44 : 0xffe6e8ec) : (dk ? 0xff5a5f69 : 0xffc6cad2);
+                    s.withColor(grey).emitAll(top, s.hl() ? gl.hl : gl.pen); // greyed: goes when the pen lifts
+                    ArrayList<Stroke> ps = pieces.get(s);
+                    if (ps != null) for (Stroke q : ps) q.emitAll(top, q.hl() ? gl.hl : gl.pen);
+                    continue;
+                }
+                if (i == selPage && sel.containsKey(s)) s.emitAll(0, s.hl() ? gl.selHl : gl.selPen);
+                else s.emitAll(top, s.hl() ? gl.hl : gl.pen);
             }
         }
         if (live != null) {
@@ -1347,14 +1379,26 @@ final class Engine implements Choreographer.FrameCallback {
 
     private static boolean isStylus(int tt) { return tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER; }
 
+    /** A finger gesture became a two-finger one: hand it to scrolling / zooming (and two-finger-tap undo). */
+    private void toPan(MotionEvent ev, int a) {
+        gest = G_PAN;
+        panBegin(ev);
+        panEvent(ev, a);
+    }
+
     private void handle(MotionEvent ev, long recv) {
         int a = ev.getActionMasked();
         if (a == MotionEvent.ACTION_DOWN) {
             int tt = ev.getToolType(0);
             boolean pen = isStylus(tt) || (fingerDraw && tt == MotionEvent.TOOL_TYPE_FINGER);
+            fingerGest = pen && !isStylus(tt);
+            if (fingerGest && (SystemClock.uptimeMillis() - stylusAt < 450 || ev.getTouchMajor() > dp(40))) {
+                gest = G_IGNORE; // the pen is near, or a palm: fingers don't write now
+                return;
+            }
             if (editing != null || tool == TOOL_TEXT) main.post(listener::onDismissText);
             // touching the current selection moves/scales it (pen or finger)
-            if (hasSel() && tool == TOOL_LASSO && selHit(ev.getX(), ev.getY())) {
+            if (hasSel() && (tool == TOOL_LASSO || shapeMode()) && selHit(ev.getX(), ev.getY())) {
                 stopFling();
                 gest = G_SEL;
                 selBegin(ev);
@@ -1363,6 +1407,7 @@ final class Engine implements Choreographer.FrameCallback {
             if (pen) {
                 stopFling();
                 gesturing = false;
+                if (hasSel() && tool != TOOL_LASSO) clearSelection(); // writing next to a shape just carries on
                 if (!front) renderNow(); // back into front-buffer mode before drawing
                 int btn = ev.getButtonState();
                 boolean erase = tt == MotionEvent.TOOL_TYPE_ERASER || tool == TOOL_ERASER || tempEraser
@@ -1415,17 +1460,24 @@ final class Engine implements Choreographer.FrameCallback {
         }
         switch (gest) {
             case G_INK:
-                if (a == MotionEvent.ACTION_POINTER_DOWN && fingerDraw) {
+                if (a == MotionEvent.ACTION_POINTER_DOWN && fingerGest) { // a second finger: scroll / zoom instead
                     inkCancel();
-                    gest = G_PAN;
-                    panBegin(ev);
-                    panEvent(ev, a);
+                    toPan(ev, a);
                 } else inkEvent(ev, a, recv);
                 break;
             case G_ERASE:
-                eraseEvent(ev, a);
+                if (a == MotionEvent.ACTION_POINTER_DOWN && fingerGest) {
+                    eraseEvent(ev, MotionEvent.ACTION_UP); // keep what was erased so far
+                    toPan(ev, a);
+                } else eraseEvent(ev, a);
                 break;
             case G_LASER:
+                if (a == MotionEvent.ACTION_POINTER_DOWN && fingerGest) {
+                    laserDown = false;
+                    laserUpAt = SystemClock.uptimeMillis();
+                    toPan(ev, a);
+                    break;
+                }
                 laserAdd(ev);
                 if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
                     laserDown = false;
@@ -1435,10 +1487,16 @@ final class Engine implements Choreographer.FrameCallback {
                 }
                 break;
             case G_LASSO:
-                lassoEvent(ev, a);
+                if (a == MotionEvent.ACTION_POINTER_DOWN && fingerGest) {
+                    lassoEvent(ev, MotionEvent.ACTION_CANCEL);
+                    toPan(ev, a);
+                } else lassoEvent(ev, a);
                 break;
             case G_TAPE:
-                tapeEvent(ev, a);
+                if (a == MotionEvent.ACTION_POINTER_DOWN && fingerGest) {
+                    tapeEvent(ev, MotionEvent.ACTION_CANCEL);
+                    toPan(ev, a);
+                } else tapeEvent(ev, a);
                 break;
             case G_SEL:
                 selEvent(ev, a);
@@ -1471,11 +1529,11 @@ final class Engine implements Choreographer.FrameCallback {
 
     // ink ---------------------------------------------------------------------------------
 
-    private SegBuf buf() { return live.tool == Stroke.HL ? gl.hl : gl.pen; }
+    private SegBuf buf() { return live.hl() ? gl.hl : gl.pen; }
 
     private void inkBegin(MotionEvent ev, long recv) {
         boolean hlTool = tool == TOOL_HL;
-        live = new Stroke(hlTool ? Stroke.HL : penType, hlTool ? hlColor : penColor, hlTool ? hlWidth : penWidth);
+        live = new Stroke(hlTool ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType, hlTool ? hlColor : penColor, hlTool ? hlWidth : penWidth);
         predMode = hlTool ? 1 : 0;
         float docY = oy + ev.getY() / z;
         if (!canvas() && docY > docH && !book.pages.isEmpty()) { // writing on the paper after the last page: make it real
@@ -1502,13 +1560,36 @@ final class Engine implements Choreographer.FrameCallback {
         if (predictor != null) predictor.record(ev);
         newFirst = b.count;
         dirty.setEmpty();
-        holdX = ev.getX();
-        holdY = ev.getY();
+        holdX = startX = lastX = ev.getX();
+        holdY = startY = lastY = ev.getY();
+        movedFromStart = false;
         rulerPick(ev.getX(), ev.getY());
-        addSample(ev.getX(), ev.getY(), ev.getPressure());
+        addSample(ev.getX(), ev.getY(), fingerGest ? FINGER_P : ev.getPressure());
         if (rulerEdge == 0) armSnap();
+        if (holdErase && rulerEdge == 0) h.postDelayed(holdEraseR, HOLD_ERASE_MS);
         predict(ev);
         inkRender(ev, recv);
+    }
+
+    // ---- hold the pen still where it lands: the stroke turns into an eraser until it lifts --------
+
+    private static final long HOLD_ERASE_MS = 450;
+    private float startX, startY, lastX, lastY; // screen px
+    private boolean movedFromStart;
+    private final Runnable holdEraseR = this::holdToErase;
+
+    private void holdToErase() {
+        if (gest != G_INK || live == null || movedFromStart || snapped) return;
+        h.removeCallbacks(snapR);
+        buf().truncate(liveFirst); // the dot under the tip goes
+        live = null;
+        gl.pred.clear();
+        overlay = false;
+        needCache = true;
+        renderNow();
+        gest = G_ERASE;
+        eraseBeginAt(lastX, lastY);
+        main.post(listener::onHaptic);
     }
 
     private final Runnable snapR = this::trySnap;
@@ -1520,13 +1601,27 @@ final class Engine implements Choreographer.FrameCallback {
 
     /** Pen held still mid-stroke: replace the stroke with a clean shape if it looks like one. */
     private void trySnap() {
-        if (gest != G_INK || live == null || snapped) return;
+        if (gest != G_INK || live == null || snapped || !movedFromStart) return; // a pen resting where it landed erases instead
         float[] pts = Shapes.recognize(live);
         if (pts == null) return;
         float avgP = 0;
         for (int i = 0; i < live.n; i++) avgP += live.p[4 * i + 2];
         avgP /= live.n;
+        // remember the clean shape and where the pen is: moving on now stretches / resizes it
+        snapPts = pts;
+        snapP = avgP;
+        snapRefX = live.x(live.n - 1);
+        snapRefY = live.y(live.n - 1);
+        snapAdjusting = false;
+        float pathLen = 0;
+        for (int i = 2; i + 1 < pts.length; i += 2) pathLen += (float) Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+        snapLine = pathLen > 0 && Math.hypot(pts[pts.length - 2] - pts[0], pts[pts.length - 1] - pts[1]) / pathLen > 0.995f;
+        float l = Float.MAX_VALUE, t = Float.MAX_VALUE, r = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
+        for (int i = 0; i + 1 < pts.length; i += 2) { l = Math.min(l, pts[i]); r = Math.max(r, pts[i]); t = Math.min(t, pts[i + 1]); b = Math.max(b, pts[i + 1]); }
+        snapCx = (l + r) / 2;
+        snapCy = (t + b) / 2;
         Stroke s = new Stroke(live.tool, live.color, live.width);
+        s.shape = snapLine ? Stroke.LINE : Stroke.CLOSED;
         for (int i = 0; i < pts.length; i += 2) s.add(pts[i], pts[i + 1], avgP);
         buf().truncate(liveFirst);
         live = s;
@@ -1538,6 +1633,64 @@ final class Engine implements Choreographer.FrameCallback {
         Log.i(Gl.TAG, "shape snapped: " + (pts.length / 2) + " points");
     }
 
+    // ---- a snapped shape follows the pen until it lifts: lines stretch / turn, shapes resize --------
+
+    private float[] snapPts;
+    private float snapP, snapRefX, snapRefY, snapCx, snapCy;
+    private boolean snapLine, snapAdjusting;
+
+    private void adjustSnap(float sx, float sy) {
+        if (snapPts == null || live == null) return;
+        float px = ox + sx / z, py = oy + sy / z - liveTop;
+        if (!snapAdjusting && Math.hypot(px - snapRefX, py - snapRefY) * z < dp(4)) return; // ignore the hand's tremble
+        snapAdjusting = true;
+        float[] pts;
+        if (snapLine) {
+            float ax = snapPts[0], ay = snapPts[1], dx = px - ax, dy = py - ay, len = (float) Math.hypot(dx, dy);
+            double ang = Math.toDegrees(Math.atan2(dy, dx)), near = Math.round(ang / 45.0) * 45.0;
+            if (Math.abs(ang - near) < 5) { // level, upright or 45°: lock to it
+                double rad = Math.toRadians(near);
+                dx = (float) Math.cos(rad) * len;
+                dy = (float) Math.sin(rad) * len;
+            }
+            pts = Shapes.densify(new float[]{ax, ay, ax + dx, ay + dy}, false);
+        } else {
+            float r0 = (float) Math.hypot(snapRefX - snapCx, snapRefY - snapCy), r1 = (float) Math.hypot(px - snapCx, py - snapCy);
+            float k = r0 < 1 ? 1 : Math.max(0.2f, Math.min(6f, r1 / r0));
+            pts = new float[snapPts.length];
+            for (int i = 0; i + 1 < pts.length; i += 2) { pts[i] = snapCx + (snapPts[i] - snapCx) * k; pts[i + 1] = snapCy + (snapPts[i + 1] - snapCy) * k; }
+        }
+        replaceLive(pts, snapP, snapLine ? Stroke.LINE : Stroke.CLOSED);
+    }
+
+    /** Swaps the stroke being drawn for clean points (page-local) and redraws. */
+    private void replaceLive(float[] pts, float pressure, int shape) {
+        Stroke s = new Stroke(live.tool, live.color, live.width);
+        s.shape = shape;
+        for (int i = 0; i + 1 < pts.length; i += 2) s.add(pts[i], pts[i + 1], pressure);
+        buf().truncate(liveFirst);
+        live = s;
+        live.emitAll(liveTop, buf());
+        gl.pred.clear();
+        needCache = true;
+        requestFrame();
+    }
+
+    /** Highlighter: a nearly straight swipe (or any, set to always) becomes a ruler-straight line. */
+    private void straightenHighlight() {
+        if (live == null || !live.hl() || snapped || hlStraight == 0 || live.n < 2) return;
+        float x0 = live.x(0), y0 = live.y(0), x1 = live.x(live.n - 1), y1 = live.y(live.n - 1), len = 0, avgP = 0;
+        for (int i = 1; i < live.n; i++) len += (float) Math.hypot(live.x(i) - live.x(i - 1), live.y(i) - live.y(i - 1));
+        for (int i = 0; i < live.n; i++) avgP += live.p[4 * i + 2];
+        avgP /= live.n;
+        float ends = (float) Math.hypot(x1 - x0, y1 - y0);
+        if (ends * z < dp(14) || len <= 0) return;
+        if (hlStraight == 1 && ends / len < 0.9f) return;
+        float ang = (float) Math.toDegrees(Math.atan2(y1 - y0, x1 - x0)), m = ((ang % 90) + 90) % 90;
+        if (m < 6 || m > 84) { if (Math.abs(x1 - x0) >= Math.abs(y1 - y0)) y1 = y0; else x1 = x0; }
+        replaceLive(Shapes.densify(new float[]{x0, y0, x1, y1}, false), avgP, Stroke.LINE);
+    }
+
     private void inkEvent(MotionEvent ev, int a, long recv) {
         if (live == null) return;
         if (a == MotionEvent.ACTION_CANCEL || (ev.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
@@ -1546,6 +1699,7 @@ final class Engine implements Choreographer.FrameCallback {
         }
         if (a != MotionEvent.ACTION_MOVE && a != MotionEvent.ACTION_UP) return;
         if (snapped) {
+            adjustSnap(ev.getX(), ev.getY());
             if (a == MotionEvent.ACTION_UP) inkCommit(ev);
             return;
         }
@@ -1553,8 +1707,14 @@ final class Engine implements Choreographer.FrameCallback {
         newFirst = buf().count;
         dirty.setEmpty();
         int hs = ev.getHistorySize();
-        for (int i = 0; i < hs; i++) addSample(ev.getHistoricalX(i), ev.getHistoricalY(i), ev.getHistoricalPressure(i));
-        addSample(ev.getX(), ev.getY(), ev.getPressure());
+        for (int i = 0; i < hs; i++) addSample(ev.getHistoricalX(i), ev.getHistoricalY(i), fingerGest ? FINGER_P : ev.getHistoricalPressure(i));
+        addSample(ev.getX(), ev.getY(), fingerGest ? FINGER_P : ev.getPressure());
+        lastX = ev.getX();
+        lastY = ev.getY();
+        if (!movedFromStart && Math.hypot(lastX - startX, lastY - startY) > dp(5)) {
+            movedFromStart = true;
+            h.removeCallbacks(holdEraseR);
+        }
         if (Math.hypot(ev.getX() - holdX, ev.getY() - holdY) > dp(3)) {
             holdX = ev.getX();
             holdY = ev.getY();
@@ -1579,6 +1739,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void inkCommit(MotionEvent ev) {
         h.removeCallbacks(snapR);
+        h.removeCallbacks(holdEraseR);
         if (rulerEdge != 0 && live.n > 0) {
             final float len = (float) Math.hypot(live.x(live.n - 1) - live.x(0), live.y(live.n - 1) - live.y(0));
             main.post(() -> listener.onRulerLength(len, true));
@@ -1601,6 +1762,7 @@ final class Engine implements Choreographer.FrameCallback {
             requestFrame();
             return;
         }
+        straightenHighlight();
         Object[] before = pageState(p);
         p.strokes.add(live);
         for (Notebook.Item it : p.items) // ink written over covering tape goes under it
@@ -1615,18 +1777,24 @@ final class Engine implements Choreographer.FrameCallback {
             requestFrame();
             notifyState();
         }
+        Stroke done = live;
+        int donePage = livePage;
         live = null;
         overlay = false;
         gest = G_NONE;
         if (snapped) {
             needCache = true;
             requestFrame();
+            ArrayList<Stroke> one = new ArrayList<>();
+            one.add(done);
+            select(donePage, one, new ArrayList<>()); // handles appear: stretch it now or come back later
         }
         docChanged();
     }
 
     private void inkCancel() {
         h.removeCallbacks(snapR);
+        h.removeCallbacks(holdEraseR);
         if (live != null) {
             buf().truncate(liveFirst);
             live = null;
@@ -1784,10 +1952,15 @@ final class Engine implements Choreographer.FrameCallback {
 
     // erase -------------------------------------------------------------------------------
 
-    private void eraseBegin(MotionEvent ev) {
+    private void eraseBegin(MotionEvent ev) { eraseBeginAt(ev.getX(), ev.getY()); }
+
+    private void eraseBeginAt(float x, float y) {
         eraseBefore = new IdentityHashMap<>();
-        ex = ev.getX();
-        ey = ev.getY();
+        doomed.clear();
+        doomedItems.clear();
+        pieces.clear();
+        ex = x;
+        ey = y;
         predCur.setEmpty();
         predPrev.setEmpty();
         eraseAlong(ex, ey, ex, ey);
@@ -1804,6 +1977,23 @@ final class Engine implements Choreographer.FrameCallback {
             }
         }
         if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+            boolean previewed = !doomed.isEmpty() || !doomedItems.isEmpty() || !pieces.isEmpty();
+            if (previewed && a == MotionEvent.ACTION_UP) { // the pen lifted: now the greyed ink really goes
+                for (Notebook.Page pg : eraseBefore.keySet()) {
+                    ArrayList<Stroke> keep = new ArrayList<>();
+                    for (Stroke st : pg.strokes) {
+                        if (doomed.contains(st)) continue;
+                        ArrayList<Stroke> ps = pieces.get(st);
+                        if (ps != null) keep.addAll(ps); else keep.add(st);
+                    }
+                    pg.strokes = keep;
+                    pg.items.removeIf(doomedItems::contains);
+                }
+            } else if (previewed) eraseBefore.clear(); // cancelled: nothing was changed
+            doomed.clear();
+            doomedItems.clear();
+            pieces.clear();
+            if (previewed) { needRebuild = true; needCache = true; requestFrame(); }
             if (!eraseBefore.isEmpty()) {
                 ArrayList<PageEdit> edits = new ArrayList<>();
                 for (Map.Entry<Notebook.Page, Object[]> e : eraseBefore.entrySet())
@@ -1833,6 +2023,26 @@ final class Engine implements Choreographer.FrameCallback {
             ArrayList<Stroke> list = page.strokes;
             for (int i = list.size() - 1; i >= 0; i--) {
                 Stroke s = list.get(i);
+                if (erasePreview) {
+                    if (partialErase) {
+                        ArrayList<Stroke> cur = pieces.get(s), out = new ArrayList<>();
+                        boolean touched = false;
+                        for (Stroke q : cur != null ? cur : java.util.Collections.singletonList(s)) {
+                            ArrayList<Stroke> parts = q.cut(x0, y0 - top, x1, y1 - top, er);
+                            if (parts == null) out.add(q);
+                            else { out.addAll(parts); touched = true; }
+                        }
+                        if (!touched) continue;
+                        if (!eraseBefore.containsKey(page)) eraseBefore.put(page, pageState(page));
+                        pieces.put(s, out);
+                        any = true;
+                    } else if (!doomed.contains(s) && s.hit(x0, y0 - top, x1, y1 - top, er)) {
+                        if (!eraseBefore.containsKey(page)) eraseBefore.put(page, pageState(page));
+                        doomed.add(s);
+                        any = true;
+                    }
+                    continue;
+                }
                 if (partialErase) {
                     ArrayList<Stroke> parts = s.cut(x0, y0 - top, x1, y1 - top, er);
                     if (parts == null) continue;
@@ -1858,8 +2068,9 @@ final class Engine implements Choreographer.FrameCallback {
                 for (int k = 0; k <= steps; k++) {
                     float t = k / (float) steps;
                     if (it.contains(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t - top, er * 0.6f)) {
+                        if (erasePreview && doomedItems.contains(it)) break;
                         if (!eraseBefore.containsKey(page)) eraseBefore.put(page, pageState(page));
-                        page.items.remove(i);
+                        if (erasePreview) doomedItems.add(it); else page.items.remove(i);
                         any = true;
                         needCache = true;
                         break;
@@ -1950,14 +2161,21 @@ final class Engine implements Choreographer.FrameCallback {
                 for (Stroke s : p.strokes) if (s.insideFraction(xs, ys, ln) >= 0.5f) ss.add(s);
                 for (Notebook.Item it : p.items) if (Geo.inside(it.x + it.w / 2, it.y + it.h / 2, xs, ys, ln)) si.add(it);
             }
-            // a tap (or tiny lasso) on a picture/text box selects it
+            // a tap (or tiny lasso) selects what's under it: a picture, text box or tape, else a stroke (a shape gets its handles)
             if (ss.isEmpty() && si.isEmpty()) {
                 float cx = xs[0], cy = ys[0];
                 for (int i = p.items.size() - 1; i >= 0; i--) {
                     Notebook.Item it = p.items.get(i);
-                    if (cx >= it.x && cx <= it.x + it.w && cy >= it.y && cy <= it.y + it.h) {
+                    if (it.contains(cx, cy, 0)) {
                         si.add(it);
                         break;
+                    }
+                }
+                if (si.isEmpty()) {
+                    float reach = dp(10) / z;
+                    for (int i = p.strokes.size() - 1; i >= 0; i--) {
+                        Stroke s = p.strokes.get(i);
+                        if (s.hit(cx, cy, cx, cy, reach)) { ss.add(s); break; }
                     }
                 }
             }
@@ -1999,7 +2217,7 @@ final class Engine implements Choreographer.FrameCallback {
         needRebuild = true;
         wantFront = true;
         requestFrame();
-        main.post(() -> listener.onSelection(null));
+        main.post(() -> { listener.onSelection(null); listener.onHandles(null, false); });
         notifyState();
     }
 
@@ -2014,11 +2232,127 @@ final class Engine implements Choreographer.FrameCallback {
     private void postSelection() {
         if (!hasSel()) return;
         final RectF r = selScreen();
-        main.post(() -> listener.onSelection(r));
+        final float[] hs = shapeMode() ? handlesScreen() : null;
+        final boolean line = hs != null && selStrokes.get(0).shape == Stroke.LINE;
+        main.post(() -> { listener.onSelection(r); listener.onHandles(hs, line); });
+    }
+
+    // ---- shape handles: a lone snapped shape can be stretched any time -------------------------
+
+    private int shapeHandle = -1;   // handle being dragged (-1: moving the whole selection)
+    private Stroke shapeOrig;
+    private Object[] shapeBefore;
+    private int shapeIdx;
+
+    private boolean shapeMode() { return hasSel() && selItems.isEmpty() && selStrokes.size() == 1 && selStrokes.get(0).shape != 0; }
+
+    private static RectF ptsBox(Stroke s) {
+        RectF b = new RectF(Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE);
+        for (int i = 0; i < s.n; i++) { b.left = Math.min(b.left, s.x(i)); b.right = Math.max(b.right, s.x(i)); b.top = Math.min(b.top, s.y(i)); b.bottom = Math.max(b.bottom, s.y(i)); }
+        return b;
+    }
+
+    /**
+     * A snapped polygon's corners (point indices): snapping repeats each corner point so it stays sharp, and that
+     * repeat marks it. Null for an ellipse, which has none.
+     */
+    private static int[] corners(Stroke s) {
+        ArrayList<Integer> c = new ArrayList<>();
+        c.add(0);
+        for (int i = 1; i + 1 < s.n - 1; i++) if (s.x(i) == s.x(i + 1) && s.y(i) == s.y(i + 1)) c.add(i);
+        if (c.size() < 3 || c.size() > 12) return null;
+        int[] r = new int[c.size()];
+        for (int i = 0; i < r.length; i++) r[i] = c.get(i);
+        return r;
+    }
+
+    /** Handle positions, page-local: a line's ends, a polygon's corners, or an ellipse's top, right, bottom and left. */
+    private float[] handlesLocal() {
+        Stroke s = selStrokes.get(0);
+        if (s.shape == Stroke.LINE) return new float[]{s.x(0), s.y(0), s.x(s.n - 1), s.y(s.n - 1)};
+        int[] c = corners(s);
+        if (c != null) {
+            float[] h = new float[2 * c.length];
+            for (int i = 0; i < c.length; i++) { h[2 * i] = s.x(c[i]); h[2 * i + 1] = s.y(c[i]); }
+            return h;
+        }
+        RectF b = ptsBox(s);
+        float cx = b.centerX(), cy = b.centerY();
+        return new float[]{cx, b.top, b.right, cy, cx, b.bottom, b.left, cy};
+    }
+
+    /** The same handles in screen px, following a selection that is being moved. */
+    private float[] handlesScreen() {
+        float[] h = handlesLocal();
+        float top = tops[selPage];
+        for (int i = 0; i + 1 < h.length; i += 2) {
+            h[i] = (((h[i] - spx) * ss + spx + stx) - ox) * z;
+            h[i + 1] = (((h[i + 1] - spy) * ss + spy + sty) + top - oy) * z;
+        }
+        return h;
+    }
+
+    private void shapeDrag(float sx, float sy) {
+        float px = ox + sx / z, py = oy + sy / z - tops[selPage];
+        Stroke o = shapeOrig;
+        float pr = o.n > 0 ? o.p[2] : 0.5f;
+        float[] pts;
+        if (o.shape == Stroke.LINE) {
+            boolean startMoves = shapeHandle == 0;
+            float fx = startMoves ? o.x(o.n - 1) : o.x(0), fy = startMoves ? o.y(o.n - 1) : o.y(0);
+            float dx = px - fx, dy = py - fy, len = (float) Math.hypot(dx, dy);
+            double ang = Math.toDegrees(Math.atan2(dy, dx)), near = Math.round(ang / 45.0) * 45.0;
+            if (Math.abs(ang - near) < 5) { double r = Math.toRadians(near); dx = (float) Math.cos(r) * len; dy = (float) Math.sin(r) * len; }
+            pts = startMoves ? new float[]{fx + dx, fy + dy, fx, fy} : new float[]{fx, fy, fx + dx, fy + dy};
+            pts = Shapes.densify(pts, false);
+        } else if (corners(o) != null) { // polygon: that corner goes where the pen is, the others stay
+            int[] c = corners(o);
+            float[] v = new float[2 * c.length + 2];
+            for (int i = 0; i < c.length; i++) { v[2 * i] = o.x(c[i]); v[2 * i + 1] = o.y(c[i]); }
+            v[2 * shapeHandle] = px;
+            v[2 * shapeHandle + 1] = py;
+            v[2 * c.length] = v[0];
+            v[2 * c.length + 1] = v[1];
+            pts = Shapes.densify(v, true);
+        } else { // ellipse: top / right / bottom / left handles move that side, the opposite side stays
+            RectF b = ptsBox(o);
+            float l = b.left, t = b.top, r = b.right, bt = b.bottom, min = 6;
+            int hI = shapeHandle;
+            if (hI == 3) l = Math.min(px, r - min);
+            if (hI == 1) r = Math.max(px, l + min);
+            if (hI == 0) t = Math.min(py, bt - min);
+            if (hI == 2) bt = Math.max(py, t + min);
+            float kx = b.width() > 0.5f ? (r - l) / b.width() : 1, ky = b.height() > 0.5f ? (bt - t) / b.height() : 1;
+            pts = new float[2 * o.n];
+            for (int i = 0; i < o.n; i++) { pts[2 * i] = l + (o.x(i) - b.left) * kx; pts[2 * i + 1] = t + (o.y(i) - b.top) * ky; }
+        }
+        Stroke ns = new Stroke(o.tool, o.color, o.width);
+        ns.shape = o.shape;
+        for (int i = 0; i + 1 < pts.length; i += 2) ns.add(pts[i], pts[i + 1], pr);
+        book.pages.get(selPage).strokes.set(shapeIdx, ns);
+        selStrokes = new ArrayList<>();
+        selStrokes.add(ns);
+        selBounds.set(bounds(selStrokes, selItems));
+        needRebuild = true;
+        requestFrame();
     }
 
     private boolean selHit(float sx, float sy) {
         RectF r = selScreen();
+        shapeHandle = -1;
+        if (shapeMode()) {
+            float[] h = handlesScreen();
+            float best = dp(26);
+            for (int i = 0; i + 1 < h.length; i += 2) {
+                float d = (float) Math.hypot(sx - h[i], sy - h[i + 1]);
+                if (d < best) { best = d; shapeHandle = i / 2; }
+            }
+            selScale = false;
+            if (shapeHandle >= 0) return true;
+            if (tool != TOOL_LASSO) return false; // pen: inside a shape you write (labels in a box); only handles grab
+            float pad = dp(18);
+            return sx > r.left - pad && sx < r.right + pad && sy > r.top - pad && sy < r.bottom + pad;
+        }
         float pad = dp(18);
         selScale = Math.hypot(sx - r.right, sy - r.bottom) < dp(30);
         return selScale || (sx > r.left - pad && sx < r.right + pad && sy > r.top - pad && sy < r.bottom + pad);
@@ -2027,6 +2361,13 @@ final class Engine implements Choreographer.FrameCallback {
     private void selBegin(MotionEvent ev) {
         sDownX = ev.getX();
         sDownY = ev.getY();
+        if (shapeHandle >= 0) {
+            shapeOrig = selStrokes.get(0);
+            Notebook.Page p = book.pages.get(selPage);
+            shapeBefore = pageState(p);
+            shapeIdx = p.strokes.indexOf(shapeOrig);
+            if (shapeIdx < 0) shapeHandle = -1;
+        }
         spx = selScale ? selBounds.left : 0;
         spy = selScale ? selBounds.top : 0;
         ss = 1;
@@ -2034,6 +2375,32 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private void selEvent(MotionEvent ev, int a) {
+        if (shapeHandle >= 0) {
+            Notebook.Page p = book.pages.get(selPage);
+            if (a == MotionEvent.ACTION_MOVE) {
+                shapeDrag(ev.getX(), ev.getY());
+                postSelection();
+            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                gest = G_NONE;
+                penNear = SystemClock.uptimeMillis();
+                Stroke now = p.strokes.get(shapeIdx);
+                if (a == MotionEvent.ACTION_UP && now != shapeOrig) {
+                    push(new PageEdit(p, shapeBefore, pageState(p)));
+                    edited();
+                } else if (now != shapeOrig) { // cancelled: put it back
+                    p.strokes.set(shapeIdx, shapeOrig);
+                    selStrokes = new ArrayList<>();
+                    selStrokes.add(shapeOrig);
+                    selBounds.set(bounds(selStrokes, selItems));
+                }
+                shapeHandle = -1;
+                needRebuild = true;
+                wantFront = true;
+                requestFrame();
+                postSelection();
+            }
+            return;
+        }
         if (a == MotionEvent.ACTION_MOVE) {
             float dx = (ev.getX() - sDownX) / z, dy = (ev.getY() - sDownY) / z;
             if (selScale) {
@@ -2437,6 +2804,8 @@ final class Engine implements Choreographer.FrameCallback {
                 snap.write(dir);
             } catch (Exception e) {
                 Log.e(Gl.TAG, "save failed", e);
+                toast("Couldn't save · will try again (is storage full?)");
+                h.post(() -> { dirtyDoc = true; h.removeCallbacks(saveR); h.postDelayed(saveR, 5000); });
             }
         });
     }

@@ -134,6 +134,7 @@ final class Notebook {
     String title = "Untitled", folder = "";
     boolean favorite;
     boolean canvas; // infinite canvas: one unbounded page you can pan in every direction
+    boolean loadFailed; // ink.bin couldn't be read in full (a copy of it was kept)
     int paper = PAPER_WHITE;
     long created, modified;
 
@@ -164,7 +165,9 @@ final class Notebook {
                     }
                     int ns = in.readInt();
                     for (int s = 0; s < ns; s++) {
-                        Stroke st = new Stroke(in.readInt(), in.readInt(), in.readFloat());
+                        int tw = in.readInt();
+                        Stroke st = new Stroke(tw & 0xffff, in.readInt(), in.readFloat());
+                        st.shape = (tw >>> 16) & 0xff;
                         int n = in.readInt();
                         for (int k = 0; k < n; k++) st.add(in.readFloat(), in.readFloat(), in.readFloat());
                         p.strokes.add(st);
@@ -200,7 +203,11 @@ final class Notebook {
                     nb.pages.add(p);
                 }
             } catch (IOException e) {
+                // Keep the unreadable file: the next save would otherwise replace it with only the pages read so far.
                 android.util.Log.e(Gl.TAG, "load failed", e);
+                File keep = new File(dir, "ink.bin.unreadable-" + System.currentTimeMillis());
+                try { Io.copy(new FileInputStream(f), new FileOutputStream(keep)); } catch (IOException ignored) { }
+                nb.loadFailed = true;
             }
         }
         if (nb.pages.isEmpty()) nb.pages.add(new Page(BG_DOTS));
@@ -233,7 +240,7 @@ final class Notebook {
                 out.writeInt(p.pdf);
                 out.writeInt(p.strokes.size());
                 for (Stroke s : p.strokes) {
-                    out.writeInt(s.tool);
+                    out.writeInt(s.tool | (s.shape << 16));
                     out.writeInt(s.color);
                     out.writeFloat(s.width);
                     out.writeInt(s.n);
@@ -271,9 +278,8 @@ final class Notebook {
 
     void writeMetaFields(File dir) throws IOException {
         Properties m = meta(dir);
+        // folder and favourite belong to the notes screen: an editor save must not undo a move or a star made there
         m.setProperty("title", title);
-        m.setProperty("folder", folder);
-        m.setProperty("favorite", Boolean.toString(favorite));
         m.setProperty("canvas", Boolean.toString(canvas));
         m.setProperty("paper", Integer.toString(paper));
         m.setProperty("created", Long.toString(created));
