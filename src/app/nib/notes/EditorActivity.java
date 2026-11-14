@@ -524,6 +524,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private float splitRatio;    // share of the window the first pane gets
     private LinearLayout splitKnob;
     private Ui.IconButton knobOrient;
+    private ImageView knobGrip;
+    private View splitGrab;      // invisible strip along the rule: drag it to resize
     private View splitGuide;     // accent line that follows the finger while the handle is dragged
 
     private void layoutSplit() {
@@ -549,29 +551,50 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 return drag;
             }
             @Override public boolean onTouchEvent(MotionEvent e) {
-                int a = e.getActionMasked();
-                if (a == MotionEvent.ACTION_DOWN) { downX = e.getRawX(); downY = e.getRawY(); return true; }
-                float total = splitVert ? paneRow.getHeight() : paneRow.getWidth();
-                float pos = splitVert ? e.getRawY() - rootTop() : e.getRawX();
-                float r = Math.max(0.2f, Math.min(0.8f, pos / Math.max(1f, total)));
-                if (a == MotionEvent.ACTION_MOVE) {
-                    drag = true;
-                    showGuide(r * total);
-                } else if (a == MotionEvent.ACTION_UP && drag) {
-                    splitGuide.setVisibility(View.GONE);
-                    splitRatio = Math.abs(r - 0.5f) < 0.03f ? 0.5f : r; // snaps to equal halves
-                    prefs.edit().putFloat("splitRatio", splitRatio).apply();
-                    layoutSplit();
-                    paneRow.post(this::requestLayout);
-                    paneRow.post(EditorActivity.this::placeKnob);
-                } else if (a == MotionEvent.ACTION_CANCEL) splitGuide.setVisibility(View.GONE);
+                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { downX = e.getRawX(); downY = e.getRawY(); return true; }
+                if (e.getActionMasked() == MotionEvent.ACTION_MOVE) drag = true;
+                splitDrag(e, drag);
                 return true;
             }
         };
+        // the rule between the panes is a grab strip too (fingers only: the pen writes right up to it)
+        splitGrab = new View(this) {
+            boolean drag;
+            float downX, downY;
+            long lastTap;
+            @Override public boolean onTouchEvent(MotionEvent e) {
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN) {
+                    int tt = e.getToolType(0);
+                    if (tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER) return false;
+                    downX = e.getRawX(); downY = e.getRawY(); drag = false;
+                    return true;
+                }
+                if (a == MotionEvent.ACTION_MOVE && Math.hypot(e.getRawX() - downX, e.getRawY() - downY) > Ui.dp(EditorActivity.this, 4)) drag = true;
+                if (a == MotionEvent.ACTION_UP && !drag) { // double-tap: back to equal halves
+                    if (e.getEventTime() - lastTap < 330) {
+                        lastTap = 0;
+                        setSplitRatio(0.5f);
+                    } else lastTap = e.getEventTime();
+                    return true;
+                }
+                splitDrag(e, drag);
+                return true;
+            }
+        };
+        splitGrab.setContentDescription("Drag to resize the panes, double-tap for equal halves");
+        splitGrab.setVisibility(View.GONE);
+        root.addView(splitGrab, new FrameLayout.LayoutParams(Ui.dp(this, 28), -1));
         splitKnob.setGravity(Gravity.CENTER);
         int pad = Ui.dp(this, 3);
         splitKnob.setPadding(pad, pad, pad, pad);
         Ui.capsule(splitKnob, this, 20);
+        knobGrip = new ImageView(this); // shows the handle can be dragged
+        knobGrip.setImageResource(R.drawable.ic_grip);
+        knobGrip.setScaleType(ImageView.ScaleType.CENTER);
+        knobGrip.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, R.color.on_surface_variant)));
+        knobGrip.setContentDescription("Drag to resize");
+        splitKnob.addView(knobGrip, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 28)));
         knobOrient = new Ui.IconButton(this, R.drawable.ic_split_rows, "Stack top and bottom");
         knobOrient.setOnClickListener(v -> setSplitVert(!splitVert));
         Ui.IconButton swap = new Ui.IconButton(this, R.drawable.ic_swap, "Swap sides");
@@ -585,6 +608,26 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         splitKnob.setVisibility(View.GONE);
         root.addView(splitKnob, new FrameLayout.LayoutParams(-2, -2));
         paneRow.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeKnob());
+    }
+
+    /** Drag on the handle or the rule: a guide line follows, the panes take the new sizes on lift. */
+    private void splitDrag(MotionEvent e, boolean drag) {
+        int a = e.getActionMasked();
+        float total = splitVert ? paneRow.getHeight() : paneRow.getWidth();
+        float pos = splitVert ? e.getRawY() - rootTop() : e.getRawX();
+        float r = Math.max(0.2f, Math.min(0.8f, pos / Math.max(1f, total)));
+        if (a == MotionEvent.ACTION_MOVE && drag) showGuide(r * total);
+        else if (a == MotionEvent.ACTION_UP && drag) setSplitRatio(Math.abs(r - 0.5f) < 0.03f ? 0.5f : r); // snaps to equal halves
+        else if (a == MotionEvent.ACTION_CANCEL) splitGuide.setVisibility(View.GONE);
+    }
+
+    private void setSplitRatio(float r) {
+        splitGuide.setVisibility(View.GONE);
+        splitRatio = r;
+        prefs.edit().putFloat("splitRatio", splitRatio).apply();
+        layoutSplit();
+        paneRow.post(paneRow::requestLayout);
+        paneRow.post(this::placeKnob);
     }
 
     private float rootTop() {
@@ -629,7 +672,21 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (splitKnob == null) return;
         boolean on = shown[1] != null;
         splitKnob.setVisibility(on ? View.VISIBLE : View.GONE);
+        if (splitGrab != null) splitGrab.setVisibility(on ? View.VISIBLE : View.GONE);
         if (!on) return;
+        knobGrip.setRotation(splitVert ? 90 : 0);
+        int g = Ui.dp(this, 28);
+        FrameLayout.LayoutParams gl = (FrameLayout.LayoutParams) splitGrab.getLayoutParams();
+        gl.width = splitVert ? -1 : g;
+        gl.height = splitVert ? g : -1;
+        splitGrab.setLayoutParams(gl);
+        if (splitVert) {
+            splitGrab.setTranslationX(0);
+            splitGrab.setTranslationY(splitDivider.getTop() + splitDivider.getHeight() / 2f - g / 2f);
+        } else {
+            splitGrab.setTranslationX(splitDivider.getLeft() + splitDivider.getWidth() / 2f - g / 2f);
+            splitGrab.setTranslationY(0);
+        }
         splitKnob.setOrientation(splitVert ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
         knobOrient.setImageResource(splitVert ? R.drawable.ic_split_cols : R.drawable.ic_split_rows);
         knobOrient.setContentDescription(splitVert ? "Side by side" : "Stack top and bottom");

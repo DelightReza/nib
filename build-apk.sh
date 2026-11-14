@@ -15,7 +15,7 @@ JAR=$SDK/platforms/android-35/android.jar
 OUT=build
 DEBUG_FLAG=""
 if [ "${NIB_DEBUG:-}" = "1" ]; then OUT=build-debug; DEBUG_FLAG="--debug-mode"; fi
-VERSION_NAME=2.1.0
+VERSION_NAME=2.1.1
 VERSION_CODE=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 KS=${NIB_KEYSTORE:-$HOME/.android/debug.keystore}
 KS_PASS=${NIB_KS_PASS:-android}
