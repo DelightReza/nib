@@ -62,9 +62,55 @@ final class Notebook {
             return new Item(TAPE, l - m, t - m, r - l + 2 * m, b - t + 2 * m, pattern, thick, color, pts);
         }
 
+        /**
+         * TEXT converted from handwriting: shown in the handwriting face, and it keeps the original ink so it can be read
+         * again in another language or turned back into handwriting. Stored in pts (no file format change):
+         * {1, strokeCount, per stroke: n, tool, colourHi, colourLo, width, shape, then x, y, pressure × n}.
+         */
+        boolean hand() { return type == TEXT && pts != null && pts.length >= 1 && pts[0] == 1f; }
+
+        boolean hasInk() { return hand() && pts.length > 2 && pts[1] > 0; }
+
+        static final float[] HAND = {1f};
+
+        static float[] handWithInk(java.util.List<Stroke> ink) {
+            int len = 2;
+            for (Stroke s : ink) len += 6 + 3 * s.n;
+            float[] o = new float[len];
+            o[0] = 1f;
+            o[1] = ink.size();
+            int j = 2;
+            for (Stroke s : ink) {
+                o[j++] = s.n; o[j++] = s.tool;
+                o[j++] = (s.color >>> 16) & 0xffff; o[j++] = s.color & 0xffff; // two halves: a float can't hold every int
+                o[j++] = s.width; o[j++] = s.shape;
+                for (int k = 0; k < s.n; k++) { o[j++] = s.x(k); o[j++] = s.y(k); o[j++] = s.p[4 * k + 2]; }
+            }
+            return o;
+        }
+
+        /** The handwriting this text was converted from (where it was written), or an empty list. */
+        java.util.List<Stroke> ink() {
+            java.util.ArrayList<Stroke> out = new java.util.ArrayList<>();
+            if (!hasInk()) return out;
+            try {
+                int j = 2;
+                for (int i = 0; i < (int) pts[1]; i++) {
+                    int n = (int) pts[j++], tool = (int) pts[j++];
+                    int color = ((int) pts[j++] << 16) | (int) pts[j++];
+                    Stroke s = new Stroke(tool, color, pts[j++]);
+                    s.shape = (int) pts[j++];
+                    for (int k = 0; k < n; k++) { s.add(pts[j], pts[j + 1], pts[j + 2]); j += 3; }
+                    out.add(s);
+                }
+            } catch (ArrayIndexOutOfBoundsException e) { out.clear(); }
+            return out;
+        }
+
         Item moved(float px, float py, float s, float tx, float ty) {
             float[] np = null;
-            if (pts != null) {
+            if (type == TEXT) np = pts; // a style flag, not points
+            else if (pts != null) {
                 np = new float[pts.length];
                 for (int i = 0; i + 1 < pts.length; i += 2) { np[i] = (pts[i] - px) * s + px + tx; np[i + 1] = (pts[i + 1] - py) * s + py + ty; }
             }
@@ -326,13 +372,58 @@ final class Notebook {
         File dir;
         String title, folder;
         boolean favorite, canvas;
-        long modified, created;
+        long modified, created, trashedAt;
         int pages;
     }
 
-    static List<Entry> list(Context c) {
+    static List<Entry> list(Context c) { return listIn(root(c)); }
+
+    // ---- trash: deleted notebooks wait here for 30 days ----------------------------------------
+
+    static final long TRASH_KEEP_MS = 30L * 24 * 3600_000;
+
+    static File trashRoot(Context c) {
+        File f = new File(c.getFilesDir(), "trash");
+        f.mkdirs();
+        return f;
+    }
+
+    static List<Entry> listTrash(Context c) {
+        List<Entry> out = listIn(trashRoot(c));
+        out.sort(Comparator.comparingLong((Entry e) -> e.trashedAt).reversed());
+        return out;
+    }
+
+    /** Moves a notebook to the trash (same filesystem, so it's a rename). */
+    static boolean trash(Context c, File dir) {
+        try { setMeta(dir, "trashedAt", Long.toString(System.currentTimeMillis())); } catch (IOException ignored) { }
+        File to = new File(trashRoot(c), dir.getName());
+        if (to.exists()) delete(to);
+        return dir.renameTo(to);
+    }
+
+    static File restore(Context c, File dir) {
+        File to = new File(root(c), dir.getName());
+        if (to.exists()) to = newDir(c);
+        to.delete(); // newDir creates it; renameTo needs it gone
+        if (!dir.renameTo(to)) return null;
+        try {
+            Properties m = meta(to);
+            m.remove("trashedAt");
+            writeMeta(to, m);
+        } catch (IOException ignored) { }
+        return to;
+    }
+
+    /** Deletes for good whatever has been in the trash longer than 30 days. */
+    static void purgeTrash(Context c) {
+        long cut = System.currentTimeMillis() - TRASH_KEEP_MS;
+        for (Entry e : listIn(trashRoot(c))) if (e.trashedAt > 0 && e.trashedAt < cut) delete(e.dir);
+    }
+
+    private static List<Entry> listIn(File root) {
         ArrayList<Entry> out = new ArrayList<>();
-        File[] dirs = root(c).listFiles(File::isDirectory);
+        File[] dirs = root.listFiles(File::isDirectory);
         if (dirs == null) return out;
         for (File d : dirs) {
             if (!new File(d, "meta.properties").exists()) continue;
@@ -346,6 +437,7 @@ final class Notebook {
             e.created = parseLong(m.getProperty("created"), e.modified);
             e.pages = (int) parseLong(m.getProperty("pages"), 1);
             e.canvas = Boolean.parseBoolean(m.getProperty("canvas", "false"));
+            e.trashedAt = parseLong(m.getProperty("trashedAt"), 0);
             out.add(e);
         }
         out.sort(Comparator.comparingLong((Entry e) -> e.modified).reversed());

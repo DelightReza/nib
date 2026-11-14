@@ -9,3 +9,7 @@ libs/
 keys/
 # local design mockups
 design/
+# beautify / script-detection test output
+tools/beautify-test/out/
+tools/beautify-test/*.svg
+tools/beautify-test/*.png

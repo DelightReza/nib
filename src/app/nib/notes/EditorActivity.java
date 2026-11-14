@@ -36,6 +36,7 @@ import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.PopupMenu;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
@@ -105,6 +106,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private LinearLayout palette;
     private SelectionView selView;
     private LinearLayout selBar;
+    private View editTextB, textTools;
     private Engine.State state;
     private Ui.Popover pop;
     private boolean autoHide;
@@ -115,6 +117,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        Theme.applyTo(this);
         String dirPath = getIntent().getStringExtra("dir");
         if (dirPath == null) { finish(); return; }
         prefs = getSharedPreferences("nib", MODE_PRIVATE);
@@ -845,6 +848,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             p.add(Ui.actionRow(this, on ? R.drawable.ic_bookmark_filled : R.drawable.ic_bookmark, on ? "Rename or remove bookmark" : "Bookmark this page",
                     "Bookmarks list under All pages → Bookmarks", v -> { pop.dismiss(); nameBookmark(state.page, null); }));
         }
+        p.add(Ui.actionRow(this, R.drawable.ic_text, "Handwriting tools", "To text language · convert as I write · beautify",
+                v -> { pop.dismiss(); showLassoPanel(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_template, canvas ? "Background" : "Page style", "Pattern and paper colour", v -> { pop.dismiss(); showStyle(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_ruler, "Drawing scale", drawScale > 0 ? "1:" + drawScale + " · the ruler measures real lengths" : "None · the ruler measures the paper",
                 v -> { pop.dismiss(); showScale(anchor); }));
@@ -1115,7 +1120,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             case Engine.TOOL_HL: showPenPanel(anchor, true); break;
             case Engine.TOOL_ERASER: showEraserPanel(anchor); break;
             case Engine.TOOL_TEXT: showTextPanel(anchor); break;
-            case Engine.TOOL_LASSO: toast("Circle ink, text or images to select them · tap a shape to pull its handles"); break;
+            case Engine.TOOL_LASSO: showLassoPanel(anchor); break;
             case Engine.TOOL_LASER: showLaserPanel(anchor); break;
             case Engine.TOOL_TAPE: showTapePanel(anchor); break;
         }
@@ -1901,7 +1906,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         th.setPadding(0, Ui.dp(this, 6), 0, 0);
         col.addView(th);
         col.addView(sectionLabel("Appearance"));
-        col.addView(Ui.segmented(this, new String[]{"System", "Light · Clean", "Dark · Graphite"}, Theme.get(this), i -> Theme.set(this, i)));
+        col.addView(Ui.actionRow(this, R.drawable.ic_palette, "Theme", "Light or dark, accent colour, dark style", v -> ThemeSheet.show(this, this::recreate)));
         col.addView(sectionLabel("Pen"));
         col.addView(Ui.switchRow(this, "Pen buttons", "First button: eraser · second button: lasso · press again to go back",
                 penButton, v -> { penButton = v; saveOptions(); }));
@@ -1912,7 +1917,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         col.addView(Ui.switchRow(this, "Grey out, delete on lift", "Erased ink turns grey and goes when the pen lifts",
                 erasePreview, v -> { erasePreview = v; saveOptions(); }));
         col.addView(sectionLabel("Gestures"));
-        TextView gest = Ui.text(this, "Two-finger tap  ·  undo\nThree-finger tap  ·  redo\nLong-press undo  ·  history slider\n"
+        TextView gest = Ui.text(this, "Three-finger tap  ·  redo\nLong-press undo  ·  history slider\n"
                 + "One finger  ·  scroll      Pinch  ·  zoom\nDouble-tap  ·  fit page width", 14,
                 Ui.color(this, R.color.on_surface_variant), null);
         gest.setLineSpacing(Ui.dp(this, 6), 1f);
@@ -1923,7 +1928,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 Handwriting.enabled(this), v -> { prefs.edit().putBoolean("hwSearch", v).apply(); if (v) Handwriting.indexAll(this, null); }));
         for (int i = 0; i < Handwriting.LANGS.length; i++) {
             final int li = i;
-            col.addView(Ui.switchRow(this, Handwriting.LANG_NAMES[i], i == 0 ? "English handwriting" : "Gurmukhi script, if Google offers the model",
+            col.addView(Ui.switchRow(this, Handwriting.LANG_NAMES[i], Handwriting.LANG_NOTES[i] + " · also helps Beautify",
                     Handwriting.langOn(this, i), v -> { prefs.edit().putBoolean("hwLang" + li, v).apply(); Handwriting.reset(this); }));
         }
         String hs = Handwriting.status();
@@ -2246,7 +2251,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         @Override protected void onDraw(Canvas c) {
             if (r == null) return;
             float d = getResources().getDisplayMetrics().density;
-            int acc = getContext().getColor(R.color.accent);
+            int acc = Ui.color(getContext(), R.color.accent);
             if (handles != null) { // a shape: knobs on its own corners / ends, nothing else in the way
                 for (int i = 0; i + 1 < handles.length; i += 2) {
                     float rad = 9 * d;
@@ -2289,8 +2294,138 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         selBar.addView(selAction(R.drawable.ic_copy, "Copy", v -> engine.selCopy()));
         selBar.addView(selAction(R.drawable.ic_cut, "Cut", v -> engine.selCut()));
         selBar.addView(selAction(R.drawable.ic_duplicate, "Duplicate", v -> engine.selDuplicate()));
+        selBar.addView(selAction(R.drawable.ic_text, "To text", v -> engine.selInk(ink -> showConvert(v, ink))));
+        editTextB = selAction(R.drawable.ic_text, "Edit text", v -> engine.editSelectedText());
+        editTextB.setVisibility(View.GONE);
+        selBar.addView(editTextB, 0);
+        selBar.addView(selAction(R.drawable.ic_sparkle, "Beautify", v -> beautify(false)));
         selBar.addView(selAction(R.drawable.ic_trash, "Delete", v -> engine.selDelete()));
         root.addView(selBar, new FrameLayout.LayoutParams(-2, -2));
+    }
+
+    /**
+     * Convert to text: reads the lassoed writing in the chosen language, shows what it read (editable, with other
+     * readings to pick from), then swaps the ink for a text box. Undo brings the handwriting back.
+     */
+    private void showConvert(View anchor, java.util.ArrayList<Stroke> ink) {
+        if (ink.isEmpty()) { toast("Lasso some handwriting first"); return; }
+        Ui.Popover p = newPop(440).title("Convert to text");
+        int choice = langChoice();
+        TextView status = Ui.text(this, "Reading…", 13, Ui.color(this, R.color.on_surface_variant), null);
+        EditText out = new EditText(this);
+        out.setTextSize(17);
+        out.setTextColor(Ui.color(this, R.color.on_surface));
+        out.setMinLines(2);
+        out.setMaxLines(8);
+        out.setGravity(Gravity.TOP | Gravity.START);
+        out.setPadding(Ui.dp(this, 12), Ui.dp(this, 10), Ui.dp(this, 12), Ui.dp(this, 10));
+        out.setBackground(Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 12)));
+        LinearLayout alts = new LinearLayout(this);
+        float[] lineH = {0};
+        Runnable[] read = new Runnable[1];
+        int[] cur = {Handwriting.convertLang(this)};
+        read[0] = () -> {
+            status.setText("Reading…");
+            out.setText("");
+            alts.removeAllViews();
+            Handwriting.convert(ink, cur[0], status::setText, r -> {
+                if (pop != p) return; // closed meanwhile
+                if (r.error != null) { status.setText(r.error); return; }
+                status.setText((cur[0] == Handwriting.AUTO && r.lang >= 0 ? "Detected " + Handwriting.LANG_NAMES[r.lang] + " · " : "")
+                        + "Check it, fix anything, then replace the handwriting.");
+                out.setText(r.text);
+                out.setSelection(out.length());
+                lineH[0] = r.lineHeight;
+                for (String a : r.alternatives) {
+                    TextView chip = Ui.text(this, a, 14, Ui.color(this, R.color.on_surface), Ui.medium());
+                    chip.setPadding(Ui.dp(this, 12), Ui.dp(this, 7), Ui.dp(this, 12), Ui.dp(this, 7));
+                    chip.setBackground(Ui.ripple(this, Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 16)), Ui.dp(this, 16)));
+                    chip.setOnClickListener(v -> { out.setText(a); out.setSelection(out.length()); });
+                    LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(-2, -2);
+                    cl.rightMargin = Ui.dp(this, 8);
+                    alts.addView(chip, cl);
+                }
+            });
+        };
+        p.add(Ui.segmented(this, LANG_CHOICES, choice, i -> { setLangChoice(i); cur[0] = Handwriting.convertLang(this); read[0].run(); }));
+        LinearLayout.LayoutParams ol = new LinearLayout.LayoutParams(-1, -2);
+        ol.topMargin = Ui.dp(this, 12);
+        out.setLayoutParams(ol);
+        p.add(out);
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(alts);
+        hs.setPadding(0, Ui.dp(this, 8), 0, 0);
+        p.add(hs);
+        status.setPadding(0, Ui.dp(this, 8), 0, Ui.dp(this, 12));
+        p.add(status);
+        LinearLayout btns = new LinearLayout(this);
+        btns.setGravity(Gravity.END);
+        TextView copy = Ui.button(this, "Copy", 0, false);
+        copy.setOnClickListener(v -> {
+            ((android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(android.content.ClipData.newPlainText("Nib", out.getText()));
+            toast("Copied");
+        });
+        TextView rep = Ui.button(this, "Replace handwriting", 0, true);
+        rep.setOnClickListener(v -> {
+            String t = out.getText().toString().trim();
+            if (t.isEmpty()) return;
+            pop.dismiss();
+            engine.selToText(t, lineH[0]);
+            toast("Converted · undo to get the handwriting back");
+        });
+        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 40));
+        bl.leftMargin = Ui.dp(this, 8);
+        btns.addView(copy, new LinearLayout.LayoutParams(-2, Ui.dp(this, 40)));
+        btns.addView(rep, bl);
+        p.add(btns);
+        p.show(anchor);
+        read[0].run();
+    }
+
+    /**
+     * Lasso & handwriting panel (tap the lasso tool again, or ⋯ → Handwriting tools): everything about turning writing
+     * into text and tidying it, in one place.
+     */
+    /** Language choices for converting: Auto first, then the four languages (stored as convertAuto + convertLang). */
+    private static final String[] LANG_CHOICES = {"Auto", "English", "ਪੰਜਾਬੀ", "हिन्दी", "عربي"};
+
+    private int langChoice() { return prefs.getBoolean("convertAuto", false) ? 0 : 1 + Math.min(prefs.getInt("convertLang", 0), 3); }
+
+    private void setLangChoice(int i) {
+        if (i == 0) prefs.edit().putBoolean("convertAuto", true).apply();
+        else prefs.edit().putBoolean("convertAuto", false).putInt("convertLang", i - 1).apply();
+    }
+
+    private void showLassoPanel(View anchor) {
+        Ui.Popover p = newPop(420).title("Lasso & handwriting");
+        TextView hint = Ui.text(this, "Circle writing, then use To text or Beautify in the bar that appears.", 13,
+                Ui.color(this, R.color.on_surface_variant), null);
+        hint.setPadding(0, 0, 0, Ui.dp(this, 6));
+        p.add(hint);
+        p.section("Handwriting to text");
+        String[] ln = {"English", "Punjabi", "Hindi", "Arabic"};
+        android.widget.LinearLayout langSeg = Ui.segmented(this, LANG_CHOICES, langChoice(), this::setLangChoice);
+        p.add(langSeg);
+        p.add(Ui.switchRow(this, "Convert as I write", "Writing turns into text after a short pause · undo brings the ink back",
+                prefs.getBoolean("autoText", false), v -> {
+                    prefs.edit().putBoolean("autoText", v).apply();
+                    int c = Handwriting.convertLang(this);
+                    toast(v ? "Writing now turns into " + (c < 0 ? "text (language detected)" : ln[c] + " text") : "Handwriting stays as ink");
+                }));
+        p.section("Beautify");
+        TextView bh = Ui.text(this, "Keeps your handwriting, makes it neater · 1 gentle, 5 strong", 13,
+                Ui.color(this, R.color.on_surface_variant), null);
+        bh.setPadding(0, 0, 0, Ui.dp(this, 8));
+        p.add(bh);
+        p.add(Ui.segmented(this, new String[]{"1", "2", "3", "4", "5"}, prefs.getInt("beautify", 3) - 1, i -> prefs.edit().putInt("beautify", i + 1).apply()));
+        p.add(Ui.actionRow(this, R.drawable.ic_sparkle, "Beautify this page", "Straighter lines, even size and spacing", v -> { pop.dismiss(); beautify(true); }));
+        p.show(anchor);
+    }
+
+    private void beautify(boolean wholePage) {
+        toast(wholePage ? "Beautifying the page…" : "Beautifying…");
+        engine.beautify(wholePage, prefs.getInt("beautify", 3), Handwriting.reader(this), this::toast);
     }
 
     private View selAction(int icon, String label, View.OnClickListener l) {
@@ -2345,6 +2480,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         textEdit = new EditText(this);
         textEdit.setText(e.item != null ? e.item.text : "");
         textEdit.setTextSize(TypedValue.COMPLEX_UNIT_PX, e.size * e.zoom);
+        textEdit.setTypeface(e.item != null && e.item.hand() ? Ui.hand() : Ui.font(400)); // converted text keeps its handwriting look
         textEdit.setTextColor(state != null && state.paper == Notebook.PAPER_DARK ? Render.inkColor(e.color, true) : e.color);
         textEdit.setIncludeFontPadding(false);
         textEdit.setPadding(0, 0, 0, 0);
@@ -2358,6 +2494,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         lp.leftMargin = Math.round(e.screenX + paneLeft());
         lp.topMargin = Math.round(e.screenY + paneTop());
         root.addView(textEdit, lp);
+        if (e.item != null && e.item.hasInk()) addTextTools(e, lp.leftMargin, lp.topMargin);
         textEdit.requestFocus();
         textEdit.setSelection(textEdit.getText().length());
         ui.postDelayed(() -> {
@@ -2368,6 +2505,73 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     @Override
     public void onDismissText() { commitTextEdit(); }
 
+    /**
+     * Above a converted text box while you edit it: read the original handwriting again in another language
+     * (when detection got it wrong), or turn it back into handwriting.
+     */
+    private void addTextTools(Engine.TextEdit e, int x, int y) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4));
+        row.setBackground(Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 22)));
+        row.setElevation(Ui.dp(this, 6));
+        TextView lab = Ui.text(this, "Read as", 13, Ui.color(this, R.color.on_surface_variant), Ui.medium());
+        lab.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 4), 0);
+        row.addView(lab);
+        String[] names = {"Auto", "English", "ਪੰਜਾਬੀ", "हिन्दी", "عربي"};
+        for (int i = 0; i < names.length; i++) {
+            final int lang = i == 0 ? Handwriting.AUTO : i - 1;
+            TextView c = Ui.text(this, names[i], 14, Ui.color(this, R.color.on_surface), Ui.medium());
+            c.setGravity(Gravity.CENTER);
+            c.setPadding(Ui.dp(this, 11), 0, Ui.dp(this, 11), 0);
+            c.setBackground(Ui.ripple(this, null, Ui.dp(this, 16)));
+            c.setOnClickListener(v -> {
+                EditText et = textEdit;
+                if (et == null) return;
+                toast(lang == Handwriting.AUTO ? "Reading again…" : "Reading as " + Handwriting.LANG_NAMES[lang] + "…");
+                Handwriting.convert(e.item.ink(), lang, "", this::toast, r -> {
+                    if (textEdit != et) return; // closed meanwhile
+                    if (r.error != null) { toast(r.error); return; }
+                    et.setText(r.text.trim().replace('\n', ' '));
+                    et.setSelection(et.length());
+                });
+            });
+            row.addView(c, new LinearLayout.LayoutParams(-2, Ui.dp(this, 34)));
+        }
+        View sep = new View(this);
+        sep.setBackgroundColor(Ui.color(this, R.color.outline));
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(Ui.hairline(this), Ui.dp(this, 22));
+        sl.leftMargin = sl.rightMargin = Ui.dp(this, 4);
+        row.addView(sep, sl);
+        TextView back = Ui.text(this, "Back to handwriting", 14, Ui.color(this, R.color.accent), Ui.bold());
+        back.setGravity(Gravity.CENTER);
+        back.setPadding(Ui.dp(this, 11), 0, Ui.dp(this, 11), 0);
+        back.setBackground(Ui.ripple(this, null, Ui.dp(this, 16)));
+        back.setOnClickListener(v -> {
+            EditText et = textEdit;
+            if (et == null) return;
+            textEdit = null;
+            textReq = null;
+            getSystemService(InputMethodManager.class).hideSoftInputFromWindow(et.getWindowToken(), 0);
+            root.removeView(et);
+            if (textTools != null) { root.removeView(textTools); textTools = null; }
+            engine.restoreInk(e);
+            ui.postDelayed(this::immersive, 300);
+        });
+        row.addView(back, new LinearLayout.LayoutParams(-2, Ui.dp(this, 34)));
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.setClipToPadding(false);
+        hs.setPadding(0, Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8));
+        hs.addView(row);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2);
+        lp.leftMargin = Math.max(Ui.dp(this, 8), x - Ui.dp(this, 6));
+        lp.topMargin = Math.max(Ui.dp(this, 8), y - Ui.dp(this, 60));
+        lp.rightMargin = Ui.dp(this, 8);
+        root.addView(hs, lp);
+        textTools = hs;
+    }
+
     private void commitTextEdit() {
         if (textEdit == null) return;
         EditText et = textEdit;
@@ -2377,6 +2581,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.commitText(req, et.getText().toString());
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(et.getWindowToken(), 0);
         root.removeView(et);
+        if (textTools != null) { root.removeView(textTools); textTools = null; }
         ui.postDelayed(this::immersive, 300);
     }
 
@@ -2472,6 +2677,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     @Override
     public void onState(Engine.State s) {
+        if (editTextB != null) editTextB.setVisibility(s.selText ? View.VISIBLE : View.GONE);
         state = s;
         undoB.setEnabledLook(s.canUndo);
         redoB.setEnabledLook(s.canRedo);

@@ -45,7 +45,7 @@ final class Engine implements Choreographer.FrameCallback {
     static final float[] TEXT_SIZES = {20f, 28f, 42f};
 
     static final class State {
-        boolean canUndo, canRedo, front, hasSelection, hasClipboard, canvas;
+        boolean canUndo, canRedo, front, hasSelection, hasClipboard, canvas, selText;
         int page, pages, bg, zoom, paper, undoCount, redoCount;
         String[] marks; // per page: bookmark title ("" untitled) or null
         float spacing = 1f, strength = 1f; // current page's look
@@ -470,6 +470,286 @@ final class Engine implements Choreographer.FrameCallback {
     // selection actions
     void selDelete() { h.post(() -> { if (hasSel()) replaceSelection(new ArrayList<>(), new ArrayList<>(), false); }); }
 
+    /**
+     * Beautify the selection (or the whole current page): straighten lines, lay them on the ruled lines, even size
+     * and spacing, smooth wobble. Worked out on the worker thread; applied as one undo step only if those strokes
+     * are still on the page untouched. {@code done} gets a short summary on the main thread.
+     */
+    void beautify(boolean wholePage, int strength, Beautify.Reader reader, java.util.function.Consumer<String> done) {
+        h.post(() -> {
+            if (!wholePage && !hasSel()) return;
+            final int pg = wholePage ? currentPage() : selPage;
+            Notebook.Page p = book.pages.get(pg);
+            final ArrayList<Stroke> src = new ArrayList<>(wholePage ? p.strokes : selStrokes);
+            if (src.isEmpty()) { main.post(() -> done.accept("Nothing to beautify on this page")); return; }
+            final Beautify.Paper paper = paperOf(p);
+            worker.execute(() -> {
+                Beautify.Report rep = new Beautify.Report();
+                java.util.List<Stroke> out = Beautify.run(src, strength, paper, reader, rep);
+                Log.i(Gl.TAG, "beautify (" + (wholePage ? "page" : "selection") + ", " + strength + "): " + rep);
+                h.post(() -> {
+                    Notebook.Page cur = book.pages.get(pg);
+                    IdentityHashMap<Stroke, Stroke> map = new IdentityHashMap<>();
+                    for (int i = 0; i < src.size(); i++) map.put(src.get(i), out.get(i));
+                    int found = 0;
+                    for (Stroke s : cur.strokes) if (map.containsKey(s)) found++;
+                    if (found != src.size()) { main.post(() -> done.accept("The page changed, try again")); return; }
+                    Object[] before = pageState(cur);
+                    ArrayList<Stroke> next = new ArrayList<>(cur.strokes.size());
+                    for (Stroke s : cur.strokes) { Stroke r = map.get(s); next.add(r != null ? r : s); }
+                    cur.strokes = next;
+                    push(new PageEdit(cur, before, pageState(cur)));
+                    if (!wholePage && selPage == pg) {
+                        ArrayList<Stroke> ns = new ArrayList<>();
+                        for (Stroke s : selStrokes) { Stroke r = map.get(s); ns.add(r != null ? r : s); }
+                        select(pg, ns, selItems);
+                    }
+                    needCache = true;
+                    edited();
+                    requestFrame();
+                    String msg = rep.lines == 0 ? "No handwriting found to beautify"
+                            : "Tidied " + rep.lines + (rep.lines == 1 ? " line" : " lines") + " · undo to go back";
+                    main.post(() -> done.accept(msg));
+                });
+            });
+        });
+    }
+
+    // ---- convert as I write ------------------------------------------------------------------
+
+    private final ArrayList<Stroke> autoPending = new ArrayList<>();
+    private int autoPage = -1;
+    private Notebook.Item autoLast; // the text box the last conversion made (next words on its line join it)
+    private ArrayList<Stroke> autoLastInk = new ArrayList<>(); // the handwriting behind autoLast, to read it again
+    private int autoLastPage = -1;
+    private final Runnable autoRun = this::autoConvert;
+    private static final long AUTO_PAUSE_MS = 1200;
+
+    private boolean autoTextOn() { return app.getSharedPreferences("nib", Context.MODE_PRIVATE).getBoolean("autoText", false); }
+
+    /** "Convert as I write": collect pen strokes; after a pause in writing they become text. */
+    private void queueAutoText(Stroke s, int page) {
+        if (!autoTextOn()) { autoPending.clear(); return; }
+        if (page != autoPage) { autoPending.clear(); autoPage = page; }
+        autoPending.add(s);
+        h.removeCallbacks(autoRun);
+        h.postDelayed(autoRun, AUTO_PAUSE_MS);
+    }
+
+    private void autoConvert() {
+        if (autoPending.isEmpty() || !autoTextOn()) return;
+        ArrayList<Stroke> ink = new ArrayList<>(autoPending);
+        int pg = autoPage;
+        autoPending.clear();
+        int lang = Handwriting.convertLang(app);
+        Notebook.Item prev = autoLastPage == pg && autoLast != null && book != null && pg < book.pages.size()
+                && book.pages.get(pg).items.contains(autoLast) ? autoLast : null;
+        // strokes added onto the last converted words (a matra, a dot, the top line drawn last): read that ink again with them
+        if (prev != null && !autoLastInk.isEmpty()) {
+            float l = Float.MAX_VALUE, t = Float.MAX_VALUE, rr = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
+            for (Stroke s : ink) { l = Math.min(l, s.l); t = Math.min(t, s.t); rr = Math.max(rr, s.r); b = Math.max(b, s.b); }
+            RectF box = new RectF(prev.x - prev.size * 0.4f, prev.y - prev.size * 0.7f, prev.x + prev.w + prev.size * 0.4f, prev.y + prev.h + prev.size * 0.7f);
+            if (RectF.intersects(box, new RectF(l, t, rr, b))) {
+                ArrayList<Stroke> all = new ArrayList<>(autoLastInk);
+                all.addAll(ink);
+                Notebook.Item target = prev;
+                Handwriting.convert(all, lang, "", msg -> main.post(() -> listener.onToast(msg)), r -> h.post(() -> applyAutoRedo(pg, ink, all, target, r)));
+                return;
+            }
+        }
+        // the box this writing probably continues: its text helps the recognizer
+        String pre = prev != null ? prev.text : "";
+        Handwriting.convert(ink, lang, pre, msg -> main.post(() -> listener.onToast(msg)), r -> h.post(() -> applyAutoText(pg, ink, r, lang)));
+    }
+
+    /** Re-read of the last converted words with strokes added onto them: the box's text is replaced (one undo step). */
+    private void applyAutoRedo(int pg, ArrayList<Stroke> added, ArrayList<Stroke> all, Notebook.Item target, Handwriting.Converted r) {
+        if (book == null || pg >= book.pages.size()) return;
+        Notebook.Page p = book.pages.get(pg);
+        if (!p.items.contains(target) || r.error != null || r.text.trim().isEmpty()) return;
+        IdentityHashMap<Stroke, Boolean> gone = new IdentityHashMap<>();
+        for (Stroke s : added) gone.put(s, Boolean.TRUE);
+        int found = 0;
+        for (Stroke s : p.strokes) if (gone.containsKey(s)) found++;
+        if (found != added.size()) return;
+        String text = r.text.trim().replace('\n', ' ');
+        float maxW = canvas() ? Math.max(400, target.w + 300) : Math.max(120, PW - target.x - 20);
+        StaticLayout sl = Render.textLayout(text, target.size, target.color, maxW, true);
+        float w = 0;
+        for (int i = 0; i < sl.getLineCount(); i++) w = Math.max(w, sl.getLineWidth(i));
+        float bw = Math.max(40, Math.min(maxW, w + 6));
+        sl = Render.textLayout(text, target.size, target.color, bw, true);
+        Object[] before = pageState(p);
+        p.strokes.removeIf(gone::containsKey);
+        p.items.remove(target);
+        Notebook.Item it = new Notebook.Item(Notebook.Item.TEXT, target.x, target.y, bw, sl.getHeight(), text, target.size, target.color, Notebook.Item.handWithInk(all));
+        p.items.add(it);
+        autoLast = it;
+        autoLastInk = all;
+        push(new PageEdit(p, before, pageState(p)));
+        dropTextTextures();
+        needCache = true;
+        edited();
+        requestFrame();
+    }
+
+    /** Swaps the written strokes for text (one undo step): joins the previous box when the words continue its line. */
+    private void applyAutoText(int pg, ArrayList<Stroke> ink, Handwriting.Converted r, int lang) {
+        if (book == null || pg >= book.pages.size()) return;
+        if (r.error != null || r.text.trim().isEmpty()) { if (r.error != null && !r.error.startsWith("Couldn't read any")) main.post(() -> listener.onToast(r.error)); return; }
+        Notebook.Page p = book.pages.get(pg);
+        IdentityHashMap<Stroke, Boolean> gone = new IdentityHashMap<>();
+        for (Stroke s : ink) gone.put(s, Boolean.TRUE);
+        int found = 0;
+        for (Stroke s : p.strokes) if (gone.containsKey(s)) found++;
+        if (found != ink.size()) return; // erased or moved meanwhile: leave it
+        float l = Float.MAX_VALUE, t = Float.MAX_VALUE, rr = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
+        java.util.HashMap<Integer, Integer> colours = new java.util.HashMap<>();
+        for (Stroke s : ink) { l = Math.min(l, s.l); t = Math.min(t, s.t); rr = Math.max(rr, s.r); b = Math.max(b, s.b); colours.merge(s.color, s.n, Integer::sum); }
+        int colour = penColor, most = -1;
+        for (java.util.Map.Entry<Integer, Integer> e : colours.entrySet()) if (e.getValue() > most) { most = e.getValue(); colour = e.getKey(); }
+        float size = Math.max(12, Math.min(90, r.lineHeight > 0 ? r.lineHeight / 1.4f : textSize));
+        String text = r.text.trim();
+        float x = l, y = t;
+        int read = r.lang >= 0 ? r.lang : lang;
+        boolean rtl = read >= 0 && Handwriting.LANG_SCRIPT[read] == Beautify.ARABIC;
+        Notebook.Item prev = autoLastPage == pg && autoLast != null && p.items.contains(autoLast) ? autoLast : null;
+        if (prev != null) {
+            float cy = (t + b) / 2, near = 3.5f * prev.size;
+            boolean sameLine = cy > prev.y - prev.size * 0.3f && cy < prev.y + prev.h + prev.size * 0.3f;
+            boolean follows = rtl ? (rr <= prev.x + prev.size && prev.x - rr < near) : (l >= prev.x + prev.w - prev.size && l - (prev.x + prev.w) < near);
+            if (sameLine && follows) {
+                text = prev.text + " " + text;
+                x = Math.min(prev.x, l);
+                y = prev.y;
+                size = prev.size;
+                colour = prev.color;
+            } else prev = null;
+        }
+        float maxW = canvas() ? Math.max(400, rr - x + 200) : Math.max(120, PW - x - 20);
+        StaticLayout sl = Render.textLayout(text, size, colour, maxW, true);
+        float w = 0;
+        for (int i = 0; i < sl.getLineCount(); i++) w = Math.max(w, sl.getLineWidth(i));
+        float bw = Math.max(40, Math.min(maxW, w + 6));
+        sl = Render.textLayout(text, size, colour, bw, true);
+        Object[] before = pageState(p);
+        p.strokes.removeIf(gone::containsKey);
+        if (prev != null) p.items.remove(prev);
+        ArrayList<Stroke> boxInk = new ArrayList<>(prev != null ? autoLastInk : new ArrayList<>());
+        boxInk.addAll(ink);
+        Notebook.Item it = new Notebook.Item(Notebook.Item.TEXT, x, y, bw, sl.getHeight(), text, size, colour, Notebook.Item.handWithInk(boxInk));
+        p.items.add(it);
+        autoLastInk = boxInk;
+        autoLast = it;
+        autoLastPage = pg;
+        push(new PageEdit(p, before, pageState(p)));
+        dropTextTextures();
+        needCache = true;
+        edited();
+        requestFrame();
+    }
+
+    /** Turns converted text back into the handwriting it came from, where the text box now is (one undo step). */
+    void restoreInk(TextEdit e) {
+        h.post(() -> {
+            editing = null;
+            if (book == null || e.item == null || e.page >= book.pages.size()) return;
+            Notebook.Page p = book.pages.get(e.page);
+            if (!p.items.contains(e.item)) return;
+            java.util.List<Stroke> ink = e.item.ink();
+            if (ink.isEmpty()) return;
+            float l = Float.MAX_VALUE, t = Float.MAX_VALUE;
+            for (Stroke s : ink) { l = Math.min(l, s.l); t = Math.min(t, s.t); }
+            float dx = e.item.x - l, dy = e.item.y - t; // the box may have been moved since
+            Object[] before = pageState(p);
+            p.items.remove(e.item);
+            for (Stroke s : ink) p.strokes.add(s.shifted(dx, dy));
+            push(new PageEdit(p, before, pageState(p)));
+            if (autoLast == e.item) { autoLast = null; autoLastInk = new ArrayList<>(); }
+            dropTextTextures();
+            needCache = true;
+            edited();
+            requestFrame();
+        });
+    }
+
+    /** Is there a text box under this screen point? */
+    private boolean textAt(float sx, float sy) {
+        float x = ox + sx / z, y = oy + sy / z;
+        int pg = pageAt(y);
+        if (pg < 0 || pg >= book.pages.size()) return false;
+        for (Notebook.Item it : book.pages.get(pg).items) if (it.type == Notebook.Item.TEXT && it.contains(x, y - tops[pg], 4)) return true;
+        return false;
+    }
+
+    /** Selection bar → Edit text: opens the one selected text box for typing. */
+    void editSelectedText() {
+        h.post(() -> {
+            if (!hasSel() || !selStrokes.isEmpty() || selItems.size() != 1 || selItems.get(0).type != Notebook.Item.TEXT) return;
+            Notebook.Item it = selItems.get(0);
+            int pg = selPage;
+            clearSelection();
+            textTap((it.x + 2 - ox) * z, (it.y + 2 + tops[pg] - oy) * z);
+        });
+    }
+
+    /** The selected ink (no highlighter), for Convert to text; on the main thread. */
+    void selInk(java.util.function.Consumer<ArrayList<Stroke>> cb) {
+        h.post(() -> {
+            if (!hasSel()) return;
+            ArrayList<Stroke> ink = new ArrayList<>();
+            for (Stroke s : selStrokes) if (!s.hl()) ink.add(s);
+            main.post(() -> cb.accept(ink));
+        });
+    }
+
+    /**
+     * Convert to text: the selected handwriting becomes a text box where it was, sized like the writing and in its
+     * ink colour (one undo step; undo brings the handwriting back). Highlighter and other items stay.
+     */
+    void selToText(String text, float lineHeight) {
+        h.post(() -> {
+            if (!hasSel() || text.trim().isEmpty()) return;
+            float l = Float.MAX_VALUE, t = Float.MAX_VALUE, r = -Float.MAX_VALUE;
+            java.util.HashMap<Integer, Integer> colours = new java.util.HashMap<>();
+            ArrayList<Stroke> keep = new ArrayList<>();
+            for (Stroke s : selStrokes) {
+                if (s.hl()) { keep.add(s); continue; }
+                l = Math.min(l, s.l); t = Math.min(t, s.t); r = Math.max(r, s.r);
+                colours.merge(s.color, s.n, Integer::sum);
+            }
+            if (l == Float.MAX_VALUE) return;
+            int colour = penColor;
+            int most = -1;
+            for (java.util.Map.Entry<Integer, Integer> e : colours.entrySet()) if (e.getValue() > most) { most = e.getValue(); colour = e.getKey(); }
+            // a line of handwriting is about 1.4× the font size (ascenders, descenders)
+            float size = Math.max(12, Math.min(90, lineHeight > 0 ? lineHeight / 1.4f : textSize));
+            float maxW = canvas() ? Math.max(200, r - l) : Math.max(120, PW - l - 20);
+            StaticLayout sl = Render.textLayout(text, size, colour, maxW, true);
+            float w = 0;
+            for (int i = 0; i < sl.getLineCount(); i++) w = Math.max(w, sl.getLineWidth(i));
+            float bw = Math.max(40, Math.min(maxW, Math.max(w + 6, r - l)));
+            sl = Render.textLayout(text, size, colour, bw, true);
+            ArrayList<Notebook.Item> ni = new ArrayList<>(selItems);
+            ArrayList<Stroke> ink = new ArrayList<>();
+            for (Stroke s : selStrokes) if (!s.hl()) ink.add(s);
+            ni.add(new Notebook.Item(Notebook.Item.TEXT, l, t, bw, sl.getHeight(), text, size, colour, Notebook.Item.handWithInk(ink)));
+            dropTextTextures();
+            replaceSelection(keep, ni, true);
+        });
+    }
+
+    /** The page's ruled lines for Beautify (lined, narrow lined and Cornell paper; everything else has none). */
+    private static Beautify.Paper paperOf(Notebook.Page p) {
+        if (p.pdf >= 0) return Beautify.Paper.NONE;
+        float k = p.spacing > 0 ? p.spacing : 1f;
+        switch (p.bg) {
+            case Notebook.BG_LINED: case Notebook.BG_CORNELL: return new Beautify.Paper(120, 40 * k);
+            case Notebook.BG_NARROW: return new Beautify.Paper(120, 30 * k);
+            default: return Beautify.Paper.NONE;
+        }
+    }
+
     void selDuplicate() {
         h.post(() -> {
             if (!hasSel()) return;
@@ -550,11 +830,12 @@ final class Engine implements Choreographer.FrameCallback {
             if (e.item != null) p.items.remove(e.item);
             String t = text.replaceAll("\\s+$", "");
             if (!t.isEmpty()) {
-                StaticLayout sl = Render.textLayout(t, e.size, e.color, e.width);
+                boolean hand = e.item != null && e.item.hand(); // editing converted text keeps its handwriting face
+                StaticLayout sl = Render.textLayout(t, e.size, e.color, e.width, hand);
                 float w = 0;
                 for (int i = 0; i < sl.getLineCount(); i++) w = Math.max(w, sl.getLineWidth(i));
                 float bw = e.item != null ? e.width : Math.max(40, Math.min(e.width, w + 6));
-                p.items.add(new Notebook.Item(Notebook.Item.TEXT, e.docX, e.docY, bw, sl.getHeight(), t, e.size, e.color));
+                p.items.add(new Notebook.Item(Notebook.Item.TEXT, e.docX, e.docY, bw, sl.getHeight(), t, e.size, e.color, hand ? e.item.pts : null)); // keeps its handwriting
             }
             if (!Arrays.deepEquals(before, pageState(p))) {
                 push(new PageEdit(p, before, pageState(p)));
@@ -1244,7 +1525,7 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private static Bitmap textBitmap(Notebook.Item it, int k, boolean dark) {
-        StaticLayout sl = Render.textLayout(it.text, it.size, Render.inkColor(it.color, dark), it.w);
+        StaticLayout sl = Render.textLayout(it.text, it.size, Render.inkColor(it.color, dark), it.w, it.hand());
         int bw = Math.max(1, (int) Math.ceil(it.w * k)), bh = Math.max(1, (int) Math.ceil(Math.max(it.h, sl.getHeight()) * k));
         Bitmap b = Bitmap.createBitmap(Math.min(bw, 8192), Math.min(bh, 8192), Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(b);
@@ -1454,6 +1735,7 @@ final class Engine implements Choreographer.FrameCallback {
                 gest = G_IGNORE; // the pen is near, or a palm: fingers don't write now
                 return;
             }
+            if (pen) h.removeCallbacks(autoRun); // still writing: convert after the next pause
             if (editing != null || tool == TOOL_TEXT) main.post(listener::onDismissText);
             // touching the current selection moves/scales it (pen or finger)
             if (hasSel() && (tool == TOOL_LASSO || shapeMode()) && selHit(ev.getX(), ev.getY())) {
@@ -1837,6 +2119,8 @@ final class Engine implements Choreographer.FrameCallback {
         }
         Stroke done = live;
         int donePage = livePage;
+        // snapped strokes count too when they're letter-sized (a pause at the end of an "l" snaps it straight)
+        if (!done.hl() && (!snapped || Math.max(done.r - done.l, done.b - done.t) < 80)) queueAutoText(done, donePage);
         live = null;
         overlay = false;
         gest = G_NONE;
@@ -2585,6 +2869,8 @@ final class Engine implements Choreographer.FrameCallback {
         return new float[]{(x0 + x1) / 2, (y0 + y1) / 2, (float) Math.hypot(x1 - x0, y1 - y0)};
     }
 
+    private boolean zooming;
+
     private void panEvent(MotionEvent ev, int a) {
         if (vt != null) vt.addMovement(ev);
         switch (a) {
@@ -2601,13 +2887,22 @@ final class Engine implements Choreographer.FrameCallback {
                     float slop = dp(8);
                     if (Math.abs(m[0] - sMidX) < slop && Math.abs(m[1] - sMidY) < slop && Math.abs(m[2] - sDist) < slop) break;
                     moved = true;
+                    zooming = false;
                     gesturing = true;
                     main.post(listener::onDismissText);
                     baseline(ev, -1);
                     break;
                 }
                 float nz = sZ;
-                if (ev.getPointerCount() >= 2 && sDist > 0 && m[2] > 0) nz = sZ * m[2] / sDist;
+                if (ev.getPointerCount() >= 2 && sDist > 0 && m[2] > 0) {
+                    // scrolling with two fingers never holds their gap perfectly: only a clear pinch zooms
+                    if (!zooming && Math.abs(m[2] - sDist) > Math.max(dp(36), sDist * 0.14f)) {
+                        zooming = true;
+                        baseline(ev, -1); // zoom starts from here, no jump
+                        break;
+                    }
+                    if (zooming) nz = sZ * m[2] / sDist;
+                }
                 nz = Math.max(minZ(), Math.min(fitZ * 8f, nz));
                 float ax = sOx + sMidX / sZ, ay = sOy + sMidY / sZ;
                 z = nz;
@@ -2619,10 +2914,12 @@ final class Engine implements Choreographer.FrameCallback {
             }
             case MotionEvent.ACTION_UP: {
                 if (!moved && ev.getEventTime() - downT < 300) {
-                    if (maxPtr == 2) doUndo(true);
-                    else if (maxPtr == 3) doRedo(true);
+                    if (maxPtr == 3) doRedo(true); // two-finger tap undo removed (owner's choice): it fired by accident
                     else if (maxPtr == 1 && toggleTapeAt(ox + ev.getX() / z, oy + ev.getY() / z, false)) {
                         lastTapT = 0; // a tap on tape peels it; it doesn't start a double-tap
+                    } else if (maxPtr == 1 && textAt(ev.getX(), ev.getY())) {
+                        lastTapT = 0;
+                        textTap(ev.getX(), ev.getY()); // tap a text box (typed or converted) to edit it
                     } else if (maxPtr == 1) {
                         float x = ev.getX(), y = ev.getY();
                         if (ev.getEventTime() - lastTapT < 330 && Math.hypot(x - lastTapX, y - lastTapY) < dp(40)) {
@@ -2892,6 +3189,7 @@ final class Engine implements Choreographer.FrameCallback {
         s.canvas = book.canvas;
         s.title = book.title;
         s.hasSelection = hasSel();
+        s.selText = hasSel() && selStrokes.isEmpty() && selItems.size() == 1 && selItems.get(0).type == Notebook.Item.TEXT;
         s.hasClipboard = !clipStrokes.isEmpty() || !clipItems.isEmpty();
         main.post(() -> listener.onState(s));
         if (!hasSel()) main.post(() -> listener.onSelection(null));

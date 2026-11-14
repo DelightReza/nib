@@ -22,7 +22,13 @@ final class Ui {
 
     static int dp(Context c, float v) { return Math.round(v * c.getResources().getDisplayMetrics().density); }
 
-    static int color(Context c, int res) { return c.getColor(res); }
+    static int color(Context c, int res) {
+        if (res == R.color.accent) return Theme.accent(c);
+        if (res == R.color.on_accent) return Theme.onAccent(c);
+        if (res == R.color.accent_container) return Theme.accentContainer(c);
+        Integer o = Theme.override(c, res);
+        return o != null ? o : c.getColor(res);
+    }
 
     static boolean dark(Context c) {
         return (c.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
@@ -40,10 +46,35 @@ final class Ui {
         return new RippleDrawable(ColorStateList.valueOf(rc), content, round(Color.WHITE, radius));
     }
 
-    static Typeface medium() { return Typeface.create("sans-serif-medium", Typeface.NORMAL); }
+    private static Typeface inter;
+
+    /** Loads Inter, the one typeface Nib uses everywhere (also set as the theme font). Call once per activity. */
+    static void initFonts(Context c) {
+        if (inter != null) return;
+        try { inter = c.getResources().getFont(R.font.inter); } catch (Exception e) { inter = Typeface.DEFAULT; }
+        try {
+            android.content.res.Resources r = c.getResources();
+            // handwriting look for converted text: Kalam (Latin + Devanagari), Baloo Paaji 2 (Gurmukhi), Aref Ruqaa (Arabic, Ruqʿah)
+            android.graphics.fonts.FontFamily latin = new android.graphics.fonts.FontFamily.Builder(new android.graphics.fonts.Font.Builder(r, R.font.hand_kalam).build()).build();
+            android.graphics.fonts.FontFamily guru = new android.graphics.fonts.FontFamily.Builder(new android.graphics.fonts.Font.Builder(r, R.font.hand_gurmukhi)
+                    .setFontVariationSettings("'wght' 450").build()).build();
+            android.graphics.fonts.FontFamily arab = new android.graphics.fonts.FontFamily.Builder(new android.graphics.fonts.Font.Builder(r, R.font.hand_arabic).build()).build();
+            hand = new Typeface.CustomFallbackBuilder(latin).addCustomFallback(guru).addCustomFallback(arab).setSystemFallback("sans-serif").build();
+        } catch (Exception e) { hand = inter; }
+    }
+
+    private static Typeface hand;
+
+    /** The handwriting-style face converted text uses, in every script Nib reads. */
+    static Typeface hand() { return hand != null ? hand : font(400); }
+
+    /** Inter at a weight (400 regular, 500 medium, 600 semibold, 700 bold). */
+    static Typeface font(int weight) { return Typeface.create(inter != null ? inter : Typeface.DEFAULT, weight, false); }
+
+    static Typeface medium() { return font(500); }
 
     /** Semibold: headings read as confident without looking heavy. */
-    static Typeface bold() { return Typeface.create(Typeface.DEFAULT, 600, false); }
+    static Typeface bold() { return font(600); }
 
     static int hairline(Context c) { return Math.max(1, Math.round(c.getResources().getDisplayMetrics().density * 0.6f)); }
 
@@ -175,12 +206,49 @@ final class Ui {
 
     /** FrameLayout that keeps a height/width ratio. */
     static final class Aspect extends FrameLayout {
-        final float ratio;
+        float ratio;
         Aspect(Context c, float ratio) { super(c); this.ratio = ratio; }
+        void setRatio(float r) { if (Math.abs(r - ratio) > 0.001f) { ratio = r; requestLayout(); } }
         @Override protected void onMeasure(int w, int h) {
             int width = MeasureSpec.getSize(w);
             super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
                     MeasureSpec.makeMeasureSpec(Math.round(width * ratio), MeasureSpec.EXACTLY));
+        }
+    }
+
+    /** Columns of equal width; each child goes to the shortest column (a "masonry" flow), in order. */
+    static final class Masonry extends ViewGroup {
+        private int minCol, gap;
+        private int[] colOf = new int[0], yOf = new int[0];
+        Masonry(Context c, int minColDp, int gapDp) { super(c); minCol = dp(c, minColDp); gap = dp(c, gapDp); }
+        void setMinCol(int dpW) { minCol = dp(getContext(), dpW); requestLayout(); }
+        void setGap(int dpG) { gap = dp(getContext(), dpG); requestLayout(); }
+        private int cols(int w) { return Math.max(1, (w + gap) / (minCol + gap)); } // portrait: small 3, medium 2, large 1
+        @Override protected void onMeasure(int ws, int hs) {
+            int w = MeasureSpec.getSize(ws), cols = cols(w), cw = (w - gap * (cols - 1)) / cols, n = getChildCount();
+            int[] h = new int[cols];
+            colOf = new int[n];
+            yOf = new int[n];
+            for (int i = 0; i < n; i++) {
+                View ch = getChildAt(i);
+                ch.measure(MeasureSpec.makeMeasureSpec(cw, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+                int best = 0;
+                for (int k = 1; k < cols; k++) if (h[k] < h[best] - 1) best = k;
+                colOf[i] = best;
+                yOf[i] = h[best];
+                h[best] += ch.getMeasuredHeight() + gap;
+            }
+            int total = 0;
+            for (int v : h) total = Math.max(total, v);
+            setMeasuredDimension(w, Math.max(0, total - gap));
+        }
+        @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            int w = r - l, cols = cols(w), cw = (w - gap * (cols - 1)) / cols;
+            for (int i = 0; i < getChildCount() && i < colOf.length; i++) {
+                View ch = getChildAt(i);
+                int x = colOf[i] * (cw + gap);
+                ch.layout(x, yOf[i], x + cw, yOf[i] + ch.getMeasuredHeight());
+            }
         }
     }
 

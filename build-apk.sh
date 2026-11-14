@@ -62,7 +62,13 @@ if [ -d libs ]; then # native code (64-bit ARM only: the tablet) and library ass
   mkdir -p "$OUT/apkx/lib/arm64-v8a" "$OUT/apkx/assets"
   find libs -path '*/jni/arm64-v8a/*.so' -exec cp {} "$OUT/apkx/lib/arm64-v8a/" \;
   for a in libs/*/assets; do cp -r "$a/." "$OUT/apkx/assets/"; done
-  (cd "$OUT/apkx" && zip -q -r ../unsigned.apk lib assets)
+fi
+if [ -d assets ]; then # Nib's own assets (fonts)
+  mkdir -p "$OUT/apkx/assets"
+  cp -r assets/. "$OUT/apkx/assets/"
+fi
+if [ -d "$OUT/apkx" ]; then
+  (cd "$OUT/apkx" && zip -q -r ../unsigned.apk $(ls -d lib assets 2>/dev/null))
 fi
 
 echo "› sign"

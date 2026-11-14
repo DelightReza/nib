@@ -53,13 +53,24 @@ public final class LibraryActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
     private SharedPreferences prefs;
-    private Ui.Grid grid;
+    private Ui.Masonry grid;
+    private LinearLayout topRow, selRow;
+    private boolean selecting;
+    private final java.util.LinkedHashSet<String> picked = new java.util.LinkedHashSet<>();
+    private final java.util.HashMap<String, View> checks = new java.util.HashMap<>();
+    private TextView pickedLabel;
+    private View moreB;
+    private TextView sortLabel;
+    private LinearLayout viewControls;
+    private LinearLayout libLinks;
     private TextView subtitle, pageTitle, empty;
     private LinearLayout crumbs;
     private Ui.Grid folderGrid;
     private View sidePanel, sideRule, navButton, searchBox, newCompact;
     private LinearLayout headerRow, searchRow;
-    private static final String RECENT = "⏱";
+    private static final String RECENT = "⏱", TRASH = "🗑", UNFILED = "∅";
+    /** Notebook card width (dp) for Small / Medium / Large. */
+    private static final int[] CARD_SIZES = {84, 110, 170}; // portrait (≈395dp of cards at 400 dpi): 4, 3, 2 a row
     private LinearLayout chips;
     private String filter = "", query = "";
     private int sort;
@@ -78,45 +89,55 @@ public final class LibraryActivity extends Activity {
         sort = prefs.getInt("sort", 0);
         filter = prefs.getString("filter", "");
 
+        Theme.applyTo(this);
         LinearLayout rootRow = new LinearLayout(this);
         rootRow.setBackgroundColor(Ui.color(this, R.color.bg));
 
-        // ---- sidebar ----
+        // ---- sidebar: lists, then folders; one row style ----
         LinearLayout side = new LinearLayout(this);
         side.setOrientation(LinearLayout.VERTICAL);
-        side.setBackgroundColor(Ui.color(this, R.color.surface_variant));
-        side.setPadding(Ui.dp(this, 12), Ui.dp(this, 26), Ui.dp(this, 12), Ui.dp(this, 16));
+        side.setPadding(Ui.dp(this, 14), Ui.dp(this, 30), Ui.dp(this, 14), Ui.dp(this, 16));
         LinearLayout brand = new LinearLayout(this);
         brand.setGravity(Gravity.CENTER_VERTICAL);
-        brand.setPadding(Ui.dp(this, 8), 0, 0, Ui.dp(this, 20));
         ImageView mark = new ImageView(this);
-        mark.setImageResource(R.drawable.ic_pen);
-        mark.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        mark.setPadding(Ui.dp(this, 7), Ui.dp(this, 7), Ui.dp(this, 7), Ui.dp(this, 7));
-        mark.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.bg)));
-        mark.setBackground(Ui.round(Ui.color(this, R.color.on_surface), Ui.dp(this, 9)));
-        brand.addView(mark, new LinearLayout.LayoutParams(Ui.dp(this, 32), Ui.dp(this, 32)));
-        TextView bt = Ui.text(this, "Nib", 19, Ui.color(this, R.color.on_surface), Ui.bold());
-        bt.setPadding(Ui.dp(this, 10), 0, 0, 0);
+        mark.setImageResource(R.drawable.ic_nib);
+        mark.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.accent)));
+        brand.addView(mark, new LinearLayout.LayoutParams(Ui.dp(this, 22), Ui.dp(this, 22)));
+        TextView bt = Ui.text(this, "Nib", 21, Ui.color(this, R.color.on_surface), Ui.font(700));
+        bt.setLetterSpacing(-0.01f);
+        bt.setPadding(Ui.dp(this, 9), 0, 0, 0);
         brand.addView(bt);
-        side.addView(brand);
-        TextView add = Ui.button(this, "New", R.drawable.ic_plus, true);
-        add.setGravity(Gravity.CENTER_VERTICAL | Gravity.START); // icon and label together, like the rows below
-        add.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 12), 0);
-        add.setCompoundDrawablePadding(Ui.dp(this, 12));
-        add.setOnClickListener(this::showNew);
-        LinearLayout.LayoutParams al = new LinearLayout.LayoutParams(-1, Ui.dp(this, 42));
-        al.bottomMargin = Ui.dp(this, 14);
-        side.addView(add, al);
+        brand.setPadding(Ui.dp(this, 10), 0, 0, 0);
+        LinearLayout.LayoutParams brl = new LinearLayout.LayoutParams(-2, -2);
+        brl.bottomMargin = Ui.dp(this, 22);
+        side.addView(brand, brl);
+        libLinks = new LinearLayout(this);
+        libLinks.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams lll = new LinearLayout.LayoutParams(-1, -2);
+        lll.bottomMargin = Ui.dp(this, 18);
+        side.addView(libLinks, lll);
+        TextView cap = Ui.text(this, "Folders", 13, Ui.color(this, R.color.on_surface_variant), Ui.bold());
+        cap.setPadding(Ui.dp(this, 10), 0, 0, 0);
+        LinearLayout.LayoutParams capl = new LinearLayout.LayoutParams(-2, -2);
+        capl.bottomMargin = Ui.dp(this, 4);
+        side.addView(cap, capl);
         ScrollView navScroll = new ScrollView(this);
         navScroll.setVerticalScrollBarEnabled(false);
         chips = new LinearLayout(this);
         chips.setOrientation(LinearLayout.VERTICAL);
         navScroll.addView(chips);
         side.addView(navScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
-        View settingsItem = navItem(R.drawable.ic_settings, "Settings & backup", -1, false, this::showMore);
-        side.addView(settingsItem);
-        rootRow.addView(side, new LinearLayout.LayoutParams(Ui.dp(this, 236), -1));
+        LinearLayout foot = new LinearLayout(this);
+        foot.setPadding(Ui.dp(this, 6), 0, 0, 0);
+        foot.addView(roundButton(R.drawable.ic_settings, "Settings & backup", this::showMore));
+        View themeB = roundButton(R.drawable.ic_palette, "Theme", v -> ThemeSheet.show(this, this::recreate));
+        LinearLayout.LayoutParams tbl = new LinearLayout.LayoutParams(Ui.dp(this, 44), Ui.dp(this, 44));
+        tbl.leftMargin = Ui.dp(this, 10);
+        foot.addView(themeB, tbl);
+        LinearLayout.LayoutParams fl = new LinearLayout.LayoutParams(-1, -2);
+        fl.topMargin = Ui.dp(this, 12);
+        side.addView(foot, fl);
+        rootRow.addView(side, new LinearLayout.LayoutParams(Ui.dp(this, 264), -1));
         View rule = new View(this);
         rule.setBackgroundColor(Ui.color(this, R.color.outline));
         rootRow.addView(rule, new LinearLayout.LayoutParams(Ui.hairline(this), -1));
@@ -128,85 +149,109 @@ public final class LibraryActivity extends Activity {
         sv.setFillViewport(true);
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        int pad = Ui.dp(this, 26);
-        col.setPadding(pad, Ui.dp(this, 26), pad, Ui.dp(this, 40));
+        int pad = Ui.dp(this, 30);
+        col.setPadding(pad, Ui.dp(this, 30), pad, Ui.dp(this, 48));
         sv.addView(col);
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
         Ui.IconButton nav = new Ui.IconButton(this, R.drawable.ic_sidebar, "Folders and lists");
         nav.setOnClickListener(this::showNav);
-        LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40));
-        nl.rightMargin = Ui.dp(this, 8);
-        header.addView(nav, nl);
+        top.addView(nav, new LinearLayout.LayoutParams(Ui.dp(this, 44), Ui.dp(this, 44)));
         nav.setVisibility(View.GONE);
         navButton = nav;
-        LinearLayout titles = new LinearLayout(this);
-        titles.setOrientation(LinearLayout.VERTICAL);
-        pageTitle = Ui.text(this, "All notes", 24, Ui.color(this, R.color.on_surface), Ui.bold());
-        pageTitle.setSingleLine(true);
-        pageTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        subtitle = Ui.text(this, "", 12.5f, Ui.color(this, R.color.on_surface_variant), null);
-        LinearLayout.LayoutParams stl = new LinearLayout.LayoutParams(-2, -2);
-        stl.topMargin = Ui.dp(this, 3);
-        crumbs = new LinearLayout(this);
-        crumbs.setGravity(Gravity.CENTER_VERTICAL);
-        crumbs.setVisibility(View.GONE);
-        LinearLayout.LayoutParams cbl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 24));
-        cbl.bottomMargin = Ui.dp(this, 2);
-        titles.addView(crumbs, cbl);
-        titles.addView(pageTitle);
-        titles.addView(subtitle, stl);
-        header.addView(titles, new LinearLayout.LayoutParams(0, -2, 1f));
         EditText search = new EditText(this);
-        search.setHint("Search titles & handwriting");
+        search.setHint("Search, even handwriting");
         search.setSingleLine(true);
-        search.setTextSize(14);
+        search.setTextSize(14.5f);
         search.setTextColor(Ui.color(this, R.color.on_surface));
         search.setHintTextColor(Ui.color(this, R.color.on_surface_variant));
         search.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0);
         search.setCompoundDrawableTintList(ColorStateList.valueOf(Ui.color(this, R.color.on_surface_variant)));
         search.setCompoundDrawablePadding(Ui.dp(this, 8));
-        search.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 12), 0);
-        search.setBackground(Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 10)));
+        search.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
+        GradientDrawable sbg = Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 22));
+        sbg.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
+        search.setBackground(sbg);
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b2, int c) {}
             @Override public void onTextChanged(CharSequence s, int a, int b2, int c) {}
             @Override public void afterTextChanged(Editable e) { query = e.toString().trim().toLowerCase(); fillGrid(); }
         });
-        header.addView(search, new LinearLayout.LayoutParams(Ui.dp(this, 190), Ui.dp(this, 40)));
+        top.addView(search, new LinearLayout.LayoutParams(0, Ui.dp(this, 44), 1f)); // takes the free space; New and Select always fit
         searchBox = search;
-        headerRow = header;
-        Ui.IconButton sortB = new Ui.IconButton(this, R.drawable.ic_sort, "Sort");
-        sortB.setOnClickListener(this::showSort);
-        LinearLayout.LayoutParams sbl = new LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40));
-        sbl.leftMargin = Ui.dp(this, 6);
-        header.addView(sortB, sbl);
-        Ui.IconButton newB = new Ui.IconButton(this, R.drawable.ic_plus, "New");
+        TextView newB = Ui.text(this, "New", 15, Ui.color(this, R.color.on_accent), Ui.bold());
+        newB.setGravity(Gravity.CENTER_VERTICAL);
+        newB.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_nib, 0, 0, 0);
+        newB.setCompoundDrawableTintList(ColorStateList.valueOf(Ui.color(this, R.color.on_accent)));
+        newB.setCompoundDrawablePadding(Ui.dp(this, 7));
+        newB.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 18), 0);
+        newB.setSingleLine(true);
+        newB.setBackground(Ui.ripple(this, Ui.round(Ui.color(this, R.color.accent), Ui.dp(this, 22)), Ui.dp(this, 22)));
         newB.setOnClickListener(this::showNew);
-        header.addView(newB, new LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40)));
-        newB.setVisibility(View.GONE);
-        newCompact = newB;
-        col.addView(header);
-        searchRow = new LinearLayout(this);
-        LinearLayout.LayoutParams srl = new LinearLayout.LayoutParams(-1, -2);
-        srl.topMargin = Ui.dp(this, 14);
-        col.addView(searchRow, srl);
-        searchRow.setVisibility(View.GONE);
+        LinearLayout.LayoutParams nbl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 44));
+        nbl.leftMargin = Ui.dp(this, 10);
+        TextView selB = Ui.text(this, "Select", 15, Ui.color(this, R.color.accent), Ui.bold());
+        selB.setGravity(Gravity.CENTER);
+        selB.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 12), 0);
+        selB.setBackground(Ui.ripple(this, null, Ui.dp(this, 22)));
+        selB.setOnClickListener(v -> startSelecting(null));
+        LinearLayout.LayoutParams sbl2 = new LinearLayout.LayoutParams(-2, Ui.dp(this, 44));
+        sbl2.leftMargin = Ui.dp(this, 4);
+        top.addView(selB, sbl2);
+        top.addView(newB, nbl);
+        col.addView(top);
+        topRow = top;
+        selRow = new LinearLayout(this);
+        selRow.setGravity(Gravity.CENTER_VERTICAL);
+        selRow.setVisibility(View.GONE);
+        col.addView(selRow, new LinearLayout.LayoutParams(-1, Ui.dp(this, 44)));
+        crumbs = new LinearLayout(this);
+        crumbs.setGravity(Gravity.CENTER_VERTICAL);
+        crumbs.setVisibility(View.GONE);
+        LinearLayout.LayoutParams cbl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 24));
+        cbl.topMargin = Ui.dp(this, 18);
+        col.addView(crumbs, cbl);
+        pageTitle = Ui.text(this, "All notes", 38, Ui.color(this, R.color.on_surface), Theme.titleFace(this));
+        pageTitle.setFontVariationSettings("'wght' 650, 'opsz' 32"); // Inter Display cut for big titles
+        pageTitle.setLetterSpacing(-0.02f);
+        pageTitle.setSingleLine(true);
+        pageTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        // title row: the title, then view controls on the right (sort, card size)
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.addView(pageTitle, new LinearLayout.LayoutParams(0, -2, 1f));
+        viewControls = new LinearLayout(this);
+        viewControls.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.addView(viewControls);
+        LinearLayout.LayoutParams ptl = new LinearLayout.LayoutParams(-1, -2);
+        ptl.topMargin = Ui.dp(this, 14);
+        col.addView(titleRow, ptl);
+        LinearLayout meta = new LinearLayout(this);
+        meta.setGravity(Gravity.CENTER_VERTICAL);
+        subtitle = Ui.text(this, "", 14.5f, Ui.color(this, R.color.on_surface_variant), null);
+        meta.addView(subtitle);
+        sortLabel = Ui.text(this, "", 14.5f, Ui.color(this, R.color.on_surface_variant), null);
+        sortLabel.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6));
+        sortLabel.setBackground(Ui.ripple(this, null, Ui.dp(this, 8)));
+        meta.addView(sortLabel);
+        LinearLayout.LayoutParams ml = new LinearLayout.LayoutParams(-1, -2);
+        ml.topMargin = Ui.dp(this, 4);
+        col.addView(meta, ml);
         folderGrid = new Ui.Grid(this, 190, 12);
         LinearLayout.LayoutParams fgl = new LinearLayout.LayoutParams(-1, -2);
         fgl.topMargin = Ui.dp(this, 24);
         col.addView(folderGrid, fgl);
-        grid = new Ui.Grid(this, 118, 18);
+        grid = new Ui.Masonry(this, CARD_SIZES[cardSize()], cardSize() == 0 ? 14 : 20);
         LinearLayout.LayoutParams gl = new LinearLayout.LayoutParams(-1, -2);
         gl.topMargin = Ui.dp(this, 26);
         col.addView(grid, gl);
-        empty = Ui.text(this, "", 14, Ui.color(this, R.color.on_surface_variant), null);
+        empty = Ui.text(this, "", 14.5f, Ui.color(this, R.color.on_surface_variant), null);
         empty.setGravity(Gravity.CENTER);
         empty.setPadding(0, Ui.dp(this, 80), 0, 0);
         col.addView(empty, new LinearLayout.LayoutParams(-1, -2));
         rootRow.addView(sv, new LinearLayout.LayoutParams(0, -1, 1f));
         setContentView(rootRow);
-        // narrow windows (split screen): the sidebar folds into a button next to the title
+        // narrow windows (split screen): the index folds into a button; search gets shorter
         rootRow.addOnLayoutChangeListener((v, l, t, r, b2, ol, ot, or, ob) -> {
             if (r - l == or - ol) return;
             boolean narrow = r - l < Ui.dp(this, 600);
@@ -214,12 +259,7 @@ public final class LibraryActivity extends Activity {
                 sidePanel.setVisibility(narrow ? View.GONE : View.VISIBLE);
                 sideRule.setVisibility(narrow ? View.GONE : View.VISIBLE);
                 navButton.setVisibility(narrow ? View.VISIBLE : View.GONE);
-                newCompact.setVisibility(narrow ? View.VISIBLE : View.GONE);
-                // narrow: search gets its own full-width row under the title
-                ((android.view.ViewGroup) searchBox.getParent()).removeView(searchBox);
-                if (narrow) searchRow.addView(searchBox, new LinearLayout.LayoutParams(-1, Ui.dp(this, 40)));
-                else headerRow.addView(searchBox, 2, new LinearLayout.LayoutParams(Ui.dp(this, 190), Ui.dp(this, 40)));
-                searchRow.setVisibility(narrow ? View.VISIBLE : View.GONE);
+
             });
         });
 
@@ -227,7 +267,11 @@ public final class LibraryActivity extends Activity {
 
         // dev convenience: `am start ... --ez reopen true` jumps back into the last notebook
         String last = prefs.getString("lastDir", null);
-        if (getIntent().getBooleanExtra("reopen", false) && last != null && new File(last).isDirectory()) open(new File(last));
+        // only on a fresh launch: a theme change recreates this screen with the same intent, and must not open a notebook
+        if (b == null && getIntent().getBooleanExtra("reopen", false) && last != null && new File(last).isDirectory()) {
+            getIntent().removeExtra("reopen");
+            open(new File(last));
+        }
     }
 
     private void showNew(View anchor) {
@@ -266,6 +310,8 @@ public final class LibraryActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refresh();
+        ThemeSheet.reopenIfPending(this, this::recreate);
+        bg.execute(() -> Notebook.purgeTrash(this)); // anything in the trash for over 30 days goes for good
         Handwriting.indexAll(this, () -> { if (!query.isEmpty()) fillGrid(); });
         if (Backup.due(this)) {
             bg.execute(() -> {
@@ -324,7 +370,7 @@ public final class LibraryActivity extends Activity {
     /** "School/Physics" → "School › Physics" */
     static String pretty(String path) { return path.replace("/", " › "); }
 
-    private boolean isFolderFilter() { return !filter.isEmpty() && !filter.equals(FAV) && !filter.equals(RECENT); }
+    private boolean isFolderFilter() { return !filter.isEmpty() && !filter.equals(FAV) && !filter.equals(RECENT) && !filter.equals(TRASH) && !filter.equals(UNFILED); }
 
     private ArrayList<String> childrenOf(ArrayList<String> fl, String parent) {
         ArrayList<String> out = new ArrayList<>();
@@ -341,15 +387,18 @@ public final class LibraryActivity extends Activity {
         int favs = 0, recent = 0;
         long week = System.currentTimeMillis() - 7L * 24 * 3600_000;
         for (Notebook.Entry e : all) { if (e.favorite) favs++; if (e.modified > week) recent++; }
+        int trashed = Notebook.listTrash(this).size(), unfiled = 0;
+        for (Notebook.Entry e : all) if (e.folder.isEmpty()) unfiled++;
+        libLinks.removeAllViews();
+        libLinks.addView(navRow(R.drawable.ic_book, "All notes", all.size(), 0, filter.isEmpty(), false, false, v -> setFilter(""), null, null));
+        libLinks.addView(navRow(R.drawable.ic_star, "Favourites", favs, 0, filter.equals(FAV), false, false, v -> setFilter(FAV), null, null));
+        libLinks.addView(navRow(R.drawable.ic_inbox, "Unfiled", unfiled, 0, filter.equals(UNFILED), false, false, v -> setFilter(UNFILED), null, null));
+        libLinks.addView(navRow(R.drawable.ic_clock, "Recent", recent, 0, filter.equals(RECENT), false, false, v -> setFilter(RECENT), null, null));
+        libLinks.addView(navRow(R.drawable.ic_trash, "Trash", trashed, 0, filter.equals(TRASH), false, false, v -> setFilter(TRASH), null, null));
+        // folders: subfolders show under an open folder (and under the one you're in)
         chips.removeAllViews();
-        chips.addView(navItem(R.drawable.ic_book, "All notes", all.size(), filter.isEmpty(), v -> setFilter("")));
-        chips.addView(navItem(R.drawable.ic_clock, "Recent", recent, filter.equals(RECENT), v -> setFilter(RECENT)));
-        chips.addView(navItem(R.drawable.ic_star, "Favourites", favs, filter.equals(FAV), v -> setFilter(FAV)));
-        TextView sect = Ui.text(this, "Folders", 12, Ui.color(this, R.color.on_surface_variant), Ui.medium());
-        sect.setPadding(Ui.dp(this, 12), Ui.dp(this, 20), 0, Ui.dp(this, 6));
-        chips.addView(sect);
         HashSet<String> open = openFolders();
-        if (isFolderFilter()) for (String a = parentOf(filter); !a.isEmpty(); a = parentOf(a)) open.add(a); // show where you are
+        if (isFolderFilter()) for (String a = parentOf(filter); !a.isEmpty(); a = parentOf(a)) open.add(a);
         for (String f : folders) {
             boolean visible = true;
             for (String a = parentOf(f); !a.isEmpty(); a = parentOf(a)) if (!open.contains(a)) { visible = false; break; }
@@ -357,70 +406,92 @@ public final class LibraryActivity extends Activity {
             int n = 0;
             for (Notebook.Entry e : all) if (within(e.folder, f)) n++;
             boolean kids = !childrenOf(folders, f).isEmpty();
-            View c = folderNavItem(f, n, kids, open.contains(f), filter.equals(f));
-            chips.addView(c);
+            chips.addView(navRow(R.drawable.ic_folder, leaf(f), n, depth(f), filter.equals(f), kids, open.contains(f),
+                    v -> setFilter(f), v -> { folderMenu(v, f); return true; }, kids ? v -> {
+                        HashSet<String> o = openFolders();
+                        if (!o.remove(f)) o.add(f);
+                        prefs.edit().putStringSet("openFolders", o).apply();
+                        refresh();
+                    } : null));
         }
-        View nf = navItem(R.drawable.ic_plus, "New folder", -1, false, v -> newFolder(null));
-        nf.setAlpha(0.75f);
+        View nf = navRow(R.drawable.ic_plus, "New folder", -1, 0, false, false, false, v -> newFolder(null), null, null);
+        nf.setAlpha(0.8f);
         chips.addView(nf);
         fillGrid();
     }
 
     private void setFilter(String f) {
+        if (selecting) stopSelecting();
         filter = f;
         prefs.edit().putString("filter", f).apply();
         refresh();
     }
 
-    /** Sidebar folder row: indented by depth, with a chevron that opens / closes its subfolders. */
-    private View folderNavItem(String f, int count, boolean kids, boolean open, boolean sel) {
-        LinearLayout row = (LinearLayout) navItem(R.drawable.ic_folder, leaf(f), count, sel, v -> setFilter(f));
-        row.setOnLongClickListener(v -> { folderMenu(v, f); return true; });
-        int d = depth(f);
+    /**
+     * One sidebar row: [chevron] icon, name, count. Indented by folder depth. The selected row sits on a soft accent
+     * background with its name in the accent; the rest are quiet. Same row for lists and folders, so the column reads as one.
+     */
+    private View navRow(int icon, String label, int count, int depth, boolean sel, boolean kids, boolean open,
+                        View.OnClickListener click, View.OnLongClickListener longClick, View.OnClickListener toggle) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Ui.dp(this, 6 + 16 * depth), 0, Ui.dp(this, 12), 0);
+        row.setBackground(Ui.ripple(this, sel ? Ui.round(Ui.color(this, R.color.accent_container), Ui.dp(this, 10)) : null, Ui.dp(this, 10)));
+        // chevron slot (folders with subfolders), kept for every folder so names line up
         ImageView chev = new ImageView(this);
         chev.setImageResource(R.drawable.ic_chevron);
         chev.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.on_surface_variant)));
         chev.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        chev.setPadding(Ui.dp(this, 3), Ui.dp(this, 3), Ui.dp(this, 3), Ui.dp(this, 3));
+        chev.setPadding(Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 4));
         chev.setRotation(open ? 90 : 0);
         chev.setVisibility(kids ? View.VISIBLE : View.INVISIBLE);
-        chev.setContentDescription(open ? "Hide subfolders" : "Show subfolders");
-        chev.setBackground(Ui.ripple(this, null, Ui.dp(this, 10)));
-        if (kids) chev.setOnClickListener(v -> {
-            HashSet<String> o = openFolders();
-            if (!o.remove(f)) o.add(f);
-            prefs.edit().putStringSet("openFolders", o).apply();
-            refresh();
-        });
-        row.addView(chev, 0, new LinearLayout.LayoutParams(Ui.dp(this, 20), Ui.dp(this, 20)));
-        row.setPadding(Ui.dp(this, 4 + 14 * d), 0, Ui.dp(this, 12), 0);
-        return row;
-    }
-
-    /** Sidebar row: icon, label, count; the selected row is a raised surface. */
-    private View navItem(int icon, String label, int count, boolean sel, View.OnClickListener l) {
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 12), 0);
-        GradientDrawable g = Ui.round(sel ? Ui.color(this, R.color.surface) : 0, Ui.dp(this, 9));
-        if (sel) g.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
-        row.setBackground(Ui.ripple(this, g, Ui.dp(this, 9)));
+        if (toggle != null) {
+            chev.setOnClickListener(toggle);
+            chev.setContentDescription(open ? "Hide subfolders" : "Show subfolders");
+        }
+        boolean folderRow = icon == R.drawable.ic_folder;
+        if (folderRow) row.addView(chev, new LinearLayout.LayoutParams(Ui.dp(this, 22), Ui.dp(this, 22)));
+        int fg = Ui.color(this, sel ? R.color.accent : R.color.on_surface);
         ImageView iv = new ImageView(this);
         iv.setImageResource(icon);
-        iv.setImageTintList(ColorStateList.valueOf(Ui.color(this, sel ? R.color.on_surface : R.color.icon)));
+        iv.setImageTintList(ColorStateList.valueOf(sel ? fg : Ui.color(this, R.color.icon)));
         iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        row.addView(iv, new LinearLayout.LayoutParams(Ui.dp(this, 19), Ui.dp(this, 19)));
-        TextView t = Ui.text(this, label, 14.5f, Ui.color(this, R.color.on_surface), sel ? Ui.bold() : null);
+        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(Ui.dp(this, 18), Ui.dp(this, 18));
+        il.leftMargin = Ui.dp(this, folderRow ? 2 : 8);
+        row.addView(iv, il);
+        TextView t = Ui.text(this, label, 15, fg, sel ? Ui.bold() : Ui.medium());
         t.setSingleLine(true);
         t.setEllipsize(android.text.TextUtils.TruncateAt.END);
         t.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 8), 0);
         row.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
-        if (count >= 0) row.addView(Ui.text(this, String.valueOf(count), 12.5f, Ui.color(this, R.color.on_surface_variant), null));
-        row.setOnClickListener(l);
+        if (count >= 0) {
+            TextView c = Ui.text(this, String.valueOf(count), 13, Ui.color(this, sel ? R.color.accent : R.color.on_surface_variant), Ui.medium());
+            c.setFontFeatureSettings("tnum");
+            row.addView(c);
+        }
+        row.setOnClickListener(click);
+        if (longClick != null) row.setOnLongClickListener(longClick);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, Ui.dp(this, 40));
         lp.bottomMargin = Ui.dp(this, 2);
         row.setLayoutParams(lp);
         return row;
+    }
+
+    /** Round hairline button (settings, theme) at the foot of the sidebar. */
+    private View roundButton(int icon, String desc, View.OnClickListener l) {
+        ImageView b = new ImageView(this);
+        b.setImageResource(icon);
+        b.setContentDescription(desc);
+        b.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.icon)));
+        b.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        int p = Ui.dp(this, 11);
+        b.setPadding(p, p, p, p);
+        GradientDrawable g = Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 22));
+        g.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
+        b.setBackground(Ui.ripple(this, g, Ui.dp(this, 22)));
+        b.setOnClickListener(l);
+        b.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp(this, 44), Ui.dp(this, 44)));
+        return b;
     }
 
     /** The sidebar's lists as a menu (narrow windows). */
@@ -430,6 +501,8 @@ public final class LibraryActivity extends Activity {
         m.add(0, 1, 0, "All notes");
         m.add(0, 2, 1, "Recent");
         m.add(0, 3, 2, "Favourites");
+        m.add(0, 8, 3, "Unfiled");
+        m.add(0, 6, 3, "Trash");
         ArrayList<String> fl = folders();
         for (int i = 0; i < fl.size(); i++) m.add(1, 100 + i, 10 + i, "\u2003".repeat(depth(fl.get(i))) + "📁  " + leaf(fl.get(i)));
         m.add(2, 4, 100, "New folder…");
@@ -439,6 +512,8 @@ public final class LibraryActivity extends Activity {
             if (id == 1) setFilter("");
             else if (id == 2) setFilter(RECENT);
             else if (id == 3) setFilter(FAV);
+            else if (id == 6) setFilter(TRASH);
+            else if (id == 8) setFilter(UNFILED);
             else if (id == 4) newFolder(null);
             else if (id == 5) showMore(anchor);
             else if (id >= 100) setFilter(fl.get(id - 100));
@@ -447,13 +522,15 @@ public final class LibraryActivity extends Activity {
         pm.show();
     }
 
+    /** Sort order. */
     private void showSort(View anchor) {
         PopupMenu pm = new PopupMenu(this, anchor);
         String[] names = {"Recently edited", "Name", "Date created"};
         for (int i = 0; i < 3; i++) pm.getMenu().add(1, 10 + i, i, names[i]).setCheckable(true).setChecked(sort == i);
         pm.getMenu().setGroupCheckable(1, true, true);
         pm.setOnMenuItemClickListener(it -> {
-            sort = it.getItemId() - 10;
+            int id = it.getItemId();
+            sort = id - 10;
             prefs.edit().putInt("sort", sort).apply();
             fillGrid();
             return true;
@@ -465,35 +542,66 @@ public final class LibraryActivity extends Activity {
 
     private void fillGrid() {
         grid.removeAllViews();
+        checks.clear();
         hits.clear();
+        boolean trash = filter.equals(TRASH);
         ArrayList<Notebook.Entry> shown = new ArrayList<>();
-        for (Notebook.Entry e : all) {
+        for (Notebook.Entry e : trash ? Notebook.listTrash(this) : all) {
             if (filter.equals(FAV) && !e.favorite) continue;
             if (filter.equals(RECENT) && e.modified < System.currentTimeMillis() - 7L * 24 * 3600_000) continue;
+            if (filter.equals(UNFILED) && !e.folder.isEmpty()) continue; // not in any folder
             // in a folder: its own notebooks; while searching, everything inside it (subfolders too)
             if (isFolderFilter() && !(query.isEmpty() ? filter.equals(e.folder) : within(e.folder, filter))) continue;
             if (!query.isEmpty() && !e.title.toLowerCase().contains(query) && !e.folder.toLowerCase().contains(query)) {
-                Handwriting.Hit hit = Handwriting.enabled(this) ? Handwriting.find(e.dir, query) : null;
+                Handwriting.Hit hit = !trash && Handwriting.enabled(this) ? Handwriting.find(e.dir, query) : null;
                 if (hit == null) continue;
                 hits.put(e.dir.getPath(), hit); // found in the handwriting
             }
             shown.add(e);
         }
-        if (sort == 1) shown.sort(Comparator.comparing((Notebook.Entry e) -> e.title.toLowerCase()));
-        else if (sort == 2) shown.sort(Comparator.comparingLong((Notebook.Entry e) -> e.created).reversed());
-        pageTitle.setText(filter.isEmpty() ? "All notes" : filter.equals(FAV) ? "Favourites" : filter.equals(RECENT) ? "Recent" : leaf(filter));
+        if (!trash && sort == 1) shown.sort(Comparator.comparing((Notebook.Entry e) -> e.title.toLowerCase()));
+        else if (!trash && sort == 2) shown.sort(Comparator.comparingLong((Notebook.Entry e) -> e.created).reversed());
+        pageTitle.setText(filter.isEmpty() ? "All notes" : filter.equals(FAV) ? "Favourites" : filter.equals(RECENT) ? "Recent"
+                : filter.equals(UNFILED) ? "Unfiled" : trash ? "Trash" : leaf(filter));
         ArrayList<String> subs = isFolderFilter() && query.isEmpty() ? childrenOf(folders(), filter) : new ArrayList<>();
-        subtitle.setText((subs.isEmpty() ? "" : subs.size() + (subs.size() == 1 ? " folder · " : " folders · "))
-                + shown.size() + (shown.size() == 1 ? " notebook" : " notebooks") + (filter.equals(RECENT) ? " · last 7 days" : ""));
+        // meta line: what's here · when it changed · how it's sorted (tap to change)
+        StringBuilder m = new StringBuilder();
+        if (!subs.isEmpty()) m.append(subs.size()).append(subs.size() == 1 ? " folder · " : " folders · ");
+        m.append(shown.size()).append(shown.size() == 1 ? " notebook" : " notebooks");
+        if (trash) m.append(" · kept for 30 days");
+        else if (filter.equals(RECENT)) m.append(" · last 7 days");
+        subtitle.setText(m);
+        renderViewControls(trash);
+        if (trash) {
+            sortLabel.setText(shown.isEmpty() ? "" : "  ·  Empty trash");
+            sortLabel.setTextColor(Ui.color(this, R.color.accent));
+            sortLabel.setOnClickListener(shown.isEmpty() ? null : v -> emptyTrash());
+        } else {
+            sortLabel.setText("");
+            sortLabel.setOnClickListener(null);
+        }
         renderCrumbs();
         folderGrid.removeAllViews();
         for (String f : subs) folderGrid.addView(folderCard(f));
         folderGrid.setVisibility(subs.isEmpty() ? View.GONE : View.VISIBLE);
         ((LinearLayout.LayoutParams) grid.getLayoutParams()).topMargin = Ui.dp(this, subs.isEmpty() ? 26 : 22);
-        empty.setText(all.isEmpty() ? "No notebooks yet. Tap New to start writing."
+        empty.setText(trash ? "Nothing in the trash. Deleted notebooks wait here for 30 days."
+                : all.isEmpty() ? "No notebooks yet. Tap New to start writing."
                 : !query.isEmpty() ? "Nothing matches “" + query + "”" : filter.equals(FAV) ? "Long-press a notebook to add it to favourites" : "Nothing here yet");
         empty.setVisibility(shown.isEmpty() && subs.isEmpty() ? View.VISIBLE : View.GONE);
-        for (Notebook.Entry e : shown) grid.addView(card(e));
+        for (Notebook.Entry e : shown) grid.addView(card(e, trash));
+    }
+
+    private static String when(long t) {
+        long now = System.currentTimeMillis();
+        return now - t < 60_000 ? "Just now" : DateUtils.getRelativeTimeSpanString(t, now, DateUtils.MINUTE_IN_MILLIS).toString();
+    }
+
+    private void emptyTrash() {
+        new AlertDialog.Builder(this).setTitle("Empty the trash?")
+                .setMessage("Notebooks in the trash will be deleted for good.")
+                .setPositiveButton("Delete all", (d, w) -> { for (Notebook.Entry e : Notebook.listTrash(this)) Notebook.delete(e.dir); refresh(); })
+                .setNegativeButton("Cancel", null).show();
     }
 
     /** "All notes › School ›" above a folder's title; each part opens that level. */
@@ -505,7 +613,7 @@ public final class LibraryActivity extends Activity {
         levels.add("");
         for (String a = parentOf(filter); !a.isEmpty(); a = parentOf(a)) levels.add(1, a);
         for (String lv : levels) {
-            TextView t = Ui.text(this, lv.isEmpty() ? "All notes" : leaf(lv), 13f, Ui.color(this, R.color.accent), Ui.medium());
+            TextView t = Ui.text(this, lv.isEmpty() ? "All notes" : leaf(lv), 13.5f, Ui.color(this, R.color.accent), Ui.medium());
             t.setGravity(Gravity.CENTER_VERTICAL);
             t.setPadding(Ui.dp(this, 2), 0, Ui.dp(this, 2), 0);
             t.setBackground(Ui.ripple(this, null, Ui.dp(this, 6)));
@@ -518,22 +626,17 @@ public final class LibraryActivity extends Activity {
         }
     }
 
-    /** A subfolder tile: folder glyph, name, what's inside. Long-press for folder actions. */
+    /** A subfolder: name and what's inside, on a quiet card. Long-press for folder actions. */
     private View folderCard(String f) {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 10), 0);
-        GradientDrawable g = Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 10));
+        row.setPadding(Ui.dp(this, 16), 0, Ui.dp(this, 8), 0);
+        GradientDrawable g = Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 16));
         g.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
-        row.setBackground(Ui.ripple(this, g, Ui.dp(this, 10)));
-        ImageView iv = new ImageView(this);
-        iv.setImageResource(R.drawable.ic_folder);
-        iv.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.accent)));
-        row.addView(iv, new LinearLayout.LayoutParams(Ui.dp(this, 24), Ui.dp(this, 24)));
+        row.setBackground(Ui.ripple(this, g, Ui.dp(this, 16)));
         LinearLayout txt = new LinearLayout(this);
         txt.setOrientation(LinearLayout.VERTICAL);
-        txt.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 4), 0);
-        TextView t = Ui.text(this, leaf(f), 14.5f, Ui.color(this, R.color.on_surface), Ui.medium());
+        TextView t = Ui.text(this, leaf(f), 15.5f, Ui.color(this, R.color.on_surface), Ui.bold());
         t.setSingleLine(true);
         t.setEllipsize(android.text.TextUtils.TruncateAt.END);
         txt.addView(t);
@@ -541,8 +644,9 @@ public final class LibraryActivity extends Activity {
         for (Notebook.Entry e : all) if (within(e.folder, f)) nb++;
         int sub = childrenOf(folders(), f).size();
         TextView m = Ui.text(this, (sub > 0 ? sub + (sub == 1 ? " folder · " : " folders · ") : "") + nb + (nb == 1 ? " notebook" : " notebooks"),
-                12f, Ui.color(this, R.color.on_surface_variant), null);
+                12.5f, Ui.color(this, R.color.on_surface_variant), null);
         m.setSingleLine(true);
+        m.setPadding(0, Ui.dp(this, 4), 0, 0);
         txt.addView(m);
         row.addView(txt, new LinearLayout.LayoutParams(0, -2, 1f));
         Ui.IconButton more = new Ui.IconButton(this, R.drawable.ic_more, "Folder actions");
@@ -550,20 +654,65 @@ public final class LibraryActivity extends Activity {
         row.addView(more, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 36)));
         row.setOnClickListener(v -> setFilter(f));
         row.setOnLongClickListener(v -> { folderMenu(v, f); return true; });
-        row.setLayoutParams(new android.view.ViewGroup.LayoutParams(-1, Ui.dp(this, 64)));
-        row.setMinimumHeight(Ui.dp(this, 64));
+        row.setLayoutParams(new android.view.ViewGroup.LayoutParams(-1, Ui.dp(this, 70)));
+        row.setMinimumHeight(Ui.dp(this, 70));
         return row;
     }
 
-    private View card(Notebook.Entry e) {
+    private int cardSize() { return Math.max(0, Math.min(2, prefs.getInt("cardSize", 1))); }
+
+    /** Right of the title: a sort button and a three-way card size switch (hidden in the trash). */
+    private void renderViewControls(boolean trash) {
+        viewControls.removeAllViews();
+        if (trash) return;
+        Ui.IconButton sortB = new Ui.IconButton(this, R.drawable.ic_sort, "Sort");
+        sortB.setOnClickListener(this::showSort);
+        viewControls.addView(sortB, new LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40)));
+        LinearLayout seg = new LinearLayout(this);
+        seg.setPadding(Ui.dp(this, 3), Ui.dp(this, 3), Ui.dp(this, 3), Ui.dp(this, 3));
+        seg.setBackground(Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 12)));
+        int[] icons = {R.drawable.ic_size_s, R.drawable.ic_size_m, R.drawable.ic_size_l};
+        String[] desc = {"Small notebooks", "Medium notebooks", "Large notebooks"};
+        int cur = cardSize();
+        for (int i = 0; i < 3; i++) {
+            final int k = i;
+            ImageView b = new ImageView(this);
+            b.setImageResource(icons[i]);
+            b.setContentDescription(desc[i]);
+            b.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            int pd = Ui.dp(this, 8);
+            b.setPadding(pd, pd, pd, pd);
+            boolean on = i == cur;
+            b.setImageTintList(ColorStateList.valueOf(Ui.color(this, on ? R.color.on_surface : R.color.on_surface_variant)));
+            if (on) { b.setBackground(Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 9))); b.setElevation(Ui.dp(this, 1)); }
+            b.setOnClickListener(v -> {
+                if (k == cardSize()) return;
+                prefs.edit().putInt("cardSize", k).apply();
+                grid.setMinCol(CARD_SIZES[k]);
+                grid.setGap(k == 0 ? 14 : 20);
+                fillGrid(); // titles size with the cards
+            });
+            seg.addView(b, new LinearLayout.LayoutParams(Ui.dp(this, 34), Ui.dp(this, 32)));
+        }
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(-2, -2);
+        sl.leftMargin = Ui.dp(this, 6);
+        viewControls.addView(seg, sl);
+    }
+
+    /** Spine colour of a notebook: steady per notebook, from the accent palette (covers will replace it in 1.4). */
+    private int spineColor(Notebook.Entry e) {
+        int i = Math.floorMod(e.dir.getName().hashCode(), Theme.ACC_LIGHT.length);
+        return (Ui.dark(this) ? Theme.ACC_DARK : Theme.ACC_LIGHT)[i];
+    }
+
+    /** A notebook: its real first page with a coloured spine, then title, when, and what's in it. */
+    private View card(Notebook.Entry e, boolean trashed) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         Ui.Aspect frame = new Ui.Aspect(this, Notebook.PH / Notebook.PW);
-        GradientDrawable g = Ui.round(0xffffffff, Ui.dp(this, 6));
-        g.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
-        frame.setBackground(g);
+        frame.setBackground(Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 10)));
         frame.setClipToOutline(true);
-        frame.setElevation(Ui.dp(this, 1.5f));
+        frame.setElevation(Ui.dp(this, 2.5f));
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
         frame.addView(img, new FrameLayout.LayoutParams(-1, -1));
@@ -571,46 +720,291 @@ public final class LibraryActivity extends Activity {
         if (thumb.exists()) {
             bg.execute(() -> {
                 Bitmap bm = BitmapFactory.decodeFile(thumb.getPath());
-                ui.post(() -> img.setImageBitmap(bm));
+                ui.post(() -> {
+                    img.setImageBitmap(bm);
+                    // canvases keep their own shape (that's what makes the flow uneven, like real pages)
+                    if (bm != null && e.canvas && bm.getWidth() > 0) frame.setRatio(Math.max(0.55f, Math.min(1.6f, bm.getHeight() / (float) bm.getWidth())));
+                });
             });
         }
-        if (e.favorite) {
+        View spine = new View(this);
+        spine.setBackgroundColor(spineColor(e));
+        frame.addView(spine, new FrameLayout.LayoutParams(Ui.dp(this, 6), -1, Gravity.START));
+        if (e.favorite && !trashed) {
             ImageView star = new ImageView(this);
             star.setImageResource(R.drawable.ic_star_filled);
             star.setImageTintList(ColorStateList.valueOf(0xfff2b705));
             star.setPadding(Ui.dp(this, 5), Ui.dp(this, 5), Ui.dp(this, 5), Ui.dp(this, 5));
             star.setBackground(Ui.round(0xf2ffffff, Ui.dp(this, 8)));
             FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(Ui.dp(this, 26), Ui.dp(this, 26), Gravity.TOP | Gravity.END);
-            slp.topMargin = slp.rightMargin = Ui.dp(this, 6);
+            slp.topMargin = slp.rightMargin = Ui.dp(this, 8);
             frame.addView(star, slp);
         }
+        if (trashed) frame.setAlpha(0.7f);
         View ripple = new View(this);
-        ripple.setBackground(Ui.ripple(this, null, Ui.dp(this, 6)));
+        ripple.setBackground(Ui.ripple(this, null, Ui.dp(this, 10)));
         frame.addView(ripple, new FrameLayout.LayoutParams(-1, -1));
         Handwriting.Hit hit = hits.get(e.dir.getPath());
-        ripple.setOnClickListener(v -> open(e.dir, hit != null ? hit.page : 0));
-        ripple.setOnLongClickListener(v -> { menu(v, e); return true; });
+        String key = e.dir.getPath();
+        if (selecting) {
+            CheckDot dot = new CheckDot(this, picked.contains(key));
+            FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(Ui.dp(this, 28), Ui.dp(this, 28), Gravity.TOP | Gravity.START);
+            dl.topMargin = Ui.dp(this, 10);
+            dl.leftMargin = Ui.dp(this, 14);
+            frame.addView(dot, frame.getChildCount() - 1, dl);
+            checks.put(key, dot);
+            View.OnClickListener tog = v -> togglePick(key);
+            ripple.setOnClickListener(tog);
+            ripple.setOnLongClickListener(v -> { togglePick(key); return true; });
+        } else if (trashed) {
+            ripple.setOnClickListener(v -> trashMenu(v, e));
+            ripple.setOnLongClickListener(v -> { startSelecting(e); return true; });
+        } else {
+            ripple.setOnClickListener(v -> open(e.dir, hit != null ? hit.page : 0));
+            ripple.setOnLongClickListener(v -> { startSelecting(e); return true; }); // hold to select
+        }
         card.addView(frame);
 
-        TextView t = Ui.text(this, e.title, 14, Ui.color(this, R.color.on_surface), Ui.medium());
+        LinearLayout tr = new LinearLayout(this);
+        tr.setGravity(Gravity.CENTER_VERTICAL);
+        boolean small = cardSize() == 0;
+        TextView t = Ui.text(this, e.title, small ? 13 : 15, Ui.color(this, R.color.on_surface), Ui.bold());
         t.setSingleLine(true);
         t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        tr.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView w = Ui.text(this, trashed ? daysLeft(e) : when(e.modified), small ? 11 : 12.5f, Ui.color(this, R.color.on_surface_variant), null);
+        if (small && !trashed) w.setVisibility(View.GONE); // room for the title
+        w.setPadding(Ui.dp(this, 8), 0, 0, 0);
+        tr.addView(w);
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(-1, -2);
-        tl.topMargin = Ui.dp(this, 10);
-        card.addView(t, tl);
-        long now = System.currentTimeMillis();
-        String when = now - e.modified < 60_000 ? "Just now"
-                : DateUtils.getRelativeTimeSpanString(e.modified, now, DateUtils.MINUTE_IN_MILLIS).toString();
-        String meta = (e.canvas ? "Canvas · " : e.pages + (e.pages == 1 ? " page · " : " pages · ")) + when;
-        if (!e.folder.isEmpty() && !filter.equals(e.folder)) meta = (isFolderFilter() ? e.folder.substring(Math.min(e.folder.length(), filter.length() + 1)) : leaf(e.folder)) .replace("/", " › ") + " · " + meta;
+        tl.topMargin = Ui.dp(this, 11);
+        card.addView(tr, tl);
+        String meta = e.canvas ? "Canvas" : e.pages + (e.pages == 1 ? " page" : " pages");
+        if (!e.folder.isEmpty() && !filter.equals(e.folder)) meta = (isFolderFilter() ? e.folder.substring(Math.min(e.folder.length(), filter.length() + 1)) : leaf(e.folder)).replace("/", " › ") + " · " + meta;
         if (hit != null) meta = "p. " + (hit.page + 1) + " · " + hit.snippet; // matched in the handwriting
-        TextView mt = Ui.text(this, meta, 12, Ui.color(this, R.color.on_surface_variant), null);
+        TextView mt = Ui.text(this, meta, small ? 11.5f : 12.5f, Ui.color(this, R.color.on_surface_variant), null);
         mt.setSingleLine(true);
         mt.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-1, -2);
-        mlp.topMargin = Ui.dp(this, 3);
+        mlp.topMargin = Ui.dp(this, 4);
         card.addView(mt, mlp);
         return card;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        if (selecting) { stopSelecting(); return; }
+        super.onBackPressed();
+    }
+
+    // ---- selecting several notebooks ---------------------------------------------------------
+
+    private void startSelecting(Notebook.Entry first) {
+        moreB = null;
+        selecting = true;
+        picked.clear();
+        if (first != null) picked.add(first.dir.getPath());
+        buildSelRow();
+        topRow.setVisibility(View.GONE);
+        selRow.setVisibility(View.VISIBLE);
+        fillGrid();
+        updatePicked();
+    }
+
+    private void stopSelecting() {
+        selecting = false;
+        picked.clear();
+        selRow.setVisibility(View.GONE);
+        topRow.setVisibility(View.VISIBLE);
+        fillGrid();
+    }
+
+    private void togglePick(String key) {
+        if (!picked.remove(key)) picked.add(key);
+        View d = checks.get(key);
+        if (d instanceof CheckDot) ((CheckDot) d).set(picked.contains(key));
+        updatePicked();
+    }
+
+    private void updatePicked() {
+        if (pickedLabel != null) pickedLabel.setText(picked.isEmpty() ? "Select notebooks" : picked.size() + " selected");
+        if (moreB != null) moreB.setVisibility(picked.size() == 1 && !filter.equals(TRASH) ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < selRow.getChildCount(); i++) {
+            View v = selRow.getChildAt(i);
+            if (v.getTag() != null) { v.setEnabled(!picked.isEmpty()); v.setAlpha(picked.isEmpty() ? 0.4f : 1f); }
+        }
+    }
+
+    private List<Notebook.Entry> pickedEntries() {
+        ArrayList<Notebook.Entry> out = new ArrayList<>();
+        for (Notebook.Entry e : filter.equals(TRASH) ? Notebook.listTrash(this) : all) if (picked.contains(e.dir.getPath())) out.add(e);
+        return out;
+    }
+
+    /** An icon action in the selection bar; its name shows on long-press (and to screen readers). */
+    private View selButton(int icon, String label, View.OnClickListener l) {
+        ImageView b = new ImageView(this);
+        b.setImageResource(icon);
+        b.setImageTintList(ColorStateList.valueOf(Ui.color(this, R.color.icon)));
+        b.setContentDescription(label);
+        b.setTooltipText(label);
+        b.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        int p = Ui.dp(this, 10);
+        b.setPadding(p, p, p, p);
+        b.setBackground(Ui.ripple(this, null, Ui.dp(this, 20)));
+        b.setTag("act");
+        b.setOnClickListener(l);
+        b.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp(this, 42), Ui.dp(this, 42)));
+        return b;
+    }
+
+    private void buildSelRow() {
+        selRow.removeAllViews();
+        TextView done = Ui.text(this, "Done", 15, Ui.color(this, R.color.accent), Ui.bold());
+        done.setGravity(Gravity.CENTER_VERTICAL);
+        done.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 14), 0);
+        done.setOnClickListener(v -> stopSelecting());
+        selRow.addView(done, new LinearLayout.LayoutParams(-2, -1));
+        pickedLabel = Ui.text(this, "", 15, Ui.color(this, R.color.on_surface), Ui.bold());
+        pickedLabel.setGravity(Gravity.CENTER_VERTICAL);
+        pickedLabel.setSingleLine(true);
+        pickedLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        selRow.addView(pickedLabel, new LinearLayout.LayoutParams(0, -1, 1f));
+        TextView allB = Ui.text(this, "All", 14.5f, Ui.color(this, R.color.accent), Ui.medium());
+        allB.setGravity(Gravity.CENTER_VERTICAL);
+        allB.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 10), 0);
+        allB.setOnClickListener(v -> { // select everything shown (or clear if all are)
+            ArrayList<String> shown = new ArrayList<>(checks.keySet());
+            boolean everyone = picked.containsAll(shown);
+            for (String k : shown) { if (everyone) picked.remove(k); else picked.add(k); View d = checks.get(k); if (d instanceof CheckDot) ((CheckDot) d).set(!everyone); }
+            updatePicked();
+        });
+        selRow.addView(allB, new LinearLayout.LayoutParams(-2, -1));
+        if (filter.equals(TRASH)) {
+            selRow.addView(selButton(R.drawable.ic_undo, "Restore", v -> {
+                int n = 0;
+                for (Notebook.Entry e : pickedEntries()) if (Notebook.restore(this, e.dir) != null) n++;
+                Toast.makeText(this, "Restored " + n, Toast.LENGTH_SHORT).show();
+                stopSelecting(); refresh();
+            }));
+            selRow.addView(selButton(R.drawable.ic_trash, "Delete", v -> {
+                List<Notebook.Entry> es = pickedEntries();
+                new AlertDialog.Builder(this).setTitle("Delete " + es.size() + (es.size() == 1 ? " notebook" : " notebooks") + " for good?")
+                        .setMessage("This can't be undone.")
+                        .setPositiveButton("Delete", (d, w) -> { for (Notebook.Entry e : es) Notebook.delete(e.dir); stopSelecting(); refresh(); })
+                        .setNegativeButton("Cancel", null).show();
+            }));
+            return;
+        }
+        selRow.addView(selButton(R.drawable.ic_folder, "Move", this::movePicked));
+        selRow.addView(selButton(R.drawable.ic_star, "Favourite", v -> {
+            List<Notebook.Entry> es = pickedEntries();
+            boolean allFav = true;
+            for (Notebook.Entry e : es) allFav &= e.favorite;
+            for (Notebook.Entry e : es) try { Notebook.setMeta(e.dir, "favorite", Boolean.toString(!allFav)); } catch (Exception ignored) { }
+            Toast.makeText(this, allFav ? "Removed from favourites" : "Added to favourites", Toast.LENGTH_SHORT).show();
+            stopSelecting(); refresh();
+        }));
+        selRow.addView(selButton(R.drawable.ic_share, "Export", v -> exportPicked()));
+        moreB = selButton(R.drawable.ic_more, "More for this notebook", v -> {
+            List<Notebook.Entry> es = pickedEntries();
+            if (es.size() == 1) menu(v, es.get(0));
+        });
+        selRow.addView(moreB);
+        selRow.addView(selButton(R.drawable.ic_trash, "Delete", v -> {
+            int n = 0;
+            for (Notebook.Entry e : pickedEntries()) if (Notebook.trash(this, e.dir)) n++;
+            Toast.makeText(this, "Moved " + n + " to the trash · kept 30 days", Toast.LENGTH_SHORT).show();
+            stopSelecting(); refresh();
+        }));
+    }
+
+    private void movePicked(View anchor) {
+        PopupMenu pm = new PopupMenu(this, anchor);
+        Menu m = pm.getMenu();
+        m.add(0, 1, 0, "No folder");
+        ArrayList<String> fl = folders();
+        for (int i = 0; i < fl.size(); i++) m.add(0, 100 + i, i + 1, "\u2003".repeat(depth(fl.get(i))) + leaf(fl.get(i)));
+        pm.setOnMenuItemClickListener(it -> {
+            String to = it.getItemId() == 1 ? "" : fl.get(it.getItemId() - 100);
+            List<Notebook.Entry> es = pickedEntries();
+            for (Notebook.Entry e : es) try { Notebook.setMeta(e.dir, "folder", to); } catch (Exception ignored) { }
+            Toast.makeText(this, "Moved " + es.size() + " to " + (to.isEmpty() ? "no folder" : leaf(to)), Toast.LENGTH_SHORT).show();
+            stopSelecting(); refresh();
+            return true;
+        });
+        pm.show();
+    }
+
+    private void exportPicked() {
+        List<Notebook.Entry> es = pickedEntries();
+        Toast.makeText(this, "Exporting " + es.size() + "…", Toast.LENGTH_SHORT).show();
+        bg.execute(() -> {
+            ArrayList<File> files = new ArrayList<>();
+            for (Notebook.Entry e : es) {
+                try { files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1)); } catch (Exception ex) { Log.e(Gl.TAG, "export", ex); }
+            }
+            ui.post(() -> {
+                if (files.isEmpty()) { Toast.makeText(this, "Export failed", Toast.LENGTH_SHORT).show(); return; }
+                Exporter.shareMany(this, files, "application/pdf");
+                stopSelecting();
+            });
+        });
+    }
+
+    /** Round tick in a card's corner while selecting. */
+    private static final class CheckDot extends View {
+        private boolean on;
+        private final android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        CheckDot(android.content.Context c, boolean on) { super(c); this.on = on; }
+        void set(boolean v) { on = v; invalidate(); }
+        @Override protected void onDraw(android.graphics.Canvas cv) {
+            float w = getWidth(), cx = w / 2, r = w / 2 - Ui.dp(getContext(), 1.5f);
+            p.setStyle(android.graphics.Paint.Style.FILL);
+            p.setColor(on ? Ui.color(getContext(), R.color.accent) : 0x99FFFFFF);
+            cv.drawCircle(cx, cx, r, p);
+            p.setStyle(android.graphics.Paint.Style.STROKE);
+            p.setStrokeWidth(Ui.dp(getContext(), 1.8f));
+            p.setColor(on ? Ui.color(getContext(), R.color.accent) : 0xFF8A857D);
+            cv.drawCircle(cx, cx, r, p);
+            if (on) {
+                p.setColor(Ui.color(getContext(), R.color.on_accent));
+                p.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+                p.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+                android.graphics.Path t = new android.graphics.Path();
+                t.moveTo(cx - r * 0.42f, cx + r * 0.02f);
+                t.lineTo(cx - r * 0.1f, cx + r * 0.36f);
+                t.lineTo(cx + r * 0.45f, cx - r * 0.3f);
+                cv.drawPath(t, p);
+            }
+        }
+    }
+
+    private static String daysLeft(Notebook.Entry e) {
+        long left = Notebook.TRASH_KEEP_MS - (System.currentTimeMillis() - e.trashedAt);
+        int d = (int) Math.max(0, Math.ceil(left / 86400_000.0));
+        return d <= 1 ? "last day" : d + " days left";
+    }
+
+    private void trashMenu(View anchor, Notebook.Entry e) {
+        PopupMenu pm = new PopupMenu(this, anchor, Gravity.CENTER);
+        pm.getMenu().add(0, 1, 0, "Restore");
+        pm.getMenu().add(0, 2, 1, "Delete for good");
+        pm.setOnMenuItemClickListener(it -> {
+            if (it.getItemId() == 1) {
+                if (Notebook.restore(this, e.dir) == null) Toast.makeText(this, "Could not restore", Toast.LENGTH_SHORT).show();
+                else Toast.makeText(this, "Restored “" + e.title + "”", Toast.LENGTH_SHORT).show();
+                refresh();
+            } else {
+                new AlertDialog.Builder(this).setTitle("Delete “" + e.title + "” for good?")
+                        .setMessage("This can't be undone.")
+                        .setPositiveButton("Delete", (d, w) -> { Notebook.delete(e.dir); refresh(); })
+                        .setNegativeButton("Cancel", null).show();
+            }
+            return true;
+        });
+        pm.show();
     }
 
     // ---- notebook actions --------------------------------------------------------------------
@@ -630,10 +1024,11 @@ public final class LibraryActivity extends Activity {
         mv.add(2, 11, fl.size() + 1, isFolderFilter() ? "New subfolder in " + leaf(filter) + "…" : "New folder…");
         m.add(0, 4, 4, "Duplicate");
         m.add(0, 5, 5, "Export as PDF");
-        m.add(0, 6, 6, "Delete");
+        m.add(0, 6, 6, "Move to trash");
         pm.setOnMenuItemClickListener(it -> {
             int id = it.getItemId();
             try {
+                if (selecting) stopSelecting();
                 if (id == 1) open(e.dir);
                 else if (id == 7) {
                     prefs.edit().putString("lastDir", e.dir.getPath()).apply();
@@ -826,17 +1221,17 @@ public final class LibraryActivity extends Activity {
         });
     }
 
+    /** Delete = move to the trash (30 days); real deletion happens from the trash. */
     private void confirmDelete(Notebook.Entry e) {
-        new AlertDialog.Builder(this).setTitle("Delete “" + e.title + "”?")
-                .setMessage("This notebook and all its pages will be removed.")
-                .setPositiveButton("Delete", (d, w) -> { Notebook.delete(e.dir); refresh(); })
-                .setNegativeButton("Cancel", null).show();
+        if (Notebook.trash(this, e.dir)) Toast.makeText(this, "Moved to the trash · kept 30 days", Toast.LENGTH_SHORT).show();
+        else Toast.makeText(this, "Could not delete", Toast.LENGTH_SHORT).show();
+        refresh();
     }
 
     private void newNotebook(boolean canvas) {
         try {
             String title = new SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(new Date());
-            String folder = filter.equals(FAV) || filter.equals(RECENT) ? "" : filter;
+            String folder = isFolderFilter() ? filter : "";
             // the page style chosen with "Use for new notebooks", else dotted; Graphite theme defaults to dark paper
             Notebook.Page proto = new Notebook.Page(Notebook.BG_DOTS);
             int paper = Ui.dark(this) ? Notebook.PAPER_DARK : Notebook.PAPER_WHITE;
@@ -866,11 +1261,7 @@ public final class LibraryActivity extends Activity {
     private void showMore(View anchor) {
         PopupMenu pm = new PopupMenu(this, anchor);
         Menu m = pm.getMenu();
-        SubMenu s = m.addSubMenu(0, 0, 0, "Appearance");
-        String[] names = {"System", "Light · Clean", "Dark · Graphite"};
-        int th = Theme.get(this);
-        for (int i = 0; i < 3; i++) s.add(1, 30 + i, i, names[i]).setCheckable(true).setChecked(th == i);
-        s.setGroupCheckable(1, true, true);
+        m.add(0, 30, 0, "Theme…");
         boolean has = Backup.tree(this) != null;
         m.add(0, 20, 1, has ? "Back up now" : "Set up backup…");
         if (has) m.add(0, 21, 2, "Change backup folder…");
@@ -879,8 +1270,8 @@ public final class LibraryActivity extends Activity {
         if (last > 0) m.add(0, 23, 4, "Last backup " + DateUtils.getRelativeTimeSpanString(last)).setEnabled(false);
         pm.setOnMenuItemClickListener(it -> {
             int id = it.getItemId();
-            if (id >= 30 && id < 33) {
-                Theme.set(this, id - 30);
+            if (id == 30) {
+                ThemeSheet.show(this, this::recreate);
             } else if (id == 20 && has) {
                 backupNow();
             } else if (id == 20 || id == 21) {

@@ -1,0 +1,34 @@
+<resources>
+    <style name="Accent0">
+        <item name="android:colorAccent">@color/acc0</item>
+        <item name="android:colorPrimary">@color/acc0</item>
+    </style>
+    <style name="Accent1">
+        <item name="android:colorAccent">@color/acc1</item>
+        <item name="android:colorPrimary">@color/acc1</item>
+    </style>
+    <style name="Accent2">
+        <item name="android:colorAccent">@color/acc2</item>
+        <item name="android:colorPrimary">@color/acc2</item>
+    </style>
+    <style name="Accent3">
+        <item name="android:colorAccent">@color/acc3</item>
+        <item name="android:colorPrimary">@color/acc3</item>
+    </style>
+    <style name="Accent4">
+        <item name="android:colorAccent">@color/acc4</item>
+        <item name="android:colorPrimary">@color/acc4</item>
+    </style>
+    <style name="Accent5">
+        <item name="android:colorAccent">@color/acc5</item>
+        <item name="android:colorPrimary">@color/acc5</item>
+    </style>
+    <style name="Accent6">
+        <item name="android:colorAccent">@color/acc6</item>
+        <item name="android:colorPrimary">@color/acc6</item>
+    </style>
+    <style name="Accent7">
+        <item name="android:colorAccent">@color/acc7</item>
+        <item name="android:colorPrimary">@color/acc7</item>
+    </style>
+</resources>

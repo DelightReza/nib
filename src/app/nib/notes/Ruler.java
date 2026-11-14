@@ -192,7 +192,7 @@ final class Ruler extends View {
         int ink = dk ? 0xffc9ced8 : 0xff3a4250;
         p.setColor(ink);
         p.setTextSize(11 * d);
-        p.setTypeface(Typeface.DEFAULT);
+        p.setTypeface(Ui.font(400));
         float len = 2 * halfLen;
         int n = (int) (len / (minor * pxPerRealMm)) + 1;
         for (int i = 0; i < n; i++) {
@@ -218,7 +218,7 @@ final class Ruler extends View {
 
         if (label != null) {
             p.setTextSize(14 * d);
-            p.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
+            p.setTypeface(Ui.font(600));
             float tw = p.measureText(label);
             RectF pill = new RectF(-tw / 2 - 10 * d, -11 * d, tw / 2 + 10 * d, 13 * d);
             p.setColor(dk ? 0xff8ab4f8 : 0xff2f6feb);

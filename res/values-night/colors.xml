@@ -1,13 +1,13 @@
 <resources>
-    <color name="bg">#121316</color>
-    <color name="surface">#1B1C20</color>
-    <color name="surface_variant">#26282D</color>
-    <color name="on_surface">#ECEDEF</color>
-    <color name="on_surface_variant">#9CA1AB</color>
-    <color name="icon">#C4C7CE</color>
-    <color name="outline">#2D3036</color>
-    <color name="accent">#8AB4F8</color>
-    <color name="accent_container">#26344F</color>
-    <color name="on_accent">#0B1B36</color>
-    <color name="desk">#0E0F11</color>
+    <color name="bg">#161616</color>
+    <color name="surface">#202020</color>
+    <color name="surface_variant">#2A2A2A</color>
+    <color name="on_surface">#EFEDE9</color>
+    <color name="on_surface_variant">#9C978F</color>
+    <color name="icon">#CFCBC4</color>
+    <color name="outline">#323232</color>
+    <color name="accent">#E58A68</color>
+    <color name="accent_container">#4A3027</color>
+    <color name="on_accent">#161616</color>
+    <color name="desk">#0F0F0F</color>
 </resources>

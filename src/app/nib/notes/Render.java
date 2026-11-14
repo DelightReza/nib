@@ -195,19 +195,19 @@ final class Render {
         int strong = paper == Notebook.PAPER_DARK ? 0xffc9ced8 : paper == Notebook.PAPER_CREAM ? 0xff4d4434 : 0xff3a4250;
         int soft = paper == Notebook.PAPER_DARK ? 0xff8f97a6 : paper == Notebook.PAPER_CREAM ? 0xff8a7c63 : 0xff7a8396;
         Paint t = new Paint(Paint.ANTI_ALIAS_FLAG);
-        t.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
+        t.setTypeface(Ui.font(600));
         if (top) {
             t.setColor(strong);
             t.setTextSize(30);
             c.drawText("Site inspection", 58, 82, t);
-            t.setTypeface(Typeface.DEFAULT);
+            t.setTypeface(Ui.font(400));
             t.setTextSize(15);
             t.setColor(soft);
             c.drawText("Sheet ____ of ____", 800, 80, t);
             String[] labels = {"Project", "Location / chainage", "Date", "Inspected by", "Weather", "Reference no."};
             float[] xs = {40, 347, 653};
             for (int i = 0; i < 6; i++) c.drawText(labels[i], xs[i % 3] + 14, (i < 3 ? 100 : 200) + 26, t);
-            t.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
+            t.setTypeface(Ui.font(600));
             t.setTextSize(18);
             t.setColor(strong);
             c.drawText("Observations", 42, 366, t);
@@ -470,7 +470,7 @@ final class Render {
                 b.recycle();
             }
         } else {
-            StaticLayout sl = textLayout(it.text, it.size, inkColor(it.color, darkPaper), it.w);
+            StaticLayout sl = textLayout(it.text, it.size, inkColor(it.color, darkPaper), it.w, it.hand());
             c.save();
             c.translate(it.x, it.y);
             sl.draw(c);
@@ -478,8 +478,12 @@ final class Render {
         }
     }
 
-    static StaticLayout textLayout(String text, float size, int color, float width) {
+    static StaticLayout textLayout(String text, float size, int color, float width) { return textLayout(text, size, color, width, false); }
+
+    /** Text boxes use Inter; converted handwriting uses the handwriting face (hand = true). */
+    static StaticLayout textLayout(String text, float size, int color, float width, boolean hand) {
         TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        tp.setTypeface(hand ? Ui.hand() : Ui.font(400));
         tp.setTextSize(size);
         tp.setColor(color);
         return StaticLayout.Builder.obtain(text, 0, text.length(), tp, Math.max(1, (int) Math.ceil(width)))

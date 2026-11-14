@@ -70,6 +70,22 @@ final class Exporter {
         return out;
     }
 
+    /** Several files at once (multi-select export). */
+    static void shareMany(Activity a, java.util.List<File> files, String mime) {
+        if (files.size() == 1) { share(a, files.get(0), mime); return; }
+        java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
+        ClipData clip = null;
+        for (File f : files) {
+            Uri u = Uri.parse("content://" + ExportProvider.AUTHORITY + "/" + Uri.encode(f.getName()));
+            uris.add(u);
+            if (clip == null) clip = ClipData.newRawUri(f.getName(), u); else clip.addItem(new ClipData.Item(u));
+        }
+        Intent send = new Intent(Intent.ACTION_SEND_MULTIPLE).setType(mime).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+        send.setClipData(clip);
+        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        a.startActivity(Intent.createChooser(send, "Share " + files.size() + " notebooks"));
+    }
+
     static void share(Activity a, File f, String mime) {
         Uri u = Uri.parse("content://" + ExportProvider.AUTHORITY + "/" + Uri.encode(f.getName()));
         Intent send = new Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, u)

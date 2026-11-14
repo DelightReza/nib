@@ -39,10 +39,14 @@ final class Handwriting {
     private Handwriting() {}
 
     static final String TAG = "nib-hw";
-    static final String[] LANGS = {"en-US", "pa"};   // tried in order; unsupported tags are skipped
-    static final String[] LANG_NAMES = {"English", "Punjabi"};
+    static final String[] LANGS = {"en-US", "pa", "hi", "ar"};   // tried in order; unsupported tags are skipped
+    static final String[] LANG_NAMES = {"English", "Punjabi", "Hindi", "Arabic"};
+    static final String[] LANG_NOTES = {"English handwriting", "Gurmukhi script", "Devanagari script", "Arabic script, right to left"};
+    /** Which script each language is written in (for Beautify). */
+    static final int[] LANG_SCRIPT = {Beautify.LATIN, Beautify.HEADLINE, Beautify.HEADLINE, Beautify.ARABIC};
     private static final ExecutorService EXEC = Executors.newSingleThreadExecutor();
     private static final List<DigitalInkRecognizer> recognizers = new ArrayList<>();
+    private static final java.util.Map<Integer, DigitalInkRecognizer> byLang = new java.util.HashMap<>(); // LANGS index → recognizer
     private static volatile String status = "";
     private static final int VERSION = 2; // bump to re-read every notebook after improving recognition
 
@@ -96,7 +100,9 @@ final class Handwriting {
                     Log.i(TAG, status);
                     Tasks.await(mgr.download(m, new DownloadConditions.Builder().build()), 10, TimeUnit.MINUTES);
                 }
-                recognizers.add(DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(m).build()));
+                DigitalInkRecognizer rec = DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(m).build());
+                recognizers.add(rec);
+                byLang.put(i, rec);
                 Log.i(TAG, "recognizer ready: " + LANGS[i]);
             } catch (Exception ex) {
                 Log.w(TAG, "model " + LANGS[i] + " unavailable: " + ex);
@@ -114,6 +120,7 @@ final class Handwriting {
             synchronized (Handwriting.class) {
                 for (DigitalInkRecognizer r : recognizers) r.close();
                 recognizers.clear();
+                byLang.clear();
             }
             for (Notebook.Entry e : Notebook.list(app)) new File(e.dir, "search.json").delete();
         });
@@ -160,6 +167,172 @@ final class Handwriting {
         return Long.toHexString(h);
     }
 
+    /**
+     * Level 2 for Beautify: reads a line with the models of its script that are already on the tablet (never downloads
+     * here). Returns null when no model for that script is ready, so geometry decides alone.
+     */
+    static Beautify.Reader reader(Context c) {
+        if (!enabled(c)) return null;
+        return (line, script) -> {
+            String best = null;
+            for (int i = 0; i < LANGS.length; i++) {
+                DigitalInkRecognizer r;
+                synchronized (Handwriting.class) { r = byLang.get(i); }
+                if (r == null || LANG_SCRIPT[i] != script) continue;
+                RectF box = null;
+                for (Stroke s : line) { RectF b = bounds(s); if (box == null) box = new RectF(b); else box.union(b); }
+                try {
+                    RecognitionResult res = Tasks.await(r.recognize(ink(line), context(box, "")), 10, TimeUnit.SECONDS);
+                    String t = res.getCandidates().isEmpty() ? "" : res.getCandidates().get(0).getText();
+                    if (best == null || t.length() > best.length()) best = t;
+                } catch (Exception ignored) { }
+            }
+            return best;
+        };
+    }
+
+    // ---- convert handwriting to text ---------------------------------------------------------
+
+    /** What Convert to text read: the text (one line per line of writing), other readings of a one-line selection,
+     *  the typical line height (to size the text box), or an error to show. */
+    /** Language index meaning "detect it". */
+    static final int AUTO = -1;
+
+    static final class Converted {
+        String text = "", error;
+        int lang = -1; // the language it was read in (the detected one with AUTO; the most used if lines differ)
+        final List<String> alternatives = new ArrayList<>();
+        float lineHeight;
+    }
+
+    /** The recognizer for one language, downloaded and opened on first use (needs internet once). Background only. */
+    private static DigitalInkRecognizer recognizerFor(int i, java.util.function.Consumer<String> status) throws Exception {
+        synchronized (Handwriting.class) {
+            DigitalInkRecognizer r = byLang.get(i);
+            if (r != null) return r;
+        }
+        DigitalInkRecognitionModelIdentifier id = DigitalInkRecognitionModelIdentifier.fromLanguageTag(LANGS[i]);
+        if (id == null) throw new Exception("Google has no " + LANG_NAMES[i] + " model");
+        DigitalInkRecognitionModel m = DigitalInkRecognitionModel.builder(id).build();
+        RemoteModelManager mgr = RemoteModelManager.getInstance();
+        if (!Tasks.await(mgr.isModelDownloaded(m), 30, TimeUnit.SECONDS)) {
+            status.accept("Downloading the " + LANG_NAMES[i] + " model (once)…");
+            Tasks.await(mgr.download(m, new DownloadConditions.Builder().build()), 10, TimeUnit.MINUTES);
+        }
+        DigitalInkRecognizer r = DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(m).build());
+        synchronized (Handwriting.class) { byLang.put(i, r); }
+        return r;
+    }
+
+    /**
+     * Reads handwriting as text in language {@code lang} (index into LANGS): line by line, top to bottom.
+     * {@code status} gets progress (model download); {@code done} the result. Both on the main thread.
+     */
+    static void convert(List<Stroke> strokes, int lang, java.util.function.Consumer<String> status, java.util.function.Consumer<Converted> done) {
+        convert(strokes, lang, "", status, done);
+    }
+
+    /** Ink for the recognizer: page units scaled up to screen-like pixels, in the order written, plausible timing. */
+    private static Ink ink(List<Stroke> line) {
+        Ink.Builder ib = Ink.builder();
+        long tms = 0;
+        for (Stroke s : line) {
+            if (s.n == 0) continue;
+            Ink.Stroke.Builder sb = Ink.Stroke.builder();
+            for (int k = 0; k < s.n; k++) sb.addPoint(Ink.Point.create(s.x(k) * INK_SCALE, s.y(k) * INK_SCALE, tms += 4));
+            ib.addStroke(sb.build());
+            tms += 150;
+        }
+        return ib.build();
+    }
+
+    private static final float INK_SCALE = 2f;
+
+    /** What the recognizer is told: the size of the writing area (it judges letter case and size by it) and the text before. */
+    private static com.google.mlkit.vision.digitalink.RecognitionContext context(RectF box, String pre) {
+        float w = box == null ? 1000 : Math.max(box.width() * 1.3f, box.height() * 4);
+        float h = box == null ? 100 : box.height() * 1.3f;
+        String tail = pre == null ? "" : pre.length() > 20 ? pre.substring(pre.length() - 20) : pre;
+        return com.google.mlkit.vision.digitalink.RecognitionContext.builder()
+                .setPreContext(tail)
+                .setWritingArea(new com.google.mlkit.vision.digitalink.WritingArea(w * INK_SCALE, h * INK_SCALE))
+                .build();
+    }
+
+    /** As above, with the text that comes just before (the box being continued), which helps the reading. */
+    static void convert(List<Stroke> strokes, int lang, String preContext, java.util.function.Consumer<String> status,
+                        java.util.function.Consumer<Converted> done) {
+        android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+        java.util.function.Consumer<String> st = m -> main.post(() -> status.accept(m));
+        EXEC.execute(() -> {
+            Converted out = new Converted();
+            try {
+                DigitalInkRecognizer fixed = lang == AUTO ? null : recognizerFor(lang, st);
+                int[] used = new int[LANGS.length];
+                List<List<Stroke>> lines = lines(strokes);
+                float[] hs = new float[lines.size()];
+                StringBuilder sb = new StringBuilder();
+                for (int li = 0; li < lines.size(); li++) {
+                    List<Stroke> line = lines.get(li);
+                    RectF box = null;
+                    for (Stroke s : line) {
+                        if (s.n == 0) continue;
+                        RectF b = bounds(s);
+                        if (box == null) box = new RectF(b); else box.union(b);
+                    }
+                    hs[li] = box == null ? 0 : box.height();
+                    String pre = sb.length() > 0 ? sb.toString().replace('\n', ' ') : preContext;
+                    RecognitionResult res;
+                    int li2 = lang;
+                    if (fixed != null) res = Tasks.await(fixed.recognize(ink(line), context(box, pre)), 20, TimeUnit.SECONDS);
+                    else { // auto: the line's script narrows the languages; their confidence scores pick one
+                        int script = Beautify.scriptOf(line);
+                        // the shape decides the script; scores only pick between languages of one script (Hindi or
+                        // Punjabi). Scores from different scripts' models aren't comparable: English "won" on Indic ink.
+                        int[] tryLangs = script == Beautify.HEADLINE ? new int[]{2, 1} : script == Beautify.ARABIC ? new int[]{3} : new int[]{0};
+                        res = null;
+                        float best = Float.MAX_VALUE;
+                        for (int k : tryLangs) {
+                            RecognitionResult rr = Tasks.await(recognizerFor(k, st).recognize(ink(line), context(box, pre)), 20, TimeUnit.SECONDS);
+                            if (rr.getCandidates().isEmpty()) continue;
+                            Float sc = rr.getCandidates().get(0).getScore();
+                            float v = sc == null ? Float.MAX_VALUE / 2 : sc; // lower = more confident
+                            if (res == null || v < best) { res = rr; best = v; li2 = k; }
+                        }
+                        if (res == null) continue;
+                        Log.i(TAG, "auto language: script " + script + " → " + LANG_NAMES[li2] + " (score " + best + ")");
+                    }
+                    if (res.getCandidates().isEmpty()) continue;
+                    if (li2 >= 0) used[li2]++;
+                    if (sb.length() > 0) sb.append('\n');
+                    sb.append(res.getCandidates().get(0).getText());
+                    if (lines.size() == 1)
+                        for (int c = 1; c < Math.min(4, res.getCandidates().size()); c++) out.alternatives.add(res.getCandidates().get(c).getText());
+                }
+                out.text = sb.toString();
+                int top = lang;
+                for (int k = 0; k < used.length; k++) if (top < 0 || used[k] > used[top]) top = used[k] > 0 ? k : top;
+                out.lang = top;
+                java.util.Arrays.sort(hs);
+                out.lineHeight = hs.length == 0 ? 0 : hs[hs.length / 2];
+                if (out.text.isEmpty()) out.error = "Couldn't read any writing in the selection";
+            } catch (Exception e) {
+                Log.w(TAG, "convert failed", e);
+                out.error = e.getMessage() != null && e.getMessage().startsWith("Google") ? e.getMessage()
+                        : "Couldn't read it. " + (lang == AUTO ? "Auto needs each language's model" : "The " + LANG_NAMES[lang] + " model needs")
+                        + " internet the first time.";
+            }
+            main.post(() -> done.accept(out));
+        });
+    }
+
+    /** Language for converting, from settings: AUTO or an index into LANGS. */
+    static int convertLang(Context c) {
+        SharedPreferences p = prefs(c);
+        if (p.getBoolean("convertAuto", false)) return AUTO;
+        return Math.min(p.getInt("convertLang", 0), LANGS.length - 1);
+    }
+
     /** Text of one page: typed text boxes, then each line of handwriting, top to bottom. */
     private static String recognizePage(Notebook.Page p) {
         StringBuilder sb = new StringBuilder();
@@ -193,8 +366,10 @@ final class Handwriting {
     }
 
     /**
-     * Groups strokes into lines of writing. Two strokes share a line when their heights overlap enough, or when a
-     * small mark (dot, accent, comma) sits within reach of a stroke; lines then split at wide horizontal gaps.
+     * Groups strokes into lines of writing, in two passes. Main strokes share a line when their heights overlap enough,
+     * when one is a top bar (shirorekha) the other hangs from, or when they're neighbours along a tilted line. Then every
+     * small mark joins the line of the nearest main stroke: dots, accents, and the matras above or below Indic letters
+     * (ि ी े ै ु ू ृ ं ँ ੁ ੂ ੰ ਂ…), which otherwise were read as separate lines and lost from their word.
      * Strokes keep the order they were written in (joined-up writing reads best that way).
      */
     private static List<List<Stroke>> lines(List<Stroke> strokes) {
@@ -207,17 +382,37 @@ final class Handwriting {
         for (int i = 0; i < n; i++) { b[i] = bounds(ss.get(i)); hs[i] = Math.max(2, b[i].height()); }
         float[] sorted = hs.clone();
         java.util.Arrays.sort(sorted);
-        float hMed = Math.max(8, sorted[n / 2]); // typical letter height on this page
+        float hMed = Math.max(8, sorted[Math.min(n - 1, Math.round(0.65f * (n - 1)))]); // typical letter height (marks are often half the strokes)
+        boolean[] small = new boolean[n];
+        for (int i = 0; i < n; i++) small[i] = b[i].height() < hMed * 0.55f && b[i].width() < hMed * 1.2f;
         int[] parent = new int[n];
         for (int i = 0; i < n; i++) parent[i] = i;
         for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) {
+            if (small[i] || small[j]) continue;
             RectF a = b[i], c = b[j];
             float ov = Math.min(a.bottom, c.bottom) - Math.max(a.top, c.top);
             float hgap = Math.max(0, Math.max(a.left, c.left) - Math.min(a.right, c.right));
-            boolean sameRow = ov > 0.4f * Math.min(Math.max(a.height(), hMed * 0.5f), Math.max(c.height(), hMed * 0.5f));
-            boolean small = Math.min(a.height(), c.height()) < hMed * 0.45f && Math.min(a.width(), c.width()) < hMed;
-            boolean near = Math.abs(a.centerY() - c.centerY()) < hMed * 0.9f;
-            if ((sameRow || (small && near)) && hgap < hMed * 4) union(parent, i, j);
+            boolean sameRow = ov > 0.4f * Math.min(Math.max(a.height(), hMed * 0.5f), Math.max(c.height(), hMed * 0.5f))
+                    || Math.abs(a.centerY() - c.centerY()) < 0.5f * hMed
+                    || (hgap < 2.5f * hMed && Math.abs(a.centerY() - c.centerY()) < 0.9f * hMed);
+            boolean bar = hangs(a, c, hMed) || hangs(c, a, hMed);
+            if ((sameRow || bar) && hgap < hMed * 4) union(parent, i, j);
+        }
+        boolean anyMain = false;
+        for (boolean sm : small) anyMain |= !sm;
+        for (int i = 0; i < n && anyMain; i++) {
+            if (!small[i]) continue;
+            RectF m = b[i];
+            int best = -1;
+            float bd = 2.2f * hMed;
+            for (int j = 0; j < n; j++) {
+                if (small[j]) continue;
+                RectF c = b[j];
+                float dx = Math.max(0, Math.max(c.left - m.right, m.left - c.right)), dy = Math.max(0, Math.max(c.top - m.bottom, m.top - c.bottom));
+                float d = (float) Math.hypot(dx, dy * 1.2f);
+                if (d < bd) { bd = d; best = j; }
+            }
+            if (best >= 0) union(parent, i, best);
         }
         java.util.LinkedHashMap<Integer, List<Stroke>> groups = new java.util.LinkedHashMap<>();
         java.util.HashMap<Integer, RectF> gb = new java.util.HashMap<>();
@@ -232,6 +427,13 @@ final class Handwriting {
         List<List<Stroke>> out = new ArrayList<>();
         for (Integer k : keys) out.add(groups.get(k));
         return out;
+    }
+
+    /** Is {@code bar} a flat stroke lying along the top of {@code c} (letters hanging from a shirorekha)? */
+    private static boolean hangs(RectF bar, RectF c, float hMed) {
+        boolean flat = bar.height() < 0.45f * hMed && bar.width() >= 0.8f * hMed && bar.width() >= 2 * bar.height();
+        float under = c.top - bar.bottom, overlapX = Math.min(bar.right, c.right) - Math.max(bar.left, c.left);
+        return flat && under > -0.5f * hMed && under < 0.6f * hMed && overlapX > 0;
     }
 
     private static int find(int[] p, int i) { while (p[i] != i) { p[i] = p[p[i]]; i = p[i]; } return i; }
