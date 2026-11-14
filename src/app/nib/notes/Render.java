@@ -337,36 +337,49 @@ final class Render {
         c.drawPath(outline, f);
         int saved = c.save();
         c.clipPath(outline);
-        // pattern in white, laid along the tape's overall direction
+        // pattern in white, anchored where the tape starts and laid along its opening direction, so stripes that are
+        // already down never move while the tape is drawn longer (or bends)
         int n = pts.length / 2;
-        float ang = (float) Math.toDegrees(Math.atan2(pts[2 * n - 1] - pts[1], pts[2 * n - 2] - pts[0]));
-        if (n < 2 || Float.isNaN(ang)) ang = 0;
+        float sx = pts[0], sy = pts[1], ang = 0;
+        for (int i = 1; i < n; i++) {
+            float dx = pts[2 * i] - sx, dy = pts[2 * i + 1] - sy;
+            if (Math.hypot(dx, dy) >= thick || i == n - 1) { ang = (float) Math.toDegrees(Math.atan2(dy, dx)); break; }
+        }
+        if (Float.isNaN(ang)) ang = 0;
         RectF bb = new RectF();
         outline.computeBounds(bb, true);
-        float cx = bb.centerX(), cy = bb.centerY(), half = (float) Math.hypot(bb.width(), bb.height()) / 2 + thick;
-        c.rotate(ang, cx, cy);
+        float half = 0; // far enough from the start to cover the whole strip, in any rotation
+        for (float[] q : new float[][]{{bb.left, bb.top}, {bb.right, bb.top}, {bb.left, bb.bottom}, {bb.right, bb.bottom}})
+            half = Math.max(half, (float) Math.hypot(q[0] - sx, q[1] - sy));
+        half += thick;
+        c.rotate(ang, sx, sy);
         Paint pt = new Paint(Paint.ANTI_ALIAS_FLAG);
         pt.setColor(0xffffffff);
         pt.setAlpha(Math.round(a * 0.32f));
         pt.setStrokeWidth(Math.max(1.2f, thick * 0.08f));
         float step = Math.max(8f, thick / 3.2f);
+        int kn = (int) Math.ceil(half / step); // marks sit at whole steps from the start point
         switch (pattern) {
             case "stripes":
-                for (float d = -half; d < half; d += step) c.drawLine(cx + d, cy + half, cx + d + 2 * half * 0.7f, cy - half, pt);
+                for (int k = -kn; k <= kn; k++) {
+                    float d = k * step;
+                    c.drawLine(sx + d, sy + half, sx + d + 2 * half * 0.7f, sy - half, pt);
+                }
                 break;
             case "grid":
                 pt.setStrokeWidth(Math.max(0.8f, thick * 0.035f));
                 pt.setAlpha(Math.round(a * 0.4f));
-                for (float d = -half; d < half; d += step) {
-                    c.drawLine(cx + d, cy - half, cx + d, cy + half, pt);
-                    c.drawLine(cx - half, cy + d, cx + half, cy + d, pt);
+                for (int k = -kn; k <= kn; k++) {
+                    float d = k * step + step / 2;
+                    c.drawLine(sx + d, sy - half, sx + d, sy + half, pt);
+                    c.drawLine(sx - half, sy + d, sx + half, sy + d, pt);
                 }
                 break;
             case "dots":
                 pt.setAlpha(Math.round(a * 0.45f));
-                for (float dy = -half; dy < half; dy += step)
-                    for (float dx = -half + ((int) ((dy + half) / step) % 2) * step / 2; dx < half; dx += step)
-                        c.drawCircle(cx + dx, cy + dy, Math.max(1.2f, thick * 0.05f), pt);
+                for (int j = -kn; j <= kn; j++)
+                    for (int k = -kn; k <= kn; k++)
+                        c.drawCircle(sx + k * step + (Math.abs(j) % 2) * step / 2 + step / 4, sy + j * step + step / 2, Math.max(1.2f, thick * 0.05f), pt);
                 break;
             default:
                 break;

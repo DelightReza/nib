@@ -957,20 +957,76 @@ final class Engine implements Choreographer.FrameCallback {
         return new float[]{tx1, ty1};
     }
 
+    // While tape is being laid, the real tape (pattern, torn ends) is rendered on the worker a few times a second and
+    // shown; only the newest bit behind the pen, not yet in that picture, is drawn as a plain strip meanwhile.
+    private int draftTex, draftCovered, draftGen;
+    private boolean draftBusy;
+    private final RectF draftBox = new RectF();
+
+    /** The tape as it stands now (doc units), the same way it will be committed. */
+    private float[] draftPts() {
+        if (!tapeFree) {
+            float[] e = straightEnd();
+            return new float[]{tx0, ty0, e[0], e[1]};
+        }
+        float[] raw = java.util.Arrays.copyOf(tpts, 2 * tn + 2);
+        raw[2 * tn] = tx1;
+        raw[2 * tn + 1] = ty1;
+        return simplify(raw, tn + 1, 1.2f);
+    }
+
+    private void requestDraftTexture() {
+        if (draftBusy || gest != G_TAPE) return;
+        final float[] pts = draftPts();
+        if (pts.length < 4) return;
+        final Notebook.Item it = Notebook.Item.tape(pts, tapeThick, tapePattern, tapeColor);
+        final int covered = tapeFree ? tn : 2, gen = draftGen;
+        final float k = Math.min(z, 2048f / Math.max(1f, Math.max(it.w, it.h)));
+        draftBusy = true;
+        worker.execute(() -> {
+            Bitmap b = null;
+            try { b = Render.tapeBitmap(it, k); } catch (Exception e) { Log.w(Gl.TAG, "tape draft", e); }
+            final Bitmap bm = b;
+            h.post(() -> {
+                draftBusy = false;
+                if (bm == null) return;
+                if (gen != draftGen || gest != G_TAPE || gl == null || !gl.hasSurface()) { bm.recycle(); return; }
+                if (draftTex != 0) gl.deleteTex(draftTex);
+                draftTex = gl.upload(bm);
+                bm.recycle();
+                draftBox.set(it.x, it.y, it.x + it.w, it.y + it.h);
+                draftCovered = covered;
+                requestFrame();
+                requestDraftTexture(); // the pen has moved on meanwhile: render again
+            });
+        });
+    }
+
+    private void dropDraftTexture() {
+        draftGen++;
+        if (draftTex != 0 && gl != null) gl.deleteTex(draftTex);
+        draftTex = 0;
+        draftCovered = 0;
+    }
+
     private void drawTapeDraft() {
+        gl.resetXform();
         SegBuf b = gl.laser;
         b.clear();
         float r = tapeThick / 2;
         int col = 0xff000000 | (tapeColor & 0xffffff);
         if (!tapeFree) {
             float[] e = straightEnd();
-            b.put(tx0, ty0, e[0], e[1], r, r, col);
+            if (draftTex == 0) b.put(tx0, ty0, e[0], e[1], r, r, col);
         } else {
-            if (tn == 1) b.put(tpts[0], tpts[1], tpts[0], tpts[1], r, r, col);
-            for (int i = 1; i < tn; i++) b.put(tpts[2 * i - 2], tpts[2 * i - 1], tpts[2 * i], tpts[2 * i + 1], r, r, col);
-            if (tn > 0) b.put(tpts[2 * tn - 2], tpts[2 * tn - 1], tx1, ty1, r, r, col);
+            int from = draftTex != 0 ? Math.max(1, draftCovered) : 1; // only what the rendered tape doesn't cover yet
+            if (tn == 1 && draftTex == 0) b.put(tpts[0], tpts[1], tpts[0], tpts[1], r, r, col);
+            for (int i = from; i < tn; i++) b.put(tpts[2 * i - 2], tpts[2 * i - 1], tpts[2 * i], tpts[2 * i + 1], r, r, col);
+            if (tn > 0 && (draftTex == 0 || draftCovered < tn || Math.hypot(tx1 - tpts[2 * tn - 2], ty1 - tpts[2 * tn - 1]) > r))
+                b.put(tpts[2 * tn - 2], tpts[2 * tn - 1], tx1, ty1, r, r, col);
         }
-        gl.drawSegs(b, 0, b.count, 0);
+        if (b.count > 0) gl.drawSegs(b, 0, b.count, 0);
+        if (draftTex != 0) gl.tex(draftTex, draftBox.left, draftBox.top, draftBox.width(), draftBox.height(), 1f);
     }
 
     private void tapeAdd(float x, float y, boolean force) {
@@ -985,6 +1041,7 @@ final class Engine implements Choreographer.FrameCallback {
         tx0 = tx1 = ox + ev.getX() / z;
         ty0 = ty1 = oy + ev.getY() / z;
         tn = 0;
+        dropDraftTexture();
         tapeAdd(tx0, ty0, true);
         tapePage = pageAt(ty0);
         requestFrame();
@@ -997,7 +1054,7 @@ final class Engine implements Choreographer.FrameCallback {
         ty1 = oy + ev.getY() / z;
         tapeAdd(tx1, ty1, false);
         if (a == MotionEvent.ACTION_CANCEL) { gest = G_NONE; endTapeFrame(); return; }
-        if (a != MotionEvent.ACTION_UP) { requestFrame(); return; }
+        if (a != MotionEvent.ACTION_UP) { requestDraftTexture(); requestFrame(); return; }
         gest = G_NONE;
         float far = 0; // how far the pen got from where it started
         for (int i = 0; i < tn; i++) far = Math.max(far, (float) Math.hypot(tpts[2 * i] - tx0, tpts[2 * i + 1] - ty0));
@@ -1063,6 +1120,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void endTapeFrame() {
         gl.laser.clear();
+        dropDraftTexture();
         needCache = true;
         wantFront = true;
         needPresent = true;
