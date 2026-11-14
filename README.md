@@ -14,13 +14,16 @@ search that reads your handwriting.
 
 **Writing**
 - Front-buffer ink rendering (OpenGL ES) with optional stroke prediction: ink keeps up with the pen
-- Fountain, ballpoint and fineliner pens with pressure; highlighter; whole-stroke or partial eraser
-- Hold the pen still to snap lines and shapes; ruler with angle readout and real-world drawing scales (1:100 …)
+- Fountain, ballpoint and fineliner pens with pressure; highlighter with a round or flat (chisel) tip that can straighten itself on lift
+- Eraser: whole-stroke or partial; erased ink greys out and goes when the pen lifts; hold the pen still where it lands to erase without switching tools
+- Hold the pen still to snap lines and shapes, keep moving to stretch them; snapped shapes keep handles on their corners and ends, so you can reshape them later
+- Ruler with angle readout and real-world drawing scales (1:100 …)
 - Lasso: move, scale, recolour, copy, cut, duplicate, delete; text boxes; images
 - Laser pointer, never saved: fading trail, dot, or vanishing ink; six colours, three sizes; can follow the hovering pen
 - Tape for studying: cover answers with straight or freeform tape, tap to peel it back, tap again to cover
 - Pen side buttons: first button toggles the eraser, second toggles the lasso
-- Favourite pens in the tool bar, one tap to switch
+- Write with your finger too (one toggle), with palm rejection; two fingers scroll and zoom
+- Favourite pens in the tool bar, one tap to switch; drag the tool bar to the bottom, top, left or right edge
 
 **Pages**
 - Pages fill the screen and run continuously; a new page appears as soon as you write on the last one
