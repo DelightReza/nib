@@ -2,8 +2,8 @@
 
 **Low-latency handwritten notes for Android tablets.** Nib draws your ink straight into the display's front
 buffer, so strokes appear under the pen tip with almost no lag. Around that sits a calm, distraction-free
-notebook: pages that fill the screen, floating tools that step aside while you write, tabs, split view and
-search that reads your handwriting.
+notebook: pages that fill the screen, floating tools that step aside while you write, tabs, split view,
+and handwriting that turns into text in English, Punjabi, Hindi or Arabic.
 
 <p>
   <img src="docs/screenshots/page-style.jpg" width="45%" alt="Page style panel: templates, line spacing, colour, margins">
@@ -25,6 +25,14 @@ search that reads your handwriting.
 - Write with your finger too (one toggle), with palm rejection; two fingers scroll and zoom
 - Favourite pens in the tool bar, one tap to switch; drag the tool bar to the bottom, top, left or right edge
 
+**Handwriting to text**
+- Lasso your writing → **To text**: check and edit what was read, then it replaces the ink with a text box in a handwriting face
+- **Convert as I write**: writing turns into text after a short pause; words on the same line join one box, and matras, dots or a top line added afterwards are read again with their word
+- English, Punjabi (Gurmukhi), Hindi (Devanagari) and Arabic, or **Auto**: the shape of the line picks the script, the models' confidence picks the language
+- Converted text keeps its handwriting: read it again in another language, or turn it back into ink
+- **Beautify** keeps your own handwriting and makes it neater: straight lines on the ruled lines, even size and spacing, less wobble
+- Everything in one panel: tap the lasso tool again
+
 **Pages**
 - Pages fill the screen and run continuously; a new page appears as soon as you write on the last one
 - Infinite canvas notebooks
@@ -35,11 +43,12 @@ search that reads your handwriting.
 
 **Notebooks**
 - Tabs for open notebooks, and split view with two notebooks side by side or stacked, both editable; drag the divider to resize
-- Sidebar with recent notebooks, favourites and folders with subfolders
-- Handwriting search: finds words you wrote (on-device recognition, English; Punjabi optional)
+- Notes screen with favourites, recent, unfiled, folders with subfolders, and a trash that keeps deleted notebooks for 30 days
+- Notebooks show their real first page; small, medium or large; select several to move, favourite, export or delete
+- Handwriting search: finds words you wrote (on-device recognition: English, Punjabi, Hindi, Arabic)
 - Import PDFs (or "Open with Nib" / share from any app) and write on them; export notebooks or pages as PDF or PNG
 - Backup and restore to a folder you choose
-- Light (Clean) and dark (Graphite) themes
+- Themes: light, dark or follow the system; eight accent colours or your own; graphite or true-black dark style
 
 ## Install
 
@@ -56,8 +65,8 @@ adds Nib to that list on rooted devices. Other tablets don't have this hold and 
 ## Privacy
 
 Nib works offline. Notebooks stay on your device, in Nib's private storage and any backup folder you pick.
-The only network use is a one-time download of Google's handwriting-recognition model when you use
-handwriting search. ML Kit's usage-statistics upload is left out of the build, so nothing about your notes or
+The only network use is a one-time download of Google's handwriting-recognition model for each language you
+use (search, To text, Convert as I write); after that recognition runs on the tablet. ML Kit's usage-statistics upload is left out of the build, so nothing about your notes or
 usage is sent anywhere.
 
 ## Build from source
@@ -95,3 +104,5 @@ Nib is free software under the [GNU General Public License v3.0](LICENSE).
 
 Handwriting search uses Google ML Kit, which is not part of this repository; `tools/fetch_libs.py` downloads it
 from Google's Maven repository, under the [ML Kit Terms of Service](https://developers.google.com/ml-kit/terms).
+
+Bundled fonts (Inter, Kalam, Baloo Paaji 2, Aref Ruqaa) are under the SIL Open Font License; see [`licenses/`](licenses).
