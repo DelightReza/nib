@@ -6,7 +6,11 @@ notebook: pages that fill the screen, floating tools that step aside while you w
 and handwriting that turns into text in English, Punjabi, Hindi or Arabic.
 
 <p>
-  <img src="docs/screenshots/page-style.jpg" width="45%" alt="Page style panel: templates, line spacing, colour, margins">
+  <img src="docs/screenshots/notes.jpg" width="45%" alt="Notes screen: lists and folders on the left, notebooks shown as their first pages">
+  <img src="docs/screenshots/handwriting.jpg" width="45%" alt="A page with handwriting converted to text in English, Punjabi, Hindi and Arabic, and the Lasso and handwriting panel">
+</p>
+<p>
+  <img src="docs/screenshots/theme.jpg" width="45%" alt="Theme sheet: light, dark or system, accent colours, dark style">
   <img src="docs/screenshots/pen.jpg" width="45%" alt="Pen panel: pen types, thickness and colours">
 </p>
 
