@@ -64,7 +64,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private static final float[] PEN_PRESETS = {1.5f, 2.6f, 4.6f}, HL_PRESETS = {14f, 22f, 36f};
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
-    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12;
+    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13;
     private File pendingSave; // exported PDF waiting for the user to pick where to save it
 
     private Engine engine;
@@ -73,9 +73,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
     private int tool, prevTool = Engine.TOOL_PEN;
     private final int[] penColors = PEN_COLORS.clone(), hlColors = HL_COLORS.clone();
-    private int penSlot, hlSlot, textSize = 1, penType, prediction;
+    private int penSlot, hlSlot, penType, prediction;
+    private float textPt;          // size of new text boxes, in points
+    private String textStyleEnc;   // font + style of new text boxes (Fonts.Style, encoded)
+    private Engine.TextEdit fontImportFor; // the box being edited when the font picker opened
+    private Engine fontImportEngine;
+    private Runnable afterFontImport;      // refreshes the panel the import came from
     private float penW, hlW, eraserDp;
-    private boolean fingerDraw, hud, partialErase, shapeSnap, penButton;
+    private boolean fingerDraw, hud, partialErase, shapeSnap, penButton, taper;
     private boolean hlFlat, holdErase, erasePreview;
     private int hlStraight;
     private static final int[] LASER_COLORS = {0xffff3b30, 0xff34c759, 0xff0a84ff, 0xffaf52de, 0xffff9f0a, 0xffff2d92};
@@ -128,7 +133,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         penW = prefs.getFloat("penW", 2.6f);
         hlW = prefs.getFloat("hlW", 22f);
         penType = prefs.getInt("penType", Stroke.PEN);
-        textSize = prefs.getInt("textSize", 1);
+        textPt = prefs.getFloat("textPt", new float[]{12, 17, 25}[Math.max(0, Math.min(2, prefs.getInt("textSize", 1)))]);
+        textStyleEnc = prefs.getString("textStyle", null);
         eraserDp = prefs.getFloat("eraserDp", 11f);
         for (int i = 0; i < 4; i++) {
             penColors[i] = prefs.getInt("pc" + i, PEN_COLORS[i]);
@@ -136,6 +142,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
         prediction = prefs.getInt("predLevel", 1);
         fingerDraw = prefs.getBoolean("finger", false);
+        taper = prefs.getBoolean("taper", true);
         hud = prefs.getBoolean("hud", false);
         partialErase = prefs.getBoolean("partialErase", false);
         shapeSnap = prefs.getBoolean("shapeSnap", true);
@@ -196,6 +203,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setPenType(penType);
         engine.setHighlighter(hlFlat, hlStraight);
         engine.setEraseOptions(holdErase, erasePreview);
+        engine.setTaper(taper);
         pushLaser();
         pushTape();
     }
@@ -1160,7 +1168,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         int[] cols = slotColors();
         int sel = hl ? hlSlot : penSlot;
         for (int i = 0; i < 4; i++) sw[i].set(cols[i], tool != Engine.TOOL_ERASER && tool != Engine.TOOL_LASSO && tool != Engine.TOOL_LASER && tool != Engine.TOOL_TAPE && i == sel);
-        float frac = hl ? (hlW - HL_MIN) / (HL_MAX - HL_MIN) : tool == Engine.TOOL_TEXT ? textSize / 2f
+        float frac = hl ? (hlW - HL_MIN) / (HL_MAX - HL_MIN) : tool == Engine.TOOL_TEXT ? (textPt - Fonts.PT_MIN) / (40 - Fonts.PT_MIN)
                 : tool == Engine.TOOL_ERASER ? (eraserDp - 6) / 24f : (penW - PEN_MIN) / (PEN_MAX - PEN_MIN);
         sizeB.set(Math.max(0, Math.min(1, frac)));
         sizeB.setVisibility(tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE ? View.GONE : View.VISIBLE);
@@ -1170,7 +1178,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setColor(Engine.TOOL_HL, hlColors[hlSlot]);
         engine.setWidth(Engine.TOOL_PEN, penW);
         engine.setWidth(Engine.TOOL_HL, hlW);
-        engine.setTextSize(Engine.TEXT_SIZES[textSize]);
+        engine.setTextSize(textPt * Fonts.UNITS_PER_PT);
+        engine.setTextLook(textStyleEnc, 0);
         engine.setPenType(penType);
         engine.setEraserSize(eraserDp);
         // only a tool change drops the selection (colour / size changes recolour or keep a fresh shape's handles)
@@ -1179,7 +1188,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         updatePaste();
         renderFavs();
         SharedPreferences.Editor e = prefs.edit().putInt("tool", tool).putInt("penColor", penSlot).putInt("hlColor", hlSlot)
-                .putFloat("penW", penW).putFloat("hlW", hlW).putInt("textSize", textSize).putInt("penType", penType)
+                .putFloat("penW", penW).putFloat("hlW", hlW).putFloat("textPt", textPt).putString("textStyle", textStyleEnc).putInt("penType", penType)
                 .putFloat("eraserDp", eraserDp);
         for (int i = 0; i < 4; i++) e.putInt("pc" + i, penColors[i]).putInt("hc" + i, hlColors[i]);
         e.apply();
@@ -1507,9 +1516,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void showTextPanel(View anchor) {
-        Ui.Popover p = newPop(340).title("Text");
+        Ui.Popover p = newPop(360).title("Text");
+        Fonts.Style st = Fonts.Style.parse(textStyleEnc);
+        p.section("Font");
+        p.add(fontList(st.font, id -> {
+            Fonts.Style s2 = Fonts.Style.parse(textStyleEnc);
+            s2.font = id;
+            textStyleEnc = s2.encode();
+            applyTool();
+        }, null, () -> showTextPanel(anchor)));
         p.section("Size");
-        p.add(Ui.segmented(this, new String[]{"Small", "Medium", "Large"}, textSize, i -> { textSize = i; applyTool(); }));
+        p.add(sizeRow(textPt, true, v -> { textPt = v; applyTool(); }));
+        p.section("Style");
+        p.add(styleRow(st, s2 -> { textStyleEnc = s2.encode(); applyTool(); }));
         p.section("Colour");
         p.add(Ui.colorGrid(this, INK_PALETTE, penColors[penSlot], c -> { penColors[penSlot] = c; applyTool(); pop.dismiss(); }));
         TextView hint = Ui.text(this, "Tap the page to add a text box · tap a box to edit it", 12.5f,
@@ -1517,6 +1536,222 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         hint.setPadding(0, Ui.dp(this, 12), 0, 0);
         p.add(hint);
         p.show(anchor);
+    }
+
+    // ---- text look: font list, size, style toggles (Text panel and the format bar over a box) ----
+
+    /**
+     * Fonts, each name drawn in its own face, the chosen one ticked; "Import font" at the end. Long-press an
+     * imported font to remove it. forEdit: the box being edited when Import is tapped (it gets the new font).
+     */
+    private View fontList(String selected, java.util.function.Consumer<String> pick, Engine.TextEdit forEdit, Runnable reopen) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        java.util.List<String> ids = Fonts.list(this);
+        java.util.ArrayList<ImageView> ticks = new java.util.ArrayList<>();
+        for (String id : ids) {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 8), 0);
+            row.setBackground(Ui.ripple(this, null, Ui.dp(this, 10)));
+            TextView name = Ui.text(this, Fonts.name(id), 16.5f, Ui.color(this, R.color.on_surface), Fonts.face(id, false, false, false));
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            row.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+            if (Fonts.imported(id)) {
+                TextView tag = Ui.text(this, "Imported", 11.5f, Ui.color(this, R.color.on_surface_variant), null);
+                tag.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 8), 0);
+                row.addView(tag);
+            }
+            ImageView tick = new ImageView(this);
+            tick.setImageResource(R.drawable.ic_check);
+            tick.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, R.color.accent)));
+            tick.setVisibility(id.equals(selected == null ? Fonts.INTER : selected) ? View.VISIBLE : View.INVISIBLE);
+            ticks.add(tick);
+            row.addView(tick, new LinearLayout.LayoutParams(Ui.dp(this, 22), Ui.dp(this, 22)));
+            row.setOnClickListener(v -> {
+                for (ImageView t : ticks) t.setVisibility(t == tick ? View.VISIBLE : View.INVISIBLE);
+                pick.accept(id);
+            });
+            if (Fonts.imported(id)) row.setOnLongClickListener(v -> {
+                new AlertDialog.Builder(this).setTitle("Remove " + Fonts.name(id) + "?")
+                        .setMessage("Text in this font goes back to Inter.")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Remove", (d, w) -> {
+                            Fonts.remove(this, id);
+                            if (id.equals(Fonts.Style.parse(textStyleEnc).font)) {
+                                Fonts.Style s2 = Fonts.Style.parse(textStyleEnc);
+                                s2.font = Fonts.INTER;
+                                textStyleEnc = s2.encode();
+                                applyTool();
+                            }
+                            for (Doc d2 : docs) if (d2.engine != null) d2.engine.refreshText();
+                            if (pop != null) pop.dismiss();
+                            if (reopen != null) reopen.run();
+                        }).show();
+                return true;
+            });
+            col.addView(row, fullW(44));
+        }
+        TextView add = Ui.text(this, "+  Import font (.ttf, .otf)", 14.5f, Ui.color(this, R.color.accent), Ui.medium());
+        add.setGravity(Gravity.CENTER_VERTICAL);
+        add.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 10), 0);
+        add.setBackground(Ui.ripple(this, null, Ui.dp(this, 10)));
+        add.setOnClickListener(v -> {
+            if (pop != null) pop.dismiss();
+            startFontImport(forEdit, reopen);
+        });
+        col.addView(add, fullW(44));
+        ScrollView sv = new ScrollView(this) {
+            @Override protected void onMeasure(int w, int h) {
+                super.onMeasure(w, View.MeasureSpec.makeMeasureSpec(Ui.dp(getContext(), 232), View.MeasureSpec.AT_MOST));
+            }
+        };
+        sv.setVerticalScrollBarEnabled(false);
+        sv.addView(col);
+        return sv;
+    }
+
+    /** − 17 pt +, and a slider (6–96 pt) when there's room. */
+    private View sizeRow(float pt, boolean slider, java.util.function.Consumer<Float> set) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        float[] cur = {Math.round(pt)};
+        TextView val = Ui.text(this, "", 14.5f, Ui.color(this, R.color.on_surface), Ui.medium());
+        val.setGravity(Gravity.CENTER);
+        SeekBar[] bar = new SeekBar[1];
+        Runnable show = () -> {
+            val.setText(String.format(Locale.ROOT, "%.0f pt", cur[0]));
+            if (bar[0] != null) bar[0].setProgress(Math.round(cur[0] - Fonts.PT_MIN));
+        };
+        TextView minus = stepButton("−"), plus = stepButton("+");
+        minus.setOnClickListener(v -> { cur[0] = Math.max(Fonts.PT_MIN, cur[0] - 1); show.run(); set.accept(cur[0]); });
+        plus.setOnClickListener(v -> { cur[0] = Math.min(Fonts.PT_MAX, cur[0] + 1); show.run(); set.accept(cur[0]); });
+        row.addView(minus, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 36)));
+        row.addView(val, new LinearLayout.LayoutParams(Ui.dp(this, slider ? 58 : 50), -2));
+        row.addView(plus, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 36)));
+        if (slider) {
+            bar[0] = Ui.slider(this, Math.round(Fonts.PT_MAX - Fonts.PT_MIN), Math.round(cur[0] - Fonts.PT_MIN), v -> {
+                cur[0] = Fonts.PT_MIN + v;
+                val.setText(String.format(Locale.ROOT, "%.0f pt", cur[0]));
+                set.accept(cur[0]);
+            });
+            LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(0, -2, 1f);
+            bl.leftMargin = Ui.dp(this, 6);
+            row.addView(bar[0], bl);
+        }
+        show.run();
+        return row;
+    }
+
+    private TextView stepButton(String t) {
+        TextView b = Ui.text(this, t, 18, Ui.color(this, R.color.on_surface), Ui.medium());
+        b.setGravity(Gravity.CENTER);
+        b.setBackground(Ui.ripple(this, Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 18)), Ui.dp(this, 18)));
+        return b;
+    }
+
+    /** B I U S toggles, then left / centre / right. Changes are made on st and handed to onChange. */
+    private View styleRow(Fonts.Style st, java.util.function.Consumer<Fonts.Style> onChange) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        String[] labels = {"B", "I", "U", "S"};
+        String[] descs = {"Bold", "Italic", "Underline", "Strike-through"};
+        TextView[] tg = new TextView[4];
+        for (int i = 0; i < 4; i++) {
+            final int k = i;
+            TextView t = Ui.text(this, labels[i], 16, Ui.color(this, R.color.on_surface), Fonts.face(Fonts.SERIF, false, i == 0, i == 1));
+            t.setGravity(Gravity.CENTER);
+            t.setContentDescription(descs[i]);
+            if (i == 2) t.setPaintFlags(t.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG);
+            if (i == 3) t.setPaintFlags(t.getPaintFlags() | Paint.STRIKE_THRU_TEXT_FLAG);
+            tg[i] = t;
+            t.setOnClickListener(v -> {
+                if (k == 0) st.bold = !st.bold; else if (k == 1) st.italic = !st.italic;
+                else if (k == 2) st.underline = !st.underline; else st.strike = !st.strike;
+                styleToggle(t, k == 0 ? st.bold : k == 1 ? st.italic : k == 2 ? st.underline : st.strike);
+                onChange.accept(st);
+            });
+            styleToggle(t, k == 0 ? st.bold : k == 1 ? st.italic : k == 2 ? st.underline : st.strike);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 38), Ui.dp(this, 36));
+            lp.rightMargin = Ui.dp(this, 3);
+            row.addView(t, lp);
+        }
+        View gap = new View(this);
+        row.addView(gap, new LinearLayout.LayoutParams(Ui.dp(this, 10), 1));
+        int[] icons = {R.drawable.ic_align_left, R.drawable.ic_align_center, R.drawable.ic_align_right};
+        String[] an = {"Align left", "Centre", "Align right"};
+        ImageView[] al = new ImageView[3];
+        for (int i = 0; i < 3; i++) {
+            final int k = i;
+            ImageView b = new ImageView(this);
+            b.setImageResource(icons[i]);
+            b.setScaleType(ImageView.ScaleType.CENTER);
+            b.setContentDescription(an[i]);
+            al[i] = b;
+            b.setOnClickListener(v -> {
+                st.align = k;
+                for (int j = 0; j < 3; j++) styleToggle(al[j], j == k);
+                onChange.accept(st);
+            });
+            styleToggle(b, st.align == i);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 38), Ui.dp(this, 36));
+            lp.rightMargin = Ui.dp(this, 3);
+            row.addView(b, lp);
+        }
+        return row;
+    }
+
+    private void styleToggle(View v, boolean on) {
+        int r = Ui.dp(this, 9);
+        v.setBackground(Ui.ripple(this, on ? Ui.round(Ui.color(this, R.color.accent_container), r) : null, r));
+        int fg = Ui.color(this, on ? R.color.accent : R.color.icon);
+        if (v instanceof TextView) ((TextView) v).setTextColor(on ? fg : Ui.color(this, R.color.on_surface));
+        else ((ImageView) v).setImageTintList(android.content.res.ColorStateList.valueOf(fg));
+    }
+
+    /** Opens the file picker for a .ttf / .otf; forEdit is the box being typed in (the picker closes it). */
+    private void startFontImport(Engine.TextEdit forEdit, Runnable after) {
+        fontImportFor = forEdit;
+        fontImportEngine = forEdit != null ? engine : null;
+        afterFontImport = after;
+        Intent in = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"font/ttf", "font/otf", "font/sfnt", "application/x-font-ttf",
+                        "application/x-font-otf", "application/font-sfnt", "application/vnd.ms-opentype", "application/octet-stream"});
+        try {
+            startActivityForResult(in, REQ_FONT);
+        } catch (android.content.ActivityNotFoundException e) {
+            toast("No file picker on this tablet");
+        }
+    }
+
+    private void fontPicked(Uri uri) {
+        final Engine.TextEdit forEdit = fontImportFor;
+        final Engine target = fontImportEngine;
+        final Runnable after = afterFontImport;
+        fontImportFor = null;
+        fontImportEngine = null;
+        afterFontImport = null;
+        bg.execute(() -> {
+            try {
+                String id = Fonts.importFont(this, uri);
+                ui.post(() -> {
+                    Fonts.Style s2 = Fonts.Style.parse(textStyleEnc);
+                    s2.font = id;
+                    textStyleEnc = s2.encode();
+                    applyTool();
+                    if (forEdit != null && target != null) {
+                        Fonts.Style es = Fonts.Style.parse(forEdit.style);
+                        es.font = id;
+                        target.setTextStyleAt(forEdit.page, forEdit.docX, forEdit.docY, es.encode());
+                    }
+                    toast("Added " + Fonts.name(id));
+                    if (after != null && forEdit == null) after.run();
+                });
+            } catch (Exception e) {
+                ui.post(() -> toast("That file isn't a font Nib can use (.ttf or .otf)"));
+            }
+        });
     }
 
     // ---- page style panel ------------------------------------------------------------------
@@ -1910,6 +2145,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         col.addView(sectionLabel("Pen"));
         col.addView(Ui.switchRow(this, "Pen buttons", "First button: eraser · second button: lasso · press again to go back",
                 penButton, v -> { penButton = v; saveOptions(); }));
+        col.addView(Ui.switchRow(this, "Taper strokes without pressure", "With a finger (or a stylus that has no pressure) the fountain pen starts and ends thin, like a real nib",
+                taper, v -> { taper = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Partial eraser", "Erase just the part of a stroke you touch",
                 partialErase, v -> { partialErase = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Hold pen to erase", "Rest the pen where it lands for half a second: it erases until you lift",
@@ -1970,7 +2207,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 .putBoolean("erasePreview", erasePreview).apply();
         prefs.edit().putInt("predLevel", prediction).putBoolean("finger", fingerDraw).putBoolean("hud", hud)
                 .putBoolean("partialErase", partialErase).putBoolean("shapeSnap", shapeSnap)
-                .putBoolean("penButton", penButton).apply();
+                .putBoolean("penButton", penButton).putBoolean("taper", taper).apply();
         pushOptions();
         if (fingerB != null) fingerB.set(fingerDraw, 0, 0);
     }
@@ -2477,15 +2714,17 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     public void onEditText(Engine.TextEdit e) {
         commitTextEdit();
         textReq = e;
-        textEdit = new EditText(this);
-        textEdit.setText(e.item != null ? e.item.text : "");
-        textEdit.setTextSize(TypedValue.COMPLEX_UNIT_PX, e.size * e.zoom);
-        textEdit.setTypeface(e.item != null && e.item.hand() ? Ui.hand() : Ui.font(400)); // converted text keeps its handwriting look
-        textEdit.setTextColor(state != null && state.paper == Notebook.PAPER_DARK ? Render.inkColor(e.color, true) : e.color);
+        editBox = Fonts.Style.parse(e.style);
+        textEdit = new EditText(this) {
+            @Override protected void onSelectionChanged(int a, int b) {
+                super.onSelectionChanged(a, b);
+                if (textEdit == this) refreshBar();
+            }
+        };
+        textEdit.setText(editBox.spanned(e.item != null ? e.item.text : "", editHand(), e.zoom, editInk()));
         textEdit.setIncludeFontPadding(false);
         textEdit.setPadding(0, 0, 0, 0);
         textEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        textEdit.setGravity(Gravity.TOP | Gravity.START);
         textEdit.setHint("Type…");
         GradientDrawable g = Ui.round(0x00000000, Ui.dp(this, 4));
         g.setStroke(Ui.dp(this, 1.5f), Ui.color(this, R.color.accent), Ui.dp(this, 5), Ui.dp(this, 4));
@@ -2494,7 +2733,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         lp.leftMargin = Math.round(e.screenX + paneLeft());
         lp.topMargin = Math.round(e.screenY + paneTop());
         root.addView(textEdit, lp);
-        if (e.item != null && e.item.hasInk()) addTextTools(e, lp.leftMargin, lp.topMargin);
+        applyEditLook();
+        addTextTools(e, lp.leftMargin, lp.topMargin);
         textEdit.requestFocus();
         textEdit.setSelection(textEdit.getText().length());
         ui.postDelayed(() -> {
@@ -2505,16 +2745,379 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     @Override
     public void onDismissText() { commitTextEdit(); }
 
+    /** The box being typed in, drawn the way it will look on the page: font, style, size, colour, alignment. */
+    private void applyEditLook() {
+        if (textEdit == null || textReq == null) return;
+        Engine.TextEdit e = textReq;
+        Fonts.Style st = editBox;
+        textEdit.setTypeface(st.face(editHand())); // converted text keeps its handwriting look
+        textEdit.setTextSize(TypedValue.COMPLEX_UNIT_PX, e.size * e.zoom);
+        int fl = textEdit.getPaintFlags() & ~(Paint.UNDERLINE_TEXT_FLAG | Paint.STRIKE_THRU_TEXT_FLAG);
+        if (st.underline) fl |= Paint.UNDERLINE_TEXT_FLAG;
+        if (st.strike) fl |= Paint.STRIKE_THRU_TEXT_FLAG;
+        textEdit.setPaintFlags(fl);
+        textEdit.setGravity(Gravity.TOP | (st.align == Fonts.Style.CENTRE ? Gravity.CENTER_HORIZONTAL
+                : st.align == Fonts.Style.RIGHT ? Gravity.END : Gravity.START));
+        textEdit.setTextColor(state != null && state.paper == Notebook.PAPER_DARK ? Render.inkColor(e.color, true) : e.color);
+    }
+
+    /** After a format popover closes: back to typing. */
+    private void refocusEdit() {
+        EditText et = textEdit;
+        if (et == null) return;
+        et.requestFocus();
+        ui.postDelayed(() -> { if (textEdit == et) getSystemService(InputMethodManager.class).showSoftInput(et, 0); }, 80);
+    }
+
     /**
-     * Above a converted text box while you edit it: read the original handwriting again in another language
-     * (when detection got it wrong), or turn it back into handwriting.
+     * Over the box while you type: a format bar (font, size, bold / italic / underline / strike, alignment, colour;
+     * font, size and style also become the default for new boxes). For converted text, below it: read the original
+     * handwriting again in another language, or turn it back into handwriting.
      */
     private void addTextTools(Engine.TextEdit e, int x, int y) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.addView(formatBar(e));
+        if (e.item != null && e.item.hasInk()) col.addView(readAsRow(e));
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.setClipToPadding(false);
+        hs.setPadding(0, Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8));
+        hs.addView(col);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2);
+        lp.leftMargin = Math.max(Ui.dp(this, 8), x - Ui.dp(this, 6));
+        lp.rightMargin = Ui.dp(this, 8);
+        hs.setVisibility(View.INVISIBLE);
+        root.addView(hs, lp);
+        textTools = hs;
+        // above the box, or under it when there's no room above
+        hs.post(() -> {
+            if (textTools != hs || textEdit == null) return;
+            int h = hs.getHeight(), top = y - h;
+            if (top < Ui.dp(this, 8)) top = y + textEdit.getHeight() + Ui.dp(this, 2);
+            FrameLayout.LayoutParams l2 = (FrameLayout.LayoutParams) hs.getLayoutParams();
+            l2.topMargin = top;
+            hs.setLayoutParams(l2);
+            hs.setVisibility(View.VISIBLE);
+        });
+    }
+
+    private LinearLayout pill() {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4));
-        row.setBackground(Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 22)));
+        GradientDrawable g = Ui.round(Ui.color(this, R.color.surface), Ui.dp(this, 22));
+        g.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
+        row.setBackground(g);
         row.setElevation(Ui.dp(this, 6));
+        return row;
+    }
+
+    private View barSep() {
+        View sep = new View(this);
+        sep.setBackgroundColor(Ui.color(this, R.color.outline));
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(Ui.hairline(this), Ui.dp(this, 22));
+        sl.leftMargin = sl.rightMargin = Ui.dp(this, 5);
+        sep.setLayoutParams(sl);
+        return sep;
+    }
+
+    // ---- per-word styling while typing ---------------------------------------------------------
+    // With words selected the format bar styles just them (runs: Fonts.Run, drawn by Fonts.RunSpan); with nothing
+    // selected it styles the whole box (and clears that setting from the runs so the whole box follows).
+
+    private Fonts.Style editBox;  // the box's own look while it's being edited (runs live as spans in the EditText)
+    private TextView barFont, barSize;
+    private final TextView[] barTog = new TextView[4];
+    private final ImageView[] barAlign = new ImageView[3];
+    private Ui.Swatch barDot;
+
+    private boolean editHand() { return textReq != null && textReq.item != null && textReq.item.hand(); }
+
+    private java.util.function.IntUnaryOperator editInk() {
+        return state != null && state.paper == Notebook.PAPER_DARK ? c -> Render.inkColor(c, true) : null;
+    }
+
+    /** The box's style with the runs as they now stand in the editor. */
+    private String editStyle(android.text.Editable ed) {
+        Fonts.Style out = editBox.boxOnly();
+        Fonts.RunSpan[] sp = ed.getSpans(0, ed.length(), Fonts.RunSpan.class);
+        java.util.Arrays.sort(sp, (x, y) -> ed.getSpanStart(x) - ed.getSpanStart(y));
+        for (Fonts.RunSpan r : sp) {
+            Fonts.Run c = r.run.copy();
+            c.start = ed.getSpanStart(r);
+            c.end = ed.getSpanEnd(r);
+            if (c.end > c.start && !c.empty()) out.runs.add(c);
+        }
+        return out.encode();
+    }
+
+    /**
+     * Changes the runs over [a, b) (the whole text when a == b == -1) and lays the spans out again,
+     * merging neighbours that look the same.
+     */
+    private void editRuns(int a, int b, java.util.function.Consumer<Fonts.Run> change) {
+        EditText et = textEdit;
+        if (et == null) return;
+        android.text.Editable ed = et.getText();
+        int n = ed.length();
+        if (a < 0) { a = 0; b = n; }
+        Fonts.Run[] per = new Fonts.Run[n];
+        for (Fonts.RunSpan sp : ed.getSpans(0, n, Fonts.RunSpan.class)) {
+            int s0 = Math.max(0, ed.getSpanStart(sp)), s1 = Math.min(n, ed.getSpanEnd(sp));
+            for (int i = s0; i < s1; i++) per[i] = sp.run;
+            ed.removeSpan(sp);
+        }
+        java.util.IdentityHashMap<Fonts.Run, Fonts.Run> done = new java.util.IdentityHashMap<>();
+        Fonts.Run fresh = null;
+        for (int i = Math.max(0, a); i < Math.min(n, b); i++) {
+            Fonts.Run o = per[i], m;
+            if (o == null) {
+                if (fresh == null) { fresh = new Fonts.Run(); change.accept(fresh); }
+                m = fresh;
+            } else {
+                m = done.get(o);
+                if (m == null) { m = o.copy(); change.accept(m); done.put(o, m); }
+            }
+            per[i] = m.empty() ? null : m;
+        }
+        for (int i = 0; i < n; ) {
+            if (per[i] == null) { i++; continue; }
+            int j = i + 1;
+            while (j < n && per[j] != null && per[j].sameLook(per[i])) j++;
+            ed.setSpan(new Fonts.RunSpan(per[i].copy(), editBox, editHand(), textReq.zoom, editInk()), i, j,
+                    android.text.Spanned.SPAN_EXCLUSIVE_INCLUSIVE);
+            i = j;
+        }
+    }
+
+    /** The run at a character (the one before the cursor when nothing is selected), or null. */
+    private Fonts.RunSpan runAt(int i) {
+        if (textEdit == null || i < 0) return null;
+        android.text.Editable ed = textEdit.getText();
+        if (i >= ed.length()) return null;
+        Fonts.RunSpan[] sp = ed.getSpans(i, i + 1, Fonts.RunSpan.class);
+        return sp.length > 0 ? sp[sp.length - 1] : null;
+    }
+
+    private int[] selection() {
+        EditText et = textEdit;
+        if (et == null) return new int[]{0, 0};
+        int a = Math.max(0, et.getSelectionStart()), b = Math.max(0, et.getSelectionEnd());
+        return new int[]{Math.min(a, b), Math.max(a, b)};
+    }
+
+    /** Effective flag k (0 bold, 1 italic, 2 underline, 3 strike) at character i. */
+    private boolean flagAt(int i, int k) {
+        Fonts.RunSpan r = runAt(i);
+        if (r != null) return k == 0 ? r.bold() : k == 1 ? r.italic() : k == 2 ? r.underline() : r.strike();
+        return k == 0 ? editBox.bold : k == 1 ? editBox.italic : k == 2 ? editBox.underline : editBox.strike;
+    }
+
+    private float sizeAt(int i) {
+        Fonts.RunSpan r = runAt(i);
+        return r != null && r.run.size != null ? r.run.size : textReq.size;
+    }
+
+    private String fontAt(int i) {
+        Fonts.RunSpan r = runAt(i);
+        return r != null ? r.font() : editBox.font;
+    }
+
+    private int colorAt(int i) {
+        Fonts.RunSpan r = runAt(i);
+        return r != null && r.run.color != null ? r.run.color : textReq.color;
+    }
+
+    private int probe(int[] sel) { return sel[1] > sel[0] ? sel[0] : sel[0] - 1; }
+
+    /** Puts the bar's buttons in step with the selection (or the cursor). */
+    private void refreshBar() {
+        if (textEdit == null || textReq == null || barFont == null) return;
+        int i = probe(selection());
+        String f = fontAt(i);
+        barFont.setText(Fonts.name(f));
+        barFont.setTypeface(Fonts.face(f, false, false, false));
+        barSize.setText(String.format(Locale.ROOT, "%.0f", sizeAt(i) / Fonts.UNITS_PER_PT));
+        for (int k = 0; k < 4; k++) styleToggle(barTog[k], flagAt(i, k));
+        for (int k = 0; k < 3; k++) styleToggle(barAlign[k], editBox.align == k);
+        barDot.set(colorAt(i), false);
+    }
+
+    /** Box-level change: relayout the spans (they read the box live) and the base look. */
+    private void boxChanged() {
+        editRuns(-1, -1, r -> { });
+        applyEditLook();
+        textStyleEnc = editBox.boxOnly().encode(); // new boxes start like this one
+        applyTool();
+        refreshBar();
+    }
+
+    private void toggleFlag(int k) {
+        int[] sel = selection();
+        if (sel[1] > sel[0]) {
+            boolean all = true;
+            for (int i = sel[0]; i < sel[1] && all; i++) all = flagAt(i, k);
+            boolean v = !all;
+            boolean boxV = k == 0 ? editBox.bold : k == 1 ? editBox.italic : k == 2 ? editBox.underline : editBox.strike;
+            Boolean set = v == boxV ? null : v;
+            editRuns(sel[0], sel[1], r -> {
+                if (k == 0) r.bold = set; else if (k == 1) r.italic = set; else if (k == 2) r.underline = set; else r.strike = set;
+            });
+            refreshBar();
+            return;
+        }
+        if (k == 0) editBox.bold = !editBox.bold; else if (k == 1) editBox.italic = !editBox.italic;
+        else if (k == 2) editBox.underline = !editBox.underline; else editBox.strike = !editBox.strike;
+        editRuns(-1, -1, r -> { if (k == 0) r.bold = null; else if (k == 1) r.italic = null; else if (k == 2) r.underline = null; else r.strike = null; });
+        boxChanged();
+    }
+
+    private void stepSize(int dir) {
+        int[] sel = selection();
+        if (sel[1] > sel[0]) {
+            float box = textReq.size;
+            editRuns(sel[0], sel[1], r -> {
+                float cur = r.size != null ? r.size : box;
+                float pt = Math.max(Fonts.PT_MIN, Math.min(Fonts.PT_MAX, Math.round(cur / Fonts.UNITS_PER_PT) + dir));
+                float u = pt * Fonts.UNITS_PER_PT;
+                r.size = Math.abs(u - box) < 0.01f ? null : u;
+            });
+            refreshBar();
+            return;
+        }
+        float pt = Math.max(Fonts.PT_MIN, Math.min(Fonts.PT_MAX, Math.round(textReq.size / Fonts.UNITS_PER_PT) + dir));
+        textReq.size = pt * Fonts.UNITS_PER_PT;
+        textPt = pt;
+        editRuns(-1, -1, r -> r.size = null);
+        boxChanged();
+    }
+
+    private void setFont(String id, int[] sel) {
+        if (sel[1] > sel[0]) {
+            String set = id.equals(editBox.font) ? null : id;
+            editRuns(sel[0], sel[1], r -> r.font = set);
+            refreshBar();
+            return;
+        }
+        editBox.font = id;
+        editRuns(-1, -1, r -> r.font = null);
+        boxChanged();
+    }
+
+    private void setColour(int c, int[] sel) {
+        if (sel[1] > sel[0]) {
+            Integer set = c == textReq.color ? null : c;
+            editRuns(sel[0], sel[1], r -> r.color = set);
+            refreshBar();
+            return;
+        }
+        textReq.color = c;
+        editRuns(-1, -1, r -> r.color = null);
+        applyEditLook();
+        refreshBar();
+    }
+
+    /** A popover over the bar took focus: put the selection back and keep typing. */
+    private void refocusEdit(int[] sel) {
+        EditText et = textEdit;
+        if (et == null) return;
+        int n = et.getText().length();
+        et.setSelection(Math.min(sel[0], n), Math.min(sel[1], n));
+        refocusEdit();
+    }
+
+    private View formatBar(Engine.TextEdit e) {
+        LinearLayout row = pill();
+        // font
+        TextView font = Ui.text(this, "", 14.5f, Ui.color(this, R.color.on_surface), null);
+        font.setSingleLine(true);
+        font.setMaxWidth(Ui.dp(this, 150));
+        font.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        font.setGravity(Gravity.CENTER_VERTICAL);
+        font.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, R.drawable.ic_chevron, 0);
+        font.setCompoundDrawableTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, R.color.icon)));
+        font.setCompoundDrawablePadding(Ui.dp(this, 2));
+        font.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 6), 0);
+        font.setBackground(Ui.ripple(this, null, Ui.dp(this, 16)));
+        font.setOnClickListener(v -> {
+            int[] sel = selection();
+            Ui.Popover p = newPop(300).title(sel[1] > sel[0] ? "Font for selected text" : "Font");
+            p.add(fontList(fontAt(probe(sel)), id -> {
+                setFont(id, sel);
+                if (pop != null) pop.dismiss();
+            }, e, null));
+            p.pw.setOnDismissListener(() -> refocusEdit(sel));
+            p.show(font);
+        });
+        barFont = font;
+        row.addView(font, new LinearLayout.LayoutParams(-2, Ui.dp(this, 36)));
+        row.addView(barSep());
+        // size
+        TextView minus = stepButton("−"), plus = stepButton("+");
+        barSize = Ui.text(this, "", 14.5f, Ui.color(this, R.color.on_surface), Ui.medium());
+        barSize.setGravity(Gravity.CENTER);
+        minus.setContentDescription("Smaller");
+        plus.setContentDescription("Bigger");
+        minus.setOnClickListener(v -> stepSize(-1));
+        plus.setOnClickListener(v -> stepSize(1));
+        row.addView(minus, new LinearLayout.LayoutParams(Ui.dp(this, 34), Ui.dp(this, 34)));
+        row.addView(barSize, new LinearLayout.LayoutParams(Ui.dp(this, 36), -2));
+        row.addView(plus, new LinearLayout.LayoutParams(Ui.dp(this, 34), Ui.dp(this, 34)));
+        row.addView(barSep());
+        // B I U S
+        String[] labels = {"B", "I", "U", "S"}, descs = {"Bold", "Italic", "Underline", "Strike-through"};
+        for (int i = 0; i < 4; i++) {
+            final int k = i;
+            TextView t = Ui.text(this, labels[i], 16, Ui.color(this, R.color.on_surface), Fonts.face(Fonts.SERIF, false, i == 0, i == 1));
+            t.setGravity(Gravity.CENTER);
+            t.setContentDescription(descs[i]);
+            if (i == 2) t.setPaintFlags(t.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG);
+            if (i == 3) t.setPaintFlags(t.getPaintFlags() | Paint.STRIKE_THRU_TEXT_FLAG);
+            t.setOnClickListener(v -> toggleFlag(k));
+            barTog[i] = t;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 34));
+            lp.rightMargin = Ui.dp(this, 2);
+            row.addView(t, lp);
+        }
+        row.addView(barSep());
+        // alignment (the whole box)
+        int[] icons = {R.drawable.ic_align_left, R.drawable.ic_align_center, R.drawable.ic_align_right};
+        String[] an = {"Align left", "Centre", "Align right"};
+        for (int i = 0; i < 3; i++) {
+            final int k = i;
+            ImageView b = new ImageView(this);
+            b.setImageResource(icons[i]);
+            b.setScaleType(ImageView.ScaleType.CENTER);
+            b.setContentDescription(an[i]);
+            b.setOnClickListener(v -> { editBox.align = k; boxChanged(); });
+            barAlign[i] = b;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 34));
+            lp.rightMargin = Ui.dp(this, 2);
+            row.addView(b, lp);
+        }
+        row.addView(barSep());
+        // colour
+        Ui.Swatch dot = new Ui.Swatch(this);
+        dot.setContentDescription("Colour");
+        dot.setOnClickListener(v -> {
+            int[] sel = selection();
+            Ui.Popover p = newPop(320).title(sel[1] > sel[0] ? "Colour for selected text" : "Colour");
+            p.add(Ui.colorGrid(this, INK_PALETTE, colorAt(probe(sel)), c -> {
+                setColour(c, sel);
+                if (pop != null) pop.dismiss();
+            }));
+            p.pw.setOnDismissListener(() -> refocusEdit(sel));
+            p.show(dot);
+        });
+        barDot = dot;
+        row.addView(dot, new LinearLayout.LayoutParams(Ui.dp(this, 38), Ui.dp(this, 36)));
+        row.post(this::refreshBar);
+        return row;
+    }
+
+    private View readAsRow(Engine.TextEdit e) {
+        LinearLayout row = pill();
         TextView lab = Ui.text(this, "Read as", 13, Ui.color(this, R.color.on_surface_variant), Ui.medium());
         lab.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 4), 0);
         row.addView(lab);
@@ -2559,17 +3162,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             ui.postDelayed(this::immersive, 300);
         });
         row.addView(back, new LinearLayout.LayoutParams(-2, Ui.dp(this, 34)));
-        HorizontalScrollView hs = new HorizontalScrollView(this);
-        hs.setHorizontalScrollBarEnabled(false);
-        hs.setClipToPadding(false);
-        hs.setPadding(0, Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8));
-        hs.addView(row);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2);
-        lp.leftMargin = Math.max(Ui.dp(this, 8), x - Ui.dp(this, 6));
-        lp.topMargin = Math.max(Ui.dp(this, 8), y - Ui.dp(this, 60));
-        lp.rightMargin = Ui.dp(this, 8);
-        root.addView(hs, lp);
-        textTools = hs;
+        LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(-2, -2);
+        rl.topMargin = Ui.dp(this, 6);
+        row.setLayoutParams(rl);
+        return row;
     }
 
     private void commitTextEdit() {
@@ -2578,6 +3174,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         Engine.TextEdit req = textReq;
         textEdit = null;
         textReq = null;
+        req.style = editStyle(et.getText());
         engine.commitText(req, et.getText().toString());
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(et.getWindowToken(), 0);
         root.removeView(et);
@@ -2603,6 +3200,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                     ui.post(() -> toast("Couldn't save there"));
                 }
             });
+            return;
+        }
+        if (req == REQ_FONT) {
+            if (res == RESULT_OK && data != null && data.getData() != null) fontPicked(data.getData());
+            else { fontImportFor = null; fontImportEngine = null; afterFontImport = null; }
             return;
         }
         if (req != REQ_IMAGE || res != RESULT_OK || data == null || data.getData() == null) return;

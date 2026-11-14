@@ -470,7 +470,7 @@ final class Render {
                 b.recycle();
             }
         } else {
-            StaticLayout sl = textLayout(it.text, it.size, inkColor(it.color, darkPaper), it.w, it.hand());
+            StaticLayout sl = textLayout(it.text, it.size, inkColor(it.color, darkPaper), it.w, it.hand(), it.style, darkPaper);
             c.save();
             c.translate(it.x, it.y);
             sl.draw(c);
@@ -478,16 +478,30 @@ final class Render {
         }
     }
 
-    static StaticLayout textLayout(String text, float size, int color, float width) { return textLayout(text, size, color, width, false); }
+    static StaticLayout textLayout(String text, float size, int color, float width) { return textLayout(text, size, color, width, false, null); }
 
-    /** Text boxes use Inter; converted handwriting uses the handwriting face (hand = true). */
-    static StaticLayout textLayout(String text, float size, int color, float width, boolean hand) {
+    static StaticLayout textLayout(String text, float size, int color, float width, boolean hand) { return textLayout(text, size, color, width, hand, null); }
+
+    /**
+     * A text box: its style's font (Inter by default; converted handwriting defaults to the handwriting face,
+     * hand = true), bold / italic, underline / strike-through and alignment.
+     */
+    static StaticLayout textLayout(String text, float size, int color, float width, boolean hand, String style) {
+        return textLayout(text, size, color, width, hand, style, false);
+    }
+
+    /** dark: on dark paper (per-word colours get the same light-ink mapping as the box colour). */
+    static StaticLayout textLayout(String text, float size, int color, float width, boolean hand, String style, boolean dark) {
+        Fonts.Style st = Fonts.Style.parse(style);
+        CharSequence cs = st.runs.isEmpty() ? text : st.spanned(text, hand, 1f, dark ? c -> inkColor(c, true) : null);
         TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-        tp.setTypeface(hand ? Ui.hand() : Ui.font(400));
+        tp.setTypeface(st.face(hand));
         tp.setTextSize(size);
         tp.setColor(color);
-        return StaticLayout.Builder.obtain(text, 0, text.length(), tp, Math.max(1, (int) Math.ceil(width)))
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false).build();
+        tp.setUnderlineText(st.underline);
+        tp.setStrikeThruText(st.strike);
+        return StaticLayout.Builder.obtain(cs, 0, cs.length(), tp, Math.max(1, (int) Math.ceil(width)))
+                .setAlignment(st.alignment()).setIncludePad(false).build();
     }
 
     static Bitmap image(File dir, String name, int maxPx) {

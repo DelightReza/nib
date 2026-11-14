@@ -69,6 +69,8 @@ final class Backup {
             File root = Notebook.root(c);
             File[] dirs = root.listFiles(File::isDirectory);
             if (dirs != null) for (File d : dirs) addDir(zip, d, d.getName() + "/");
+            File fonts = Fonts.dir(c); // imported fonts, so restored notebooks keep their look
+            if (fonts.isDirectory()) addDir(zip, fonts, Fonts.BACKUP_DIR);
             zip.putNextEntry(new ZipEntry(LIBRARY));
             zip.write(libraryJson(c).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             zip.closeEntry();
@@ -159,6 +161,10 @@ final class Backup {
                     continue;
                 }
                 if (e.isDirectory() || n.contains("..")) continue;
+                if (n.startsWith(Fonts.BACKUP_DIR)) {
+                    Fonts.restoreFile(c, n.substring(Fonts.BACKUP_DIR.length()), zin);
+                    continue;
+                }
                 int slash = n.indexOf('/');
                 if (slash <= 0) continue;
                 String nb = n.substring(0, slash);

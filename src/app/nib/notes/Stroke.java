@@ -35,6 +35,33 @@ final class Stroke {
         return width * 0.5f * (0.28f + 0.72f * (float) Math.pow(pn, 0.9));
     }
 
+    /**
+     * Pressure for a stroke that has none (a finger, a stylus without pressure): full pressure p, eased in over
+     * the first stretch of the stroke so the fountain pen starts thin. t = distance so far / taper length.
+     */
+    static float taperP(float p, float t) {
+        t = Math.max(0f, Math.min(1f, t));
+        float s = t * t * (3 - 2 * t);
+        return p * (0.12f + 0.88f * s);
+    }
+
+    /** Taper length in units for a pen of this width: a few nib widths, never longer than half the stroke. */
+    float taperLen() { return Math.max(6f, Math.min(20f, width * 5f)); }
+
+    /** The same easing at the end of the stroke, once it's finished (the live tail can't know where it ends). */
+    void taperEnd(float len) {
+        if (n < 3 || len <= 0) return;
+        float d = 0;
+        for (int i = n - 1; i >= 0; i--) {
+            if (i < n - 1) d += (float) Math.hypot(x(i + 1) - x(i), y(i + 1) - y(i));
+            if (d >= len) break;
+            int o = 4 * i;
+            float f = taperP(1f, d / len);
+            p[o + 2] *= f;
+            p[o + 3] = radius(p[o + 2]);
+        }
+    }
+
     void add(float x, float y, float pr) {
         if (4 * (n + 1) > p.length) {
             float[] np = new float[p.length * 2];

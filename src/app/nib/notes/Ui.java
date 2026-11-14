@@ -50,6 +50,7 @@ final class Ui {
 
     /** Loads Inter, the one typeface Nib uses everywhere (also set as the theme font). Call once per activity. */
     static void initFonts(Context c) {
+        Fonts.init(c);
         if (inter != null) return;
         try { inter = c.getResources().getFont(R.font.inter); } catch (Exception e) { inter = Typeface.DEFAULT; }
         try {

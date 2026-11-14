@@ -28,7 +28,7 @@ final class Notebook {
             "Engineering", "Isometric", "Site inspection"};
     static final int PAPER_WHITE = 0, PAPER_CREAM = 1, PAPER_DARK = 2;
     static final String[] PAPER_NAMES = {"White paper", "Cream paper", "Dark paper"};
-    private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235; // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths
+    private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235, MAGIC6 = 0x4E494236; // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths, NIB6 +text style
     static final int MARGIN_LEFT = 1, MARGIN_HEADER = 2, MARGIN_BORDER = 4;
 
     /** Text box or picture placed on a page (page-local units). */
@@ -41,15 +41,23 @@ final class Notebook {
         final float size;    // TEXT: font size in units
         final int color;     // TEXT / TAPE colour
         final float[] pts;   // TAPE: the centre line x0,y0,x1,y1,… (page-local); size = its thickness
+        final String style;  // TEXT: font, bold/italic/underline/strike, alignment (Fonts.Style); null = default
 
         Item(int type, float x, float y, float w, float h, String text, float size, int color) {
             this(type, x, y, w, h, text, size, color, null);
         }
 
         Item(int type, float x, float y, float w, float h, String text, float size, int color, float[] pts) {
+            this(type, x, y, w, h, text, size, color, pts, null);
+        }
+
+        Item(int type, float x, float y, float w, float h, String text, float size, int color, float[] pts, String style) {
             this.type = type; this.x = x; this.y = y; this.w = w; this.h = h;
             this.text = text; this.size = size; this.color = color; this.pts = pts;
+            this.style = style == null || style.isEmpty() ? null : style;
         }
+
+        Fonts.Style textStyle() { return Fonts.Style.parse(style); }
 
         /** A tape along centre line pts, thick units wide; its box covers the whole strip. */
         static Item tape(float[] pts, float thick, String pattern, int color) {
@@ -114,19 +122,21 @@ final class Notebook {
                 np = new float[pts.length];
                 for (int i = 0; i + 1 < pts.length; i += 2) { np[i] = (pts[i] - px) * s + px + tx; np[i + 1] = (pts[i + 1] - py) * s + py + ty; }
             }
-            return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size * s, color, np);
+            return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size * s, color, np, Fonts.scaled(style, s));
         }
 
-        Item withText(String t, float nh) { return new Item(type, x, y, w, nh, t, size, color, pts); }
+        Item withText(String t, float nh) { return new Item(type, x, y, w, nh, t, size, color, pts, style); }
 
-        Item withColor(int c) { return new Item(type, x, y, w, h, text, size, c, pts); }
+        Item withStyle(String st) { return new Item(type, x, y, w, h, text, size, color, pts, st); }
+
+        Item withColor(int c) { return new Item(type, x, y, w, h, text, size, c, pts, style); }
 
         /** TAPE: text holds the pattern, plus "|open" while the tape is peeled back to show what's under it. */
         boolean revealed() { return type == TAPE && text.endsWith("|open"); }
 
         String pattern() { return type == TAPE ? (revealed() ? text.substring(0, text.length() - 5) : text) : ""; }
 
-        Item withRevealed(boolean r) { return new Item(type, x, y, w, h, pattern() + (r ? "|open" : ""), size, color, pts); }
+        Item withRevealed(boolean r) { return new Item(type, x, y, w, h, pattern() + (r ? "|open" : ""), size, color, pts, style); }
 
         boolean contains(float px, float py, float pad) {
             if (px < x - pad || px > x + w + pad || py < y - pad || py > y + h + pad) return false;
@@ -200,8 +210,8 @@ final class Notebook {
         if (f.exists()) {
             try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f), 1 << 16))) {
                 int magic = in.readInt();
-                if (magic != MAGIC1 && magic != MAGIC2 && magic != MAGIC3 && magic != MAGIC4 && magic != MAGIC5) throw new IOException("bad magic");
-                boolean v2 = magic != MAGIC1, v3 = magic == MAGIC3 || magic == MAGIC4 || magic == MAGIC5, v4 = magic == MAGIC4 || magic == MAGIC5, v5 = magic == MAGIC5;
+                if (magic < MAGIC1 || magic > MAGIC6) throw new IOException("bad magic");
+                boolean v2 = magic >= MAGIC2, v3 = magic >= MAGIC3, v4 = magic >= MAGIC4, v5 = magic >= MAGIC5, v6 = magic >= MAGIC6;
                 int pages = in.readInt();
                 for (int i = 0; i < pages; i++) {
                     Page p = new Page(in.readInt());
@@ -236,7 +246,8 @@ final class Notebook {
                                 pts = hz ? new float[]{x, y + h / 2, x + w, y + h / 2} : new float[]{x + w / 2, y, x + w / 2, y + h};
                                 size = hz ? h : w;
                             }
-                            p.items.add(new Item(type, x, y, w, h, text, size, color, pts));
+                            String style = v6 && in.readBoolean() ? in.readUTF() : null;
+                            p.items.add(new Item(type, x, y, w, h, text, size, color, pts, style));
                         }
                     }
                     if (v3 && in.readBoolean()) p.mark = in.readUTF();
@@ -278,7 +289,7 @@ final class Notebook {
         dir.mkdirs();
         File tmp = new File(dir, "ink.bin.tmp");
         try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(tmp), 1 << 16))) {
-            out.writeInt(MAGIC5);
+            out.writeInt(MAGIC6);
             out.writeInt(pages.size());
             for (Page p : pages) {
                 out.writeInt(p.bg);
@@ -308,6 +319,8 @@ final class Notebook {
                     out.writeInt(it.color);
                     out.writeInt(it.pts == null ? 0 : it.pts.length);
                     if (it.pts != null) for (float f : it.pts) out.writeFloat(f);
+                    out.writeBoolean(it.style != null);
+                    if (it.style != null) out.writeUTF(it.style);
                 }
                 out.writeBoolean(p.mark != null);
                 if (p.mark != null) out.writeUTF(p.mark);

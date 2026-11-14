@@ -60,6 +60,7 @@ final class Engine implements Choreographer.FrameCallback {
         Notebook.Item item; // null = new box
         float docX, docY, width, size;
         int color;
+        String style; // Fonts.Style, encoded
         float screenX, screenY, zoom;
     }
 
@@ -113,6 +114,8 @@ final class Engine implements Choreographer.FrameCallback {
     private int tool = TOOL_PEN;
     private int penColor = 0xff1d1f24, hlColor = 0xffffe066;
     private float penWidth = 2.6f, hlWidth = 22f, textSize = TEXT_SIZES[1];
+    private String textStyle;
+    private int textColor;
     private int predLevel = 1, penType = Stroke.PEN;
     private float eraserDp = 11f;
     private boolean fingerDraw, hud, partialErase, shapeSnap = true, tempEraser;
@@ -133,6 +136,10 @@ final class Engine implements Choreographer.FrameCallback {
     private volatile long penNear, stylusAt; // stylusAt: only the real pen (hover / touch), for palm rejection
     private boolean fingerGest;             // the current gesture was started by a finger (finger drawing on)
     private static final float FINGER_P = 0.5f; // fingers report contact size, not pressure: draw at the nominal width
+    /** This stroke has no real pressure (finger, or a stylus without it): the fountain pen tapers in and out instead. */
+    private boolean synthP;
+    private float synthD;      // distance written so far (units), for the taper in
+    private boolean taper = true;
 
     // live stroke
     private Stroke live;
@@ -279,6 +286,9 @@ final class Engine implements Choreographer.FrameCallback {
     void setWidth(int t, float w) { h.post(() -> { if (t == TOOL_HL) hlWidth = w; else penWidth = w; }); }
 
     void setTextSize(float s) { h.post(() -> textSize = s); }
+
+    /** Look of new text boxes: style (Fonts.Style, encoded) and colour (0 = the pen's colour). */
+    void setTextLook(String style, int color) { h.post(() -> { textStyle = style; textColor = color; }); }
 
     void setPenType(int t) { h.post(() -> penType = t); }
 
@@ -574,15 +584,15 @@ final class Engine implements Choreographer.FrameCallback {
         if (found != added.size()) return;
         String text = r.text.trim().replace('\n', ' ');
         float maxW = canvas() ? Math.max(400, target.w + 300) : Math.max(120, PW - target.x - 20);
-        StaticLayout sl = Render.textLayout(text, target.size, target.color, maxW, true);
+        StaticLayout sl = Render.textLayout(text, target.size, target.color, maxW, true, target.style);
         float w = 0;
         for (int i = 0; i < sl.getLineCount(); i++) w = Math.max(w, sl.getLineWidth(i));
         float bw = Math.max(40, Math.min(maxW, w + 6));
-        sl = Render.textLayout(text, target.size, target.color, bw, true);
+        sl = Render.textLayout(text, target.size, target.color, bw, true, target.style);
         Object[] before = pageState(p);
         p.strokes.removeIf(gone::containsKey);
         p.items.remove(target);
-        Notebook.Item it = new Notebook.Item(Notebook.Item.TEXT, target.x, target.y, bw, sl.getHeight(), text, target.size, target.color, Notebook.Item.handWithInk(all));
+        Notebook.Item it = new Notebook.Item(Notebook.Item.TEXT, target.x, target.y, bw, sl.getHeight(), text, target.size, target.color, Notebook.Item.handWithInk(all), target.style);
         p.items.add(it);
         autoLast = it;
         autoLastInk = all;
@@ -831,11 +841,12 @@ final class Engine implements Choreographer.FrameCallback {
             String t = text.replaceAll("\\s+$", "");
             if (!t.isEmpty()) {
                 boolean hand = e.item != null && e.item.hand(); // editing converted text keeps its handwriting face
-                StaticLayout sl = Render.textLayout(t, e.size, e.color, e.width, hand);
+                StaticLayout sl = Render.textLayout(t, e.size, e.color, e.width, hand, e.style);
                 float w = 0;
                 for (int i = 0; i < sl.getLineCount(); i++) w = Math.max(w, sl.getLineWidth(i));
-                float bw = e.item != null ? e.width : Math.max(40, Math.min(e.width, w + 6));
-                p.items.add(new Notebook.Item(Notebook.Item.TEXT, e.docX, e.docY, bw, sl.getHeight(), t, e.size, e.color, hand ? e.item.pts : null)); // keeps its handwriting
+                boolean aligned = Fonts.Style.parse(e.style).align != Fonts.Style.LEFT; // centred / right text keeps the box it's aligned in
+                float bw = e.item != null || aligned ? e.width : Math.max(40, Math.min(e.width, w + 6));
+                p.items.add(new Notebook.Item(Notebook.Item.TEXT, e.docX, e.docY, bw, sl.getHeight(), t, e.size, e.color, hand ? e.item.pts : null, e.style)); // keeps its handwriting
             }
             if (!Arrays.deepEquals(before, pageState(p))) {
                 push(new PageEdit(p, before, pageState(p)));
@@ -843,6 +854,27 @@ final class Engine implements Choreographer.FrameCallback {
             } else {
                 needCache = true;
                 requestFrame();
+            }
+        });
+    }
+
+    /** Redraw every text box (a font was removed). */
+    void refreshText() { h.post(() -> { dropTextTextures(); needCache = true; requestFrame(); }); }
+
+    /** Restyle the text box at (x, y) on a page (a font imported while it was being edited). One undo step. */
+    void setTextStyleAt(int page, float x, float y, String style) {
+        h.post(() -> {
+            if (book == null || page >= book.pages.size()) return;
+            Notebook.Page p = book.pages.get(page);
+            for (int i = p.items.size() - 1; i >= 0; i--) {
+                Notebook.Item it = p.items.get(i);
+                if (it.type != Notebook.Item.TEXT || Math.abs(it.x - x) > 0.5f || Math.abs(it.y - y) > 0.5f) continue;
+                Object[] before = pageState(p);
+                StaticLayout sl = Render.textLayout(it.text, it.size, it.color, it.w, it.hand(), style);
+                p.items.set(i, new Notebook.Item(it.type, it.x, it.y, it.w, sl.getHeight(), it.text, it.size, it.color, it.pts, style));
+                push(new PageEdit(p, before, pageState(p)));
+                edited();
+                return;
             }
         });
     }
@@ -1525,7 +1557,7 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private static Bitmap textBitmap(Notebook.Item it, int k, boolean dark) {
-        StaticLayout sl = Render.textLayout(it.text, it.size, Render.inkColor(it.color, dark), it.w, it.hand());
+        StaticLayout sl = Render.textLayout(it.text, it.size, Render.inkColor(it.color, dark), it.w, it.hand(), it.style, dark);
         int bw = Math.max(1, (int) Math.ceil(it.w * k)), bh = Math.max(1, (int) Math.ceil(Math.max(it.h, sl.getHeight()) * k));
         Bitmap b = Bitmap.createBitmap(Math.min(bw, 8192), Math.min(bh, 8192), Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(b);
@@ -1904,7 +1936,9 @@ final class Engine implements Choreographer.FrameCallback {
         holdY = startY = lastY = ev.getY();
         movedFromStart = false;
         rulerPick(ev.getX(), ev.getY());
-        addSample(ev.getX(), ev.getY(), fingerGest ? FINGER_P : ev.getPressure());
+        synthP = fingerGest || noPressure(ev);
+        synthD = 0;
+        addSample(ev.getX(), ev.getY(), synthP ? FINGER_P : ev.getPressure());
         if (rulerEdge == 0) armSnap();
         if (holdErase && rulerEdge == 0) h.postDelayed(holdEraseR, HOLD_ERASE_MS);
         predict(ev);
@@ -2047,8 +2081,8 @@ final class Engine implements Choreographer.FrameCallback {
         newFirst = buf().count;
         dirty.setEmpty();
         int hs = ev.getHistorySize();
-        for (int i = 0; i < hs; i++) addSample(ev.getHistoricalX(i), ev.getHistoricalY(i), fingerGest ? FINGER_P : ev.getHistoricalPressure(i));
-        addSample(ev.getX(), ev.getY(), fingerGest ? FINGER_P : ev.getPressure());
+        for (int i = 0; i < hs; i++) addSample(ev.getHistoricalX(i), ev.getHistoricalY(i), synthP ? FINGER_P : ev.getHistoricalPressure(i));
+        addSample(ev.getX(), ev.getY(), synthP ? FINGER_P : ev.getPressure());
         lastX = ev.getX();
         lastY = ev.getY();
         if (!movedFromStart && Math.hypot(lastX - startX, lastY - startY) > dp(5)) {
@@ -2084,6 +2118,7 @@ final class Engine implements Choreographer.FrameCallback {
             final float len = (float) Math.hypot(live.x(live.n - 1) - live.x(0), live.y(live.n - 1) - live.y(0));
             main.post(() -> listener.onRulerLength(len, true));
         }
+        boolean ruled = rulerEdge != 0; // ruled lines keep a square end
         rulerEdge = 0;
         penNear = SystemClock.uptimeMillis();
         long dur = Math.max(1, ev.getEventTime() - stT0);
@@ -2103,6 +2138,17 @@ final class Engine implements Choreographer.FrameCallback {
             return;
         }
         straightenHighlight();
+        if (synthP && tapers() && !snapped && !ruled) {
+            float len = 0;
+            for (int i = 1; i < live.n; i++) len += (float) Math.hypot(live.x(i) - live.x(i - 1), live.y(i) - live.y(i - 1));
+            live.taperEnd(Math.min(live.taperLen(), len / 2));
+            // the live tail went to the GPU at full width: replace the stroke's pieces with the tapered ones
+            buf().truncate(liveFirst);
+            live.emitAll(liveTop, buf());
+            gl.pred.clear();
+            needCache = true;
+            requestFrame();
+        }
         Object[] before = pageState(p);
         p.strokes.add(live);
         for (Notebook.Item it : p.items) // ink written over covering tape goes under it
@@ -2133,6 +2179,18 @@ final class Engine implements Choreographer.FrameCallback {
         }
         docChanged();
     }
+
+    private boolean tapers() { return taper && live != null && live.tool == Stroke.PEN; }
+
+    /** A stylus that doesn't report pressure (passive capacitive pens). */
+    private static boolean noPressure(MotionEvent ev) {
+        if (!isStylus(ev.getToolType(0))) return false;
+        android.view.InputDevice d = ev.getDevice();
+        android.view.InputDevice.MotionRange r = d == null ? null : d.getMotionRange(MotionEvent.AXIS_PRESSURE, ev.getSource());
+        return r == null || r.getRange() <= 0;
+    }
+
+    void setTaper(boolean on) { h.post(() -> taper = on); }
 
     private void inkCancel() {
         h.removeCallbacks(snapR);
@@ -2165,7 +2223,9 @@ final class Engine implements Choreographer.FrameCallback {
         if (live.n > 0) {
             float dx = x - live.x(live.n - 1), dy = y - live.y(live.n - 1), min = 0.35f / z;
             if (dx * dx + dy * dy < min * min) return;
+            synthD += (float) Math.sqrt(dx * dx + dy * dy);
         }
+        if (synthP && tapers()) pressure = Stroke.taperP(pressure, synthD / live.taperLen());
         pf = pf < 0 ? pressure : pf + 0.5f * (pressure - pf);
         live.add(x, y, pf);
         statSample(pressure, sx, sy);
@@ -2818,6 +2878,7 @@ final class Engine implements Choreographer.FrameCallback {
             e.width = e.item.w;
             e.size = e.item.size;
             e.color = e.item.color;
+            e.style = e.item.style;
             editing = e.item;
             needCache = true;
             requestFrame();
@@ -2826,7 +2887,8 @@ final class Engine implements Choreographer.FrameCallback {
             e.docY = canvas() ? py - textSize * 0.6f : Math.max(0, py - textSize * 0.6f);
             e.width = canvas() ? 640 : Math.max(120, Math.min(640, PW - e.docX - 30));
             e.size = textSize;
-            e.color = penColor;
+            e.color = textColor != 0 ? textColor : penColor;
+            e.style = textStyle;
         }
         e.zoom = z;
         e.screenX = (e.docX - ox) * z;

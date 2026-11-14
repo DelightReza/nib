@@ -18,7 +18,8 @@ and handwriting that turns into text in English, Punjabi, Hindi or Arabic.
 
 **Writing**
 - Front-buffer ink rendering (OpenGL ES) with optional stroke prediction: ink keeps up with the pen
-- Fountain, ballpoint and fineliner pens with pressure; highlighter with a round or flat (chisel) tip that can straighten itself on lift
+- Fountain, ballpoint and fineliner pens with pressure; without pressure (finger, or a stylus that has none) the fountain pen tapers in and out like a real nib
+- Highlighter with a round or flat (chisel) tip that can straighten itself on lift
 - Eraser: whole-stroke or partial; erased ink greys out and goes when the pen lifts; hold the pen still where it lands to erase without switching tools
 - Hold the pen still to snap lines and shapes, keep moving to stretch them; snapped shapes keep handles on their corners and ends, so you can reshape them later
 - Ruler with angle readout and real-world drawing scales (1:100 …)
@@ -36,6 +37,11 @@ and handwriting that turns into text in English, Punjabi, Hindi or Arabic.
 - Converted text keeps its handwriting: read it again in another language, or turn it back into ink
 - **Beautify** keeps your own handwriting and makes it neater: straight lines on the ruled lines, even size and spacing, less wobble
 - Everything in one panel: tap the lasso tool again
+
+**Text**
+- Text boxes in Inter, Serif, Mono or Handwriting, or your own fonts: import any .ttf or .otf (they're included in backups)
+- Style selected words or the whole box: font, size in points, bold, italic, underline, strike-through and colour; left, centre or right alignment
+- A format bar sits over the box while you type and shows the style at the cursor
 
 **Pages**
 - Pages fill the screen and run continuously; a new page appears as soon as you write on the last one
