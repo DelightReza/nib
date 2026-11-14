@@ -1469,12 +1469,6 @@ final class Engine implements Choreographer.FrameCallback {
                 if (a == MotionEvent.ACTION_POINTER_DOWN && fingerGest) {
                     eraseEvent(ev, MotionEvent.ACTION_UP); // keep what was erased so far
                     toPan(ev, a);
-                } else if (a == MotionEvent.ACTION_POINTER_DOWN || a == MotionEvent.ACTION_POINTER_UP) {
-                    if (eraseTap(ev, a)) { // a finger tap while the pen erases: bring it all back
-                        cancelErase();
-                        gest = G_IGNORE; // the rest of this eraser stroke does nothing
-                        toast("Erase undone");
-                    }
                 } else eraseEvent(ev, a);
                 break;
             case G_LASER:
@@ -1960,55 +1954,8 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void eraseBegin(MotionEvent ev) { eraseBeginAt(ev.getX(), ev.getY()); }
 
-    // a quick finger tap while the pen is still erasing restores what this eraser stroke touched
-    private int tapId = -1;
-    private long tapAt;
-    private float tapSx, tapSy;
-
-    /** True when a finger went down and up again quickly in one spot (not a resting palm). */
-    private boolean eraseTap(MotionEvent ev, int a) {
-        int i = ev.getActionIndex();
-        if (a == MotionEvent.ACTION_POINTER_DOWN) {
-            if (ev.getToolType(i) == MotionEvent.TOOL_TYPE_FINGER && ev.getTouchMajor(i) < dp(40)) {
-                tapId = ev.getPointerId(i);
-                tapAt = ev.getEventTime();
-                tapSx = ev.getX(i);
-                tapSy = ev.getY(i);
-            }
-            return false;
-        }
-        boolean tap = ev.getPointerId(i) == tapId && ev.getEventTime() - tapAt < 350
-                && Math.hypot(ev.getX(i) - tapSx, ev.getY(i) - tapSy) < dp(16);
-        if (ev.getPointerId(i) == tapId) tapId = -1;
-        return tap;
-    }
-
-    /** Puts back everything this eraser stroke touched (greyed or, without the preview, already removed). */
-    private void cancelErase() {
-        if (eraseBefore == null) return;
-        for (Map.Entry<Notebook.Page, Object[]> e : eraseBefore.entrySet()) {
-            @SuppressWarnings("unchecked") ArrayList<Stroke> st = (ArrayList<Stroke>) e.getValue()[0];
-            @SuppressWarnings("unchecked") ArrayList<Notebook.Item> it = (ArrayList<Notebook.Item>) e.getValue()[1];
-            e.getKey().strokes = new ArrayList<>(st);
-            e.getKey().items = new ArrayList<>(it);
-        }
-        eraseBefore.clear();
-        doomed.clear();
-        doomedItems.clear();
-        pieces.clear();
-        tapId = -1;
-        gl.pred.clear(); // the eraser ring goes too
-        overlay = false;
-        predCur.setEmpty();
-        needRebuild = true;
-        needCache = true;
-        wantFront = true;
-        requestFrame();
-    }
-
     private void eraseBeginAt(float x, float y) {
         eraseBefore = new IdentityHashMap<>();
-        tapId = -1;
         doomed.clear();
         doomedItems.clear();
         pieces.clear();
