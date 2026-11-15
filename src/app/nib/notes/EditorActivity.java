@@ -163,6 +163,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         laserTrail = prefs.getInt("laserTrail", 520);
         laserInkWait = prefs.getInt("laserInkWait", 1500);
         laserHover = prefs.getBoolean("laserHover", true);
+        maxZoomPct = prefs.getInt("maxZoom", 800);
         loadFavs();
 
         preferFastestDisplayMode();
@@ -193,6 +194,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         dock = prefs.getInt("toolDock", DOCK_BOTTOM);
         applyDock();
         buildSelectionBar();
+        buildZoomChip();
         setContentView(root);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             int ime = insets.getInsets(WindowInsets.Type.ime()).bottom;
@@ -210,6 +212,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setHighlighter(hlFlat, hlStraight);
         engine.setEraseOptions(holdErase, erasePreview);
         engine.setTaper(taper);
+        engine.setZoomLimit(maxZoomPct / 100f);
         pushLaser();
         pushTape();
     }
@@ -361,7 +364,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             // the page fills the screen; the insets only let its ends scroll clear of the floating bars
             engine.setInsets(insetTop(), insetBottom());
             engine.setTheme(Ui.color(EditorActivity.this, R.color.desk), Ui.dark(EditorActivity.this) ? 0.45f : 0.11f);
-            if (page > 0) engine.openAtPage(page);
+            if (page > 0) engine.openAtPage(page); // a search hit: that page
+            else restoreView(this);                 // else where it was left
             page = 0;
             ink = new InkView(EditorActivity.this, engine);
             ink.penListener = EditorActivity.this::onPen;
@@ -384,6 +388,91 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         @Override public void onRulerLength(float u, boolean done) { if (on()) EditorActivity.this.onRulerLength(u, done); }
         @Override public void onHandles(float[] hs, boolean line) { sel.setHandles(hs, line); }
         @Override public void onHaptic() { root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); }
+        @Override public void onZoom(int pct) { if (on()) showZoomChip(pct, state != null && state.zoomLocked); }
+    }
+
+    // ---- where each notebook was left: page, scroll, zoom and zoom lock (prefs "view:<folder>") -----------------------
+
+    private void saveView(Doc d) {
+        Engine.State s = d.state;
+        if (d.engine == null || s == null || !s.viewKnown) return;
+        prefs.edit().putString("view:" + d.dir.getName(), s.topPage + "," + s.topFrac + "," + s.zRel + "," + s.viewX + "," + (s.zoomLocked ? 1 : 0)).apply();
+    }
+
+    private void restoreView(Doc d) {
+        String v = prefs.getString("view:" + d.dir.getName(), null);
+        if (v == null) return;
+        try {
+            String[] f = v.split(",");
+            d.engine.openAtView(Integer.parseInt(f[0]), Float.parseFloat(f[1]), Float.parseFloat(f[2]), Float.parseFloat(f[3]), "1".equals(f[4]));
+        } catch (RuntimeException ignored) { }
+    }
+
+    // ---- zoom chip: shows the zoom while pinching (and a few seconds after) with a lock; stays while locked ----------
+
+    private LinearLayout zoomChip;
+    private TextView zoomPct;
+    private ImageView zoomLock;
+    private int maxZoomPct;
+    private final Runnable hideZoomChip = () -> {
+        if (zoomChip == null || (state != null && state.zoomLocked)) return;
+        zoomChip.animate().alpha(0f).setDuration(200).withEndAction(() -> zoomChip.setVisibility(View.GONE)).start();
+    };
+
+    private void buildZoomChip() {
+        zoomChip = new LinearLayout(this);
+        zoomChip.setGravity(Gravity.CENTER_VERTICAL);
+        Ui.pill(zoomChip, this);
+        zoomChip.setElevation(Ui.dp(this, 6));
+        zoomChip.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0);
+        zoomPct = Ui.text(this, "100%", 14, Ui.color(this, R.color.on_surface), Ui.medium());
+        zoomPct.setGravity(Gravity.CENTER);
+        zoomPct.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 6), 0);
+        zoomPct.setContentDescription("Zoom · tap to fit the page width");
+        zoomPct.setOnClickListener(v -> { if (state == null || !state.zoomLocked) engine.fitWidth(); });
+        zoomChip.addView(zoomPct, new LinearLayout.LayoutParams(-2, Ui.dp(this, 40)));
+        zoomLock = new ImageView(this);
+        zoomLock.setScaleType(ImageView.ScaleType.CENTER);
+        zoomLock.setBackground(Ui.ripple(this, null, Ui.dp(this, 18)));
+        zoomLock.setOnClickListener(v -> {
+            boolean on = !(state != null && state.zoomLocked);
+            engine.setZoomLock(on);
+            showZoomChip(state != null ? state.zoom : 100, on);
+            toast(on ? "Zoom locked · pinching only scrolls" : "Zoom unlocked");
+        });
+        zoomChip.addView(zoomLock, new LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40)));
+        zoomChip.setVisibility(View.GONE);
+        root.addView(zoomChip, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+        placeZoomChip();
+    }
+
+    /** Under the top bars, or under the tool bar when that's docked at the top. */
+    private void placeZoomChip() {
+        if (zoomChip == null) return;
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) zoomChip.getLayoutParams();
+        lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 10 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 : 0));
+        zoomChip.setLayoutParams(lp);
+    }
+
+    private void setZoomChipLook(int pct, boolean locked) {
+        zoomPct.setText(pct + "%");
+        zoomLock.setImageResource(locked ? R.drawable.ic_lock : R.drawable.ic_lock_open);
+        zoomLock.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, locked ? R.color.accent : R.color.icon)));
+        zoomLock.setContentDescription(locked ? "Unlock zoom" : "Lock zoom");
+        zoomPct.setAlpha(locked ? 0.6f : 1f);
+    }
+
+    private void showZoomChip(int pct, boolean locked) {
+        if (zoomChip == null) return;
+        setZoomChipLook(pct, locked);
+        if (zoomChip.getVisibility() != View.VISIBLE) {
+            zoomChip.setAlpha(0f);
+            zoomChip.setVisibility(View.VISIBLE);
+        }
+        zoomChip.animate().cancel();
+        zoomChip.animate().alpha(1f).setDuration(120).start();
+        ui.removeCallbacks(hideZoomChip);
+        if (!locked) ui.postDelayed(hideZoomChip, 3000);
     }
 
     /** A side of the window. Touching it makes its notebook the one the tools act on. */
@@ -1144,6 +1233,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 lp.bottomMargin = Ui.dp(this, EDGE_DP + 4);
         }
         capTools.setLayoutParams(lp);
+        placeZoomChip();
         // toast and paste chip sit above the bar when it's at the bottom, else near the bottom edge
         int above = Ui.dp(this, dock == DOCK_BOTTOM ? EDGE_DP + TOOLCAP_DP + 16 : EDGE_DP + 8);
         if (pasteChip != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) pasteChip.getLayoutParams(); c.bottomMargin = above; pasteChip.setLayoutParams(c); }
@@ -2282,6 +2372,20 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 fingerDraw, v -> { fingerDraw = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Hide tools while writing", "The floating bars fade while the pen is on the page",
                 autoHide, v -> { autoHide = v; if (!v) showChrome.run(); prefs.edit().putBoolean("autoHide", v).apply(); }));
+        col.addView(Ui.text(this, "Maximum zoom", 14.5f, Ui.color(this, R.color.on_surface), null));
+        TextView zh = Ui.text(this, "How far pinching can zoom in · the zoom chip's lock freezes it", 12.5f,
+                Ui.color(this, R.color.on_surface_variant), null);
+        zh.setPadding(0, Ui.dp(this, 3), 0, Ui.dp(this, 10));
+        col.addView(zh);
+        int[] zooms = {400, 600, 800};
+        int zsel = maxZoomPct <= 400 ? 0 : maxZoomPct <= 600 ? 1 : 2;
+        col.addView(Ui.segmented(this, new String[]{"400%", "600%", "800%"}, zsel, i -> {
+            maxZoomPct = zooms[i];
+            prefs.edit().putInt("maxZoom", maxZoomPct).apply();
+            for (Doc d : docs) if (d.engine != null) d.engine.setZoomLimit(maxZoomPct / 100f);
+        }));
+        col.addView(Ui.switchRow(this, "Reopen where I left off", "Starting Nib brings back the notebooks and page you were on",
+                prefs.getBoolean("reopenLast", true), v -> prefs.edit().putBoolean("reopenLast", v).apply()));
         col.addView(sectionLabel("Tool bar"));
         col.addView(Ui.segmented(this, new String[]{"Bottom", "Top", "Left", "Right"}, dock, this::setDock));
         TextView th = Ui.text(this, "Or drag the grip at the end of the tool bar to any edge", 12.5f, Ui.color(this, R.color.on_surface_variant), null);
@@ -3483,6 +3587,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         undoB.setEnabledLook(s.canUndo);
         redoB.setEnabledLook(s.canRedo);
         renderTabs();
+        if (zoomChip != null) {
+            if (s.zoomLocked) showZoomChip(s.zoom, true); // a locked notebook always shows its lock
+            else if (zoomChip.getVisibility() == View.VISIBLE) setZoomChipLook(s.zoom, false);
+        }
         boolean narrowW = root.getWidth() > 0 && root.getWidth() < Ui.dp(this, 520);
         pagesB.setVisibility(s.canvas || narrowW ? View.GONE : View.VISIBLE);
         if (ruler.getVisibility() == View.VISIBLE) ruler.invalidate(); // ticks follow the zoom
@@ -3568,8 +3676,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             d.engine.saveNow();
             final File dir = d.dir;
             ui.postDelayed(() -> Handwriting.indexLater(getApplicationContext(), dir), 1500); // read the new handwriting once saved
+            saveView(d);
         }
         saveTabs();
+        // left for the notes screen (back, last tab closed): start there next time; else (home, recents, killed) come back here
+        prefs.edit().putBoolean("resumeEditor", !isFinishing()).apply();
     }
 
     @Override

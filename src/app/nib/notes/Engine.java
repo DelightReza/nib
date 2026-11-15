@@ -52,6 +52,11 @@ final class Engine implements Choreographer.FrameCallback {
         int lineColor, margins;
         float z;        // screen px per page unit
         String title;
+        boolean zoomLocked, viewKnown;
+        // where the view is, to reopen the notebook there: page at the top of the screen, how far down it (× its height),
+        // zoom relative to fit-width, and the left edge (doc units)
+        int topPage;
+        float topFrac, zRel = 1f, viewX;
     }
 
     /** Request for the UI to show a text editor over the page. */
@@ -77,6 +82,8 @@ final class Engine implements Choreographer.FrameCallback {
         default void onHaptic() {}
         /** Stretch handles of a lone selected shape, in view px (null = none); line: just its two ends. */
         default void onHandles(float[] screen, boolean line) {}
+        /** Zoom (% of fit-width) while pinching; a few times a second at most. */
+        default void onZoom(int pct) {}
     }
 
     private final HandlerThread thread = new HandlerThread("nib-ink");
@@ -326,6 +333,22 @@ final class Engine implements Choreographer.FrameCallback {
 
     /** Held pen side button (or any eraser key) → erase while held. */
     void setTempEraser(boolean on) { h.post(() -> tempEraser = on); }
+
+    /** Highest zoom, × fit-width (8 = 800%). */
+    void setZoomLimit(float rel) {
+        h.post(() -> {
+            maxZoomRel = Math.max(2f, rel);
+            if (W > 0 && z > fitZ * maxZoomRel) { clampView(); needCache = true; wantFront = true; requestFrame(); notifyState(); }
+        });
+    }
+
+    /** Locked zoom: pinching only scrolls, double-tap doesn't fit. */
+    void setZoomLock(boolean on) { h.post(() -> { zoomLocked = on; notifyState(); }); }
+
+    /** Reopen where the notebook was left (before the first frame): see State.topPage etc. */
+    void openAtView(int page, float frac, float zRel, float viewX, boolean locked) {
+        h.post(() -> { pendingPage = page; pendingFrac = frac; pendingZ = zRel; pendingX = viewX; zoomLocked = locked; });
+    }
 
     void undo() { h.post(() -> doUndo(false)); }
 
@@ -1009,7 +1032,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     /** Double tap: back to page width, keeping the tapped spot where it is on screen. */
     private void fitAt(float x, float y) {
-        if (W == 0) return;
+        if (W == 0 || zoomLocked) return;
         float dx = ox + x / z, dy = oy + y / z;
         z = fitZ;
         ox = canvas() ? dx - x / z : -sidePad / z;
@@ -1080,12 +1103,21 @@ final class Engine implements Choreographer.FrameCallback {
         z = fitZ;
         ox = -sidePad / z;
         oy = 0; // start full-screen; topPad only lets the page be pulled down clear of the floating bars
-        if (pendingPage > 0 && pendingPage < tops.length) oy = tops[pendingPage] - topPad / z; // opened from a search hit
+        if (pendingZ > 0 && pendingPage >= 0 && pendingPage < tops.length) { // reopened where it was left
+            z = fitZ * Math.max(minZ() / fitZ, Math.min(maxZoomRel, pendingZ));
+            ox = pendingX;
+            oy = tops[pendingPage] + pendingFrac * book.pages.get(pendingPage).h;
+        } else if (pendingPage > 0 && pendingPage < tops.length) oy = tops[pendingPage] - topPad / z; // opened from a search hit
         pendingPage = -1;
+        pendingZ = 0;
         clampView();
     }
 
     private int pendingPage = -1;
+    private float pendingFrac, pendingZ, pendingX;
+    private float maxZoomRel = 8f;
+    private boolean zoomLocked;
+    private long zoomPostedAt;
 
     /** Open the notebook at page i (before the first frame). */
     void openAtPage(int i) { h.post(() -> pendingPage = i); }
@@ -1095,7 +1127,7 @@ final class Engine implements Choreographer.FrameCallback {
     private float minZ() { return fitZ * (canvas() ? 0.1f : 0.45f); }
 
     private void clampView() {
-        z = Math.max(minZ(), Math.min(fitZ * 8f, z));
+        z = Math.max(minZ(), Math.min(fitZ * maxZoomRel, z));
         if (canvas()) return; // infinite canvas: go anywhere
         float vw = W / z, vh = H / z;
         if (PW * z <= W) ox = (PW - vw) / 2;
@@ -3217,15 +3249,19 @@ final class Engine implements Choreographer.FrameCallback {
                 float nz = sZ;
                 if (ev.getPointerCount() >= 2 && sDist > 0 && m[2] > 0) {
                     // scrolling with two fingers never holds their gap perfectly: only a clear pinch zooms
-                    if (!zooming && Math.abs(m[2] - sDist) > Math.max(dp(36), sDist * 0.14f)) {
+                    if (!zooming && !zoomLocked && Math.abs(m[2] - sDist) > Math.max(dp(36), sDist * 0.14f)) {
                         zooming = true;
                         baseline(ev, -1); // zoom starts from here, no jump
                         break;
                     }
                     if (zooming) nz = sZ * m[2] / sDist;
                 }
-                nz = Math.max(minZ(), Math.min(fitZ * 8f, nz));
+                nz = Math.max(minZ(), Math.min(fitZ * maxZoomRel, nz));
                 float ax = sOx + sMidX / sZ, ay = sOy + sMidY / sZ;
+                if (nz != z) {
+                    long now = SystemClock.uptimeMillis();
+                    if (now - zoomPostedAt > 50) { zoomPostedAt = now; final int pct = Math.round(nz / fitZ * 100); main.post(() -> listener.onZoom(pct)); }
+                }
                 z = nz;
                 ox = ax - m[0] / nz;
                 oy = ay - m[1] / nz;
@@ -3505,6 +3541,15 @@ final class Engine implements Choreographer.FrameCallback {
         s.marks = new String[s.pages];
         for (int i = 0; i < s.pages; i++) s.marks[i] = book.pages.get(i).mark;
         s.zoom = fitZ > 0 ? Math.round(z / fitZ * 100) : 100;
+        s.zoomLocked = zoomLocked;
+        if (W > 0 && tops.length > 0) {
+            int tp = Math.max(0, Math.min(tops.length - 1, pageAt(oy)));
+            s.topPage = tp;
+            s.topFrac = (oy - tops[tp]) / book.pages.get(tp).h;
+            s.zRel = fitZ > 0 ? z / fitZ : 1f;
+            s.viewX = ox;
+            s.viewKnown = true;
+        }
         s.z = z;
         s.paper = book.paper;
         s.canvas = book.canvas;

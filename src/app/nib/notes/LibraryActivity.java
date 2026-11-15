@@ -269,10 +269,15 @@ public final class LibraryActivity extends Activity {
 
         handleIncoming(getIntent());
 
-        // dev convenience: `am start ... --ez reopen true` jumps back into the last notebook
-        String last = prefs.getString("lastDir", null);
+        // Reopen where you left off: the app was left from a notebook (not by going back to this screen), so starting it
+        // again goes straight back there (the editor restores its tabs, split and each notebook's page and zoom).
+        // `am start ... --ez reopen true` does the same on demand (testing).
+        String last = prefs.getString("tabCur", null);
+        if (last == null || !new File(last).isDirectory()) last = prefs.getString("lastDir", null);
+        boolean launcher = Intent.ACTION_MAIN.equals(getIntent().getAction());
+        boolean resume = launcher && prefs.getBoolean("resumeEditor", false) && prefs.getBoolean("reopenLast", true);
         // only on a fresh launch: a theme change recreates this screen with the same intent, and must not open a notebook
-        if (b == null && getIntent().getBooleanExtra("reopen", false) && last != null && new File(last).isDirectory()) {
+        if (b == null && (resume || getIntent().getBooleanExtra("reopen", false)) && last != null && new File(last).isDirectory()) {
             getIntent().removeExtra("reopen");
             open(new File(last));
         }
