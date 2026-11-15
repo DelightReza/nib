@@ -114,8 +114,11 @@ final class Gl {
     boolean hasSurface() { return surf != EGL14.EGL_NO_SURFACE; }
 
     /** Request single-buffer (front) or normal mode. Takes effect on the next swap(). */
+    /** Testing: false makes front-buffer requests do nothing, like a driver that offers the mode but never enters it. */
+    boolean frontHonoured = true;
+
     void requestFront(boolean on) {
-        if (!mutable || !hasSurface()) return;
+        if (!mutable || !hasSurface() || !frontHonoured) return;
         if (on) {
             EGL14.eglSurfaceAttrib(dpy, surf, EGL14.EGL_RENDER_BUFFER, EGL14.EGL_SINGLE_BUFFER);
             EGL14.eglSurfaceAttrib(dpy, surf, EGL_FRONT_BUFFER_AUTO_REFRESH_ANDROID, EGL14.EGL_TRUE);

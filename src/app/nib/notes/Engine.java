@@ -202,7 +202,8 @@ final class Engine implements Choreographer.FrameCallback {
     private float downDelay;
     private long lastHud;
     private float stPmin, stPmax, stPsum, stStep, stLx, stLy;
-    private int stN, stFront, stSwap;
+    private int stN, stFront, stSwap, stFrames, stScenes;
+    private long stFrameNs, stFrameMax;
     private long stT0;
 
     Engine(Context c, File dir, Listener l) {
@@ -222,6 +223,11 @@ final class Engine implements Choreographer.FrameCallback {
             predictor = new MotionPredictor(app);
             gl = new Gl();
             gl.init();
+            // diagnostics (no UI): "frontTest" 1 = behave as if the GPU has no front-buffer mode, 2 = as if it never enters it
+            int ft = app.getSharedPreferences("nib", Context.MODE_PRIVATE).getInt("frontTest", 0);
+            if (ft == 1) gl.mutable = false;
+            if (ft == 2) gl.frontHonoured = false;
+            if (ft != 0) Log.w(Gl.TAG, "front buffer test mode " + ft);
             book = Notebook.load(dir);
             if (book.loadFailed) toast("Part of this notebook couldn't be read · the original file was kept, nothing is lost yet");
             gl.clipX0 = book.canvas ? -1e9f : 0f;
@@ -907,6 +913,7 @@ final class Engine implements Choreographer.FrameCallback {
             float cx = ox + W / (2 * z), cy = oy + H / (2 * z);
             gl.setSurface(s, w, hh);
             dropGpu();
+            frontRefused = 0; // a new surface may allow it
             setFront(false, "surface changed");
             W = w;
             H = hh;
@@ -1118,6 +1125,13 @@ final class Engine implements Choreographer.FrameCallback {
     public void doFrame(long frameTimeNanos) {
         frameRequested = false;
         if (gl == null || !gl.hasSurface() || book == null) return;
+        long t0 = System.nanoTime();
+        try { frame(frameTimeNanos); } finally {
+            if (gest == G_INK) { long d = System.nanoTime() - t0; stFrames++; stFrameNs += d; stFrameMax = Math.max(stFrameMax, d); }
+        }
+    }
+
+    private void frame(long frameTimeNanos) {
         frameNo++;
         if (flinging) stepFling(frameTimeNanos);
         if (needRebuild) rebuild();
@@ -1136,8 +1150,10 @@ final class Engine implements Choreographer.FrameCallback {
             checkPage();
             if (dragging() || hasSel()) postSelection();
             if (flinging) requestFrame();
-        } else if (needCache || needPresent || (wantFront && !front)) {
+        } else if (needCache || needRebuild || !cacheValid()) {
             renderNow();
+        } else if (needPresent || (wantFront && !front && canFront())) {
+            present(); // the cache already holds the scene (and any new ink): just show it
         }
         evictTextures();
         if (hud) postStats();
@@ -1655,14 +1671,34 @@ final class Engine implements Choreographer.FrameCallback {
 
     /** Re-render the cache and present it (switching into front-buffer mode when allowed). */
     private void renderNow() {
+        if (gest == G_INK) stScenes++;
         if (needRebuild) rebuild();
         gl.setView(ox, oy, z);
         gl.noScissor();
         gl.bindCache();
         drawScene();
         needCache = false;
+        cacheOx = ox; cacheOy = oy; cacheZ = z; cacheW = W; cacheH = H;
         present();
     }
+
+    // ---- without front-buffer ink (a GPU that lacks it, or a system that won't switch to it) -----------------------
+    // Ink is still drawn into the cache piece by piece; each frame then only copies the cache to the screen. Redrawing
+    // the whole scene for every frame of a stroke (as before) made writing lag on such devices, worse on dense pages.
+
+    private float cacheOx = Float.NaN, cacheOy, cacheZ;
+    private int cacheW, cacheH;
+    /** Front-buffer requests this surface ignored; after a few, stop asking (each try cost an extra swap per frame). */
+    private int frontRefused;
+    private static final int FRONT_TRIES = 3;
+
+    /** The cache holds the scene for the current view. */
+    private boolean cacheValid() {
+        return !needCache && !needRebuild && ox == cacheOx && oy == cacheOy && z == cacheZ && W == cacheW && H == cacheH;
+    }
+
+    /** Front-buffer ink is possible here (the GPU offers it and the system hasn't kept refusing it). */
+    private boolean canFront() { return gl.mutable && frontRefused < FRONT_TRIES; }
 
     private void present() {
         needPresent = false;
@@ -1673,15 +1709,17 @@ final class Engine implements Choreographer.FrameCallback {
         if (front) {
             gl.flush();
         } else {
-            if (wantFront) gl.requestFront(true);
+            boolean ask = wantFront && canFront();
+            if (ask) gl.requestFront(true);
             gl.swap();
             boolean f = gl.isFront();
-            if (!f && wantFront && gl.mutable) {
+            if (!f && ask) {
                 gl.blit();
                 if (overlay) gl.drawSegs(gl.pred, 0, gl.pred.count, predMode);
                 gl.swap();
                 f = gl.isFront();
-                if (!f) Log.w(Gl.TAG, "front buffer request not honoured after 2 swaps");
+                if (!f && ++frontRefused >= FRONT_TRIES)
+                    Log.w(Gl.TAG, "front buffer requests not honoured " + FRONT_TRIES + " times: ink is drawn double-buffered on this surface");
             }
             if (f) {
                 // Just entered front-buffer mode: the buffer now on screen may still hold stale memory. Paint the
@@ -1984,7 +2022,9 @@ final class Engine implements Choreographer.FrameCallback {
                 stopFling();
                 gesturing = false;
                 if (hasSel() && tool != TOOL_LASSO) clearSelection(); // writing next to a shape just carries on
-                if (!front) renderNow(); // back into front-buffer mode before drawing
+                // ink is drawn into the cache, so it must hold this view; then back into front-buffer mode if we can
+                if (!cacheValid()) renderNow();
+                else if (!front && canFront()) present();
                 int btn = ev.getButtonState();
                 boolean erase = tt == MotionEvent.TOOL_TYPE_ERASER || tool == TOOL_ERASER || tempEraser
                         || (btn & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
@@ -2125,7 +2165,8 @@ final class Engine implements Choreographer.FrameCallback {
         pf = -1;
         snapped = false;
         stN = 0;
-        stFront = stSwap = 0;
+        stFront = stSwap = stFrames = stScenes = 0;
+        stFrameNs = stFrameMax = 0;
         stT0 = ev.getEventTime();
         predCur.setEmpty();
         predPrev.setEmpty();
@@ -2327,9 +2368,11 @@ final class Engine implements Choreographer.FrameCallback {
         penNear = SystemClock.uptimeMillis();
         long dur = Math.max(1, ev.getEventTime() - stT0);
         Log.i(Gl.TAG, String.format(Locale.US,
-                "stroke samples=%d kept=%d dur=%dms rate=%.0fHz step=%.1fpx pressure min=%.3f avg=%.3f max=%.3f zoom=%.0f%% drawn front=%d swap=%d%s",
+                "stroke samples=%d kept=%d dur=%dms rate=%.0fHz step=%.1fpx pressure min=%.3f avg=%.3f max=%.3f zoom=%.0f%% drawn front=%d swap=%d"
+                        + " frames=%d avg=%.1fms max=%.1fms full-redraws=%d%s",
                 stN, live.n, dur, stN * 1000f / dur, stN > 1 ? stStep / (stN - 1) : 0, stPmin, stPsum / Math.max(1, stN), stPmax,
-                z / fitZ * 100, stFront, stSwap, snapped ? " (shape)" : ""));
+                z / fitZ * 100, stFront, stSwap, stFrames, stFrames > 0 ? stFrameNs / 1e6 / stFrames : 0, stFrameMax / 1e6, stScenes,
+                snapped ? " (shape)" : ""));
         Notebook.Page p = book.pages.get(livePage);
         if (!snapped && dur < 260 && live.n > 0 && live.r - live.l < live.width + 6 && live.b - live.t < live.width + 6
                 && toggleTapeAt(live.x(0), live.y(0) + liveTop, true)) {
