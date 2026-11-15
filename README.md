@@ -116,3 +116,5 @@ Handwriting search uses Google ML Kit, which is not part of this repository; `to
 from Google's Maven repository, under the [ML Kit Terms of Service](https://developers.google.com/ml-kit/terms).
 
 Bundled fonts (Inter, Kalam, Baloo Paaji 2, Aref Ruqaa) are under the SIL Open Font License; see [`licenses/`](licenses).
+
+Cover patterns are from [Hero Patterns](https://heropatterns.com) by Steve Schoger, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); see [`licenses/`](licenses).

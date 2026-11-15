@@ -216,6 +216,7 @@ final class Engine implements Choreographer.FrameCallback {
     Engine(Context c, File dir, Listener l) {
         app = c.getApplicationContext();
         density = c.getResources().getDisplayMetrics().density;
+        palm = new PalmFilter(density);
         listener = l;
         this.dir = dir;
         thread.start();
@@ -908,12 +909,15 @@ final class Engine implements Choreographer.FrameCallback {
         });
     }
 
-    void insertImage(String name, int pxW, int pxH) {
+    void insertImage(String name, int pxW, int pxH) { insertImage(name, pxW, pxH, PW * 0.6f); }
+
+    /** Places an image from images/ in the middle of the view, at most maxW units wide (stickers: smaller). */
+    void insertImage(String name, int pxW, int pxH, float maxW) {
         h.post(() -> {
             if (book == null) return;
             int pg = currentPage();
             Notebook.Page p = book.pages.get(pg);
-            float w = Math.min(PW * 0.6f, pxW / 2f), hh = w * pxH / Math.max(1f, pxW);
+            float w = Math.min(maxW, pxW / 2f), hh = w * pxH / Math.max(1f, pxW);
             if (hh > p.h * 0.6f) { hh = p.h * 0.6f; w = hh * pxW / Math.max(1f, pxH); }
             float cx = canvas() ? ox + W / (2 * z) : Math.max(w / 2, Math.min(PW - w / 2, ox + W / (2 * z)));
             float cy = canvas() ? oy + H / (2 * z) : Math.max(hh / 2, Math.min(p.h - hh / 2, oy + H / (2 * z) - tops[pg]));
@@ -1108,6 +1112,7 @@ final class Engine implements Choreographer.FrameCallback {
             ox = pendingX;
             oy = tops[pendingPage] + pendingFrac * book.pages.get(pendingPage).h;
         } else if (pendingPage > 0 && pendingPage < tops.length) oy = tops[pendingPage] - topPad / z; // opened from a search hit
+        else if (coverOn()) oy = -Notebook.PH; // nothing saved: open at the cover, like a real notebook
         pendingPage = -1;
         pendingZ = 0;
         clampView();
@@ -1124,6 +1129,35 @@ final class Engine implements Choreographer.FrameCallback {
 
     private boolean canvas() { return book != null && book.canvas; }
 
+    // ---- cover: a page above page 1 showing the notebook's cover (Covers); not written on, not counted, not exported ----
+
+    private boolean coverOn() { return book != null && book.cover != null && !book.canvas; }
+
+    /** The notebook's cover changed (null = none). */
+    void setCover(String cover) {
+        h.post(() -> {
+            if (book == null) return;
+            book.cover = cover;
+            for (Iterator<Map.Entry<String, Tex>> it = texs.entrySet().iterator(); it.hasNext(); ) {
+                Map.Entry<String, Tex> e = it.next();
+                if (e.getKey().startsWith("cover:")) { gl.deleteTex(e.getValue().id); texBytes -= e.getValue().bytes; it.remove(); }
+            }
+            clampView();
+            needCache = true;
+            wantFront = true;
+            requestFrame();
+            notifyState();
+        });
+    }
+
+    private void drawCover() {
+        if (!coverOn() || oy >= 0) return;
+        final String cv = book.cover, title = book.title;
+        Tex t = tex("cover:" + cv + ":" + title.hashCode(), () -> Covers.bitmap(app, cv, title, 1200));
+        if (t != null) gl.tex(t.id, 0, -Notebook.PH, PW, Notebook.PH, 1);
+        else gl.page(0, -Notebook.PH, PW, Notebook.PH, 0, -Notebook.PH, Notebook.BG_BLANK, true, false); // until it's ready
+    }
+
     private float minZ() { return fitZ * (canvas() ? 0.1f : 0.45f); }
 
     private void clampView() {
@@ -1132,7 +1166,7 @@ final class Engine implements Choreographer.FrameCallback {
         float vw = W / z, vh = H / z;
         if (PW * z <= W) ox = (PW - vw) / 2;
         else ox = Math.max(-sidePad / z, Math.min(PW - vw + sidePad / z, ox));
-        float minY = -topPad / z, maxY = docH - vh + botPad / z;
+        float minY = -topPad / z - (coverOn() ? Notebook.PH : 0), maxY = docH - vh + botPad / z; // the cover sits above page 1
         if (maxY < minY) maxY = minY;
         oy = Math.max(minY, Math.min(maxY, oy));
     }
@@ -1532,6 +1566,7 @@ final class Engine implements Choreographer.FrameCallback {
         if (needRebuild || !inkCovers(pageAt(oy), pageAt(oy + H / z))) rebuild(); // on screen but not built (yet)
         gl.clear(deskColor);
         gl.resetXform();
+        drawCover();
         boolean hiRes = z > fitZ * 1.5f;
         for (int i = first; i <= last; i++) {
             Notebook.Page p = book.pages.get(i);
@@ -1545,6 +1580,16 @@ final class Engine implements Choreographer.FrameCallback {
                 if (lt != null) gl.tex(lt.id, 0, tops[i], PW, 380, 1);
                 Tex lb = tex("site:bot:" + pap + ":" + Math.round(ph), () -> Render.siteBand(pap, ph, false));
                 if (lb != null) gl.tex(lb.id, 0, tops[i] + ph - 260, PW, 220, 1);
+            }
+            RectF[] bands = p.pdf < 0 && !canvas() ? Render.labelBands(p.bg, p.h) : null;
+            if (bands != null) { // printed labels of the planner templates
+                final int pap = book.paper, bgv = p.bg;
+                final float ph = p.h;
+                for (int bi = 0; bi < bands.length; bi++) {
+                    final RectF r = bands[bi];
+                    Tex lt = tex("lbl:" + bgv + ":" + pap + ":" + bi + ":" + Math.round(ph), () -> Render.labelBand(bgv, pap, ph, r));
+                    if (lt != null) gl.tex(lt.id, r.left, tops[i] + r.top, r.width(), r.height(), 1);
+                }
             }
             if (p.pdf >= 0) {
                 final int idx = p.pdf;
@@ -2043,7 +2088,57 @@ final class Engine implements Choreographer.FrameCallback {
         panEvent(ev, a);
     }
 
+    // ---- palm rejection for finger / passive-stylus writing (PalmFilter decides; the writer becomes a 1-finger gesture)
+
+    private final PalmFilter palm;
+    private boolean palmOn = true;
+    private int[] pIds = new int[10];
+    private float[] pXs = new float[10], pYs = new float[10], pMaj = new float[10];
+
+    void setPalm(boolean on, boolean rightHanded) { h.post(() -> { palmOn = on; palm.rightHanded = rightHanded; }); }
+
+    private static boolean allFingers(MotionEvent ev) {
+        for (int i = 0; i < ev.getPointerCount(); i++) {
+            int t = ev.getToolType(i);
+            if (t != MotionEvent.TOOL_TYPE_FINGER && t != MotionEvent.TOOL_TYPE_UNKNOWN) return false;
+        }
+        return true;
+    }
+
     private void handle(MotionEvent ev, long recv) {
+        if (!fingerDraw || !palmOn || !allFingers(ev)) { handleTouch(ev, recv); return; }
+        int n = Math.min(ev.getPointerCount(), pIds.length);
+        for (int i = 0; i < n; i++) { pIds[i] = ev.getPointerId(i); pXs[i] = ev.getX(i); pYs[i] = ev.getY(i); pMaj[i] = ev.getTouchMajor(i); }
+        int r = palm.onEvent(ev.getActionMasked(), ev.getPointerId(ev.getActionIndex()), n, pIds, pXs, pYs, pMaj, ev.getEventTime());
+        if (r == PalmFilter.PASS) { handleTouch(ev, recv); return; }
+        if (r == PalmFilter.IGNORE) return;
+        MotionEvent we = writerEvent(ev, palm.writerId, palm.writeAction);
+        if (we == null) return;
+        try { handleTouch(we, recv); } finally { we.recycle(); }
+    }
+
+    /** The writing pointer alone, as a one-finger event (its historical samples kept); its size zeroed (it's no palm). */
+    private static MotionEvent writerEvent(MotionEvent ev, int id, int action) {
+        int idx = ev.findPointerIndex(id);
+        if (idx < 0) idx = 0;
+        MotionEvent.PointerProperties[] pp = {new MotionEvent.PointerProperties()};
+        pp[0].id = 0;
+        pp[0].toolType = MotionEvent.TOOL_TYPE_FINGER;
+        MotionEvent.PointerCoords[] pc = {new MotionEvent.PointerCoords()};
+        int hs = action == MotionEvent.ACTION_MOVE ? ev.getHistorySize() : 0;
+        if (hs > 0) ev.getHistoricalPointerCoords(idx, 0, pc[0]); else ev.getPointerCoords(idx, pc[0]);
+        pc[0].touchMajor = pc[0].touchMinor = 0;
+        MotionEvent out = MotionEvent.obtain(ev.getDownTime(), hs > 0 ? ev.getHistoricalEventTime(0) : ev.getEventTime(), action, 1, pp, pc,
+                ev.getMetaState(), ev.getButtonState(), 1f, 1f, ev.getDeviceId(), 0, ev.getSource(), ev.getFlags());
+        for (int h = 1; h <= hs; h++) {
+            if (h < hs) ev.getHistoricalPointerCoords(idx, h, pc[0]); else ev.getPointerCoords(idx, pc[0]);
+            pc[0].touchMajor = pc[0].touchMinor = 0;
+            out.addBatch(h < hs ? ev.getHistoricalEventTime(h) : ev.getEventTime(), pc, ev.getMetaState());
+        }
+        return out;
+    }
+
+    private void handleTouch(MotionEvent ev, long recv) {
         int a = ev.getActionMasked();
         if (a == MotionEvent.ACTION_DOWN) {
             int tt = ev.getToolType(0);
@@ -2062,6 +2157,11 @@ final class Engine implements Choreographer.FrameCallback {
                 selBegin(ev);
                 return;
             }
+            if (pen && !fingerGest && coverOn() && oy + ev.getY() / z < 0 && tool != TOOL_LASER) {
+                gest = G_IGNORE; // the pen doesn't write on the cover
+                return;
+            }
+            if (pen && fingerGest && coverOn() && oy + ev.getY() / z < 0) { gest = G_PAN; panBegin(ev); return; } // a finger scrolls it
             if (pen) {
                 stopFling();
                 gesturing = false;
@@ -3151,6 +3251,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void textTap(float sx, float sy) {
         float x = ox + sx / z, y = oy + sy / z;
+        if (coverOn() && y < 0) return; // the cover takes no text
         int pg = pageAt(y);
         Notebook.Page p = book.pages.get(pg);
         float py = y - tops[pg];

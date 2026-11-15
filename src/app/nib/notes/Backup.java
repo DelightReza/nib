@@ -71,6 +71,8 @@ final class Backup {
             if (dirs != null) for (File d : dirs) addDir(zip, d, d.getName() + "/");
             File fonts = Fonts.dir(c); // imported fonts, so restored notebooks keep their look
             if (fonts.isDirectory()) addDir(zip, fonts, Fonts.BACKUP_DIR);
+            File stickers = Stickers.dir(c); // the sticker library
+            if (stickers.isDirectory()) addDir(zip, stickers, Stickers.BACKUP_DIR);
             zip.putNextEntry(new ZipEntry(LIBRARY));
             zip.write(libraryJson(c).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             zip.closeEntry();
@@ -163,6 +165,10 @@ final class Backup {
                 if (e.isDirectory() || n.contains("..")) continue;
                 if (n.startsWith(Fonts.BACKUP_DIR)) {
                     Fonts.restoreFile(c, n.substring(Fonts.BACKUP_DIR.length()), zin);
+                    continue;
+                }
+                if (n.startsWith(Stickers.BACKUP_DIR)) {
+                    Stickers.restoreFile(c, n.substring(Stickers.BACKUP_DIR.length()), zin);
                     continue;
                 }
                 int slash = n.indexOf('/');

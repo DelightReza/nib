@@ -64,7 +64,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private static final float[] PEN_PRESETS = {1.5f, 2.6f, 4.6f}, HL_PRESETS = {14f, 22f, 36f};
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
-    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13;
+    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14;
     private File pendingSave; // exported PDF waiting for the user to pick where to save it
 
     private Engine engine;
@@ -213,6 +213,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setEraseOptions(holdErase, erasePreview);
         engine.setTaper(taper);
         engine.setZoomLimit(maxZoomPct / 100f);
+        engine.setPalm(prefs.getBoolean("palmReject", true), prefs.getBoolean("rightHand", true));
         pushLaser();
         pushTape();
     }
@@ -1013,6 +1014,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         p.add(Ui.actionRow(this, R.drawable.ic_text, "Handwriting tools", "To text language · convert as I write · beautify",
                 v -> { pop.dismiss(); showLassoPanel(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_template, canvas ? "Background" : "Page style", "Pattern and paper colour", v -> { pop.dismiss(); showStyle(anchor); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_book, "Cover", canvas ? "Shown on the notes screen" : "Design and colour · shown before page 1", v -> {
+            pop.dismiss();
+            final Doc d = cur;
+            Covers.showPicker(this, anchor, Notebook.meta(d.dir).getProperty("cover"), d.title, cv -> {
+                try { Notebook.setCover(d.dir, cv); } catch (java.io.IOException ex) { toast("Couldn't change the cover"); return; }
+                if (d.engine != null) d.engine.setCover(cv);
+            });
+        }));
         p.add(Ui.actionRow(this, R.drawable.ic_ruler, "Drawing scale", drawScale > 0 ? "1:" + drawScale + " · the ruler measures real lengths" : "None · the ruler measures the paper",
                 v -> { pop.dismiss(); showScale(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_share, "Export & share", "PDF or image", v -> { pop.dismiss(); showShare(anchor); }));
@@ -1062,7 +1071,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         moreToolsB.setVisibility(View.GONE);
         capTools.addView(moreToolsB);
         Ui.IconButton img = icon(R.drawable.ic_image, "Insert image");
-        img.setOnClickListener(v -> pickImage());
+        img.setOnClickListener(this::showInsert);
         capTools.addView(img);
         imgB = img;
         rulerB = new Ui.ToolDisc(this, R.drawable.ic_ruler, "Ruler", false);
@@ -1464,6 +1473,68 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         startActivityForResult(new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*"), REQ_IMAGE);
     }
 
+    // ---- stickers: an app-wide library (Stickers) shown under the image button ----------------------------------
+
+    private void showInsert(View anchor) {
+        Ui.Popover p = newPop(360);
+        p.add(Ui.actionRow(this, R.drawable.ic_image, "Photo or image", "From your gallery", v -> { pop.dismiss(); pickImage(); }));
+        p.section("Stickers");
+        java.util.List<File> all = Stickers.list(this);
+        if (all.isEmpty()) {
+            TextView none = Ui.text(this, "Import PNG images or a .zip sticker pack once, then place them on any page", 12.5f,
+                    Ui.color(this, R.color.on_surface_variant), null);
+            none.setPadding(0, 0, 0, Ui.dp(this, 6));
+            p.add(none);
+        } else {
+            Ui.Grid g = new Ui.Grid(this, 52, 8);
+            for (File f : all) {
+                ImageView iv = new ImageView(this);
+                iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                iv.setPadding(Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 4), Ui.dp(this, 4));
+                iv.setBackground(Ui.ripple(this, Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 8)), Ui.dp(this, 8)));
+                iv.setLayoutParams(new ViewGroup.LayoutParams(-1, Ui.dp(this, 56)));
+                iv.setContentDescription("Sticker");
+                bg.execute(() -> { Bitmap b = Stickers.thumb(f, Ui.dp(this, 96)); ui.post(() -> iv.setImageBitmap(b)); });
+                iv.setOnClickListener(v -> { pop.dismiss(); placeSticker(f); });
+                iv.setOnLongClickListener(v -> {
+                    new android.app.AlertDialog.Builder(this).setTitle("Remove this sticker?")
+                            .setMessage("It goes from your sticker library. Pages it's already on keep it.")
+                            .setPositiveButton("Remove", (d, w) -> { f.delete(); pop.dismiss(); showInsert(anchor); })
+                            .setNegativeButton("Cancel", null).show();
+                    return true;
+                });
+                g.addView(iv);
+            }
+            p.add(g);
+        }
+        p.add(Ui.actionRow(this, R.drawable.ic_import, "Import stickers", "Images or a .zip pack · long-press a sticker to remove it", v -> {
+            pop.dismiss();
+            stickerAnchor = anchor;
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                    .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "application/zip"})
+                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true), REQ_STICKERS);
+        }));
+        p.show(anchor);
+    }
+
+    private View stickerAnchor;
+
+    private void placeSticker(File f) {
+        final Engine target = engine;
+        bg.execute(() -> {
+            try {
+                Object[] r = Stickers.place(f, target.dir);
+                if (r == null) throw new java.io.IOException("unreadable");
+                ui.post(() -> {
+                    target.insertImage((String) r[0], (Integer) r[1], (Integer) r[2], 160f);
+                    if (target == engine) { tool = Engine.TOOL_LASSO; applyTool(); }
+                });
+            } catch (java.io.IOException e) {
+                ui.post(() -> toast("Couldn't place that sticker"));
+            }
+        });
+    }
+
     private void toggleFinger() {
         fingerDraw = !fingerDraw;
         saveOptions();
@@ -1518,7 +1589,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                     commitTextEdit(); tool = Engine.TOOL_LASER; applyTool();
                 }));
         if (imgB.getVisibility() != View.VISIBLE)
-            p.add(Ui.actionRow(this, R.drawable.ic_image, "Insert image", null, v -> { pop.dismiss(); pickImage(); }));
+            p.add(Ui.actionRow(this, R.drawable.ic_image, "Image or sticker", null, v -> { pop.dismiss(); showInsert(anchor); }));
         if (rulerB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_ruler, "Ruler",
                 ruler.getVisibility() == View.VISIBLE ? "On · tap to put it away" : "Off · straight lines along its edge", v -> { pop.dismiss(); toggleRuler(); }));
         if (fingerB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_touch, "Write with finger",
@@ -2370,6 +2441,13 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 shapeSnap, v -> { shapeSnap = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Write with finger", "Fingers write like the pen; two fingers scroll and zoom. Also in the tool bar (hand button)",
                 fingerDraw, v -> { fingerDraw = v; saveOptions(); }));
+        col.addView(Ui.switchRow(this, "Palm rejection", "When writing with a finger or a rubber-tip stylus, your hand can rest on the screen: Nib keeps the tip, ignores the palm",
+                prefs.getBoolean("palmReject", true), v -> { prefs.edit().putBoolean("palmReject", v).apply(); pushOptions(); }));
+        TextView wh = Ui.text(this, "Writing hand", 14.5f, Ui.color(this, R.color.on_surface), null);
+        wh.setPadding(0, Ui.dp(this, 6), 0, Ui.dp(this, 8));
+        col.addView(wh);
+        col.addView(Ui.segmented(this, new String[]{"Right", "Left"}, prefs.getBoolean("rightHand", true) ? 0 : 1,
+                i -> { prefs.edit().putBoolean("rightHand", i == 0).apply(); pushOptions(); }));
         col.addView(Ui.switchRow(this, "Hide tools while writing", "The floating bars fade while the pen is on the page",
                 autoHide, v -> { autoHide = v; if (!v) showChrome.run(); prefs.edit().putBoolean("autoHide", v).apply(); }));
         col.addView(Ui.text(this, "Maximum zoom", 14.5f, Ui.color(this, R.color.on_surface), null));
@@ -3508,6 +3586,21 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (req == REQ_FONT) {
             if (res == RESULT_OK && data != null && data.getData() != null) fontPicked(data.getData());
             else { fontImportFor = null; fontImportEngine = null; afterFontImport = null; }
+            return;
+        }
+        if (req == REQ_STICKERS) {
+            if (res != RESULT_OK || data == null) return;
+            java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
+            if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
+            else if (data.getData() != null) uris.add(data.getData());
+            toast("Adding stickers…");
+            bg.execute(() -> {
+                int n = Stickers.importUris(this, uris);
+                ui.post(() -> {
+                    toast(n == 0 ? "No images found to add" : "Added " + n + (n == 1 ? " sticker" : " stickers"));
+                    if (n > 0 && stickerAnchor != null && stickerAnchor.isAttachedToWindow()) showInsert(stickerAnchor);
+                });
+            });
             return;
         }
         if (req != REQ_IMAGE || res != RESULT_OK || data == null || data.getData() == null) return;

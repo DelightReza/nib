@@ -1,0 +1,8 @@
+Cover patterns (res/drawable/hp_*.xml)
+
+Hero Patterns by Steve Schoger — https://heropatterns.com
+Licensed under the Creative Commons Attribution 4.0 International License (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+The SVG path data was taken from the hero-patterns npm package (2.1.0, by Alec Lomas, MIT licensed code that
+bundles the patterns) and converted to Android vector drawables; the shapes are unchanged.

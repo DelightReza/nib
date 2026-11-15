@@ -34,6 +34,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.FileOutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -322,19 +323,40 @@ public final class LibraryActivity extends Activity {
     private LinearLayout contentCol;
     private TextView newButton;
 
+    /** New: a sheet to choose name, notebook or canvas, page style, paper and cover first (NewNotebookSheet). */
     private void showNew(View anchor) {
-        PopupMenu pm = new PopupMenu(this, anchor);
-        pm.getMenu().add(0, 1, 0, "Notebook");
-        pm.getMenu().add(0, 3, 1, "Infinite canvas");
-        pm.getMenu().add(0, 2, 2, "Import PDF…");
-        pm.setOnMenuItemClickListener(it -> {
-            if (it.getItemId() == 1) newNotebook(false);
-            else if (it.getItemId() == 3) newNotebook(true);
-            else startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                    .addCategory(Intent.CATEGORY_OPENABLE).setType("application/pdf"), REQ_PDF);
-            return true;
-        });
-        pm.show();
+        String title = new SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(new Date());
+        // the page style chosen with "Use for new notebooks", else dotted; Graphite theme defaults to dark paper
+        Notebook.Page proto = new Notebook.Page(Notebook.BG_DOTS);
+        int paper = Ui.dark(this) ? Notebook.PAPER_DARK : Notebook.PAPER_WHITE;
+        try {
+            String def = prefs.getString("defStyle", null);
+            if (def != null) {
+                org.json.JSONObject o = new org.json.JSONObject(def);
+                proto = EditorActivity.lookOf(o);
+                paper = o.optInt("p", paper);
+            }
+        } catch (org.json.JSONException ignored) { }
+        org.json.JSONArray mine;
+        try { mine = new org.json.JSONArray(prefs.getString("myTpl", "[]")); } catch (org.json.JSONException e) { mine = new org.json.JSONArray(); }
+        NewNotebookSheet.show(this, title, proto, paper, mine,
+                () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/pdf"), REQ_PDF),
+                o -> prefs.edit().putString("defStyle", o.toString()).apply(),
+                this::createNotebook);
+    }
+
+    private void createNotebook(String title, boolean canvas, Notebook.Page proto, int paper, String cover) {
+        try {
+            String folder = isFolderFilter() ? filter : "";
+            File dir = Notebook.create(this, title, proto, folder, canvas, paper);
+            if (cover != null) {
+                Notebook.setCover(dir, cover);
+                prefs.edit().putString("view:" + dir.getName(), "0,0,1,0,0").apply(); // a new notebook opens at page 1, ready to write
+            }
+            open(dir);
+        } catch (Exception ex) {
+            Toast.makeText(this, "Could not create notebook", Toast.LENGTH_SHORT).show();
+        }
     }
 
     @Override
@@ -769,7 +791,13 @@ public final class LibraryActivity extends Activity {
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
         frame.addView(img, new FrameLayout.LayoutParams(-1, -1));
         File thumb = new File(e.dir, "thumb.png");
-        if (thumb.exists()) {
+        if (e.cover != null) { // a cover instead of the first page
+            final String cv = e.cover, title = e.title;
+            bg.execute(() -> {
+                Bitmap bm = Covers.bitmap(this, cv, title, 420);
+                ui.post(() -> img.setImageBitmap(bm));
+            });
+        } else if (thumb.exists()) {
             bg.execute(() -> {
                 Bitmap bm = BitmapFactory.decodeFile(thumb.getPath());
                 ui.post(() -> {
@@ -779,9 +807,11 @@ public final class LibraryActivity extends Activity {
                 });
             });
         }
-        View spine = new View(this);
-        spine.setBackgroundColor(spineColor(e));
-        frame.addView(spine, new FrameLayout.LayoutParams(Ui.dp(this, 6), -1, Gravity.START));
+        if (e.cover == null) { // a cover has its own spine
+            View spine = new View(this);
+            spine.setBackgroundColor(spineColor(e));
+            frame.addView(spine, new FrameLayout.LayoutParams(Ui.dp(this, 6), -1, Gravity.START));
+        }
         if (e.favorite && !trashed) {
             ImageView star = new ImageView(this);
             star.setImageResource(R.drawable.ic_star_filled);
@@ -1069,6 +1099,7 @@ public final class LibraryActivity extends Activity {
         m.add(0, 1, 0, "Open");
         m.add(0, 7, 0, "Open in split view");
         m.add(0, 2, 1, "Rename");
+        m.add(0, 8, 1, "Cover…");
         m.add(0, 3, 2, e.favorite ? "Remove from favourites" : "Add to favourites");
         SubMenu mv = m.addSubMenu(0, 0, 3, "Move to folder");
         mv.add(1, 10, 0, "No folder").setCheckable(true).setChecked(e.folder.isEmpty());
@@ -1089,6 +1120,11 @@ public final class LibraryActivity extends Activity {
                     startActivity(new Intent(this, EditorActivity.class).putExtra("dir", e.dir.getPath()).putExtra("split", true));
                 }
                 else if (id == 2) rename(e);
+                else if (id == 8) Covers.showPicker(this, anchor, e.cover, e.title, cv -> {
+                    try { Notebook.setCover(e.dir, cv); } catch (IOException ex) { Toast.makeText(this, "Couldn't change the cover", Toast.LENGTH_SHORT).show(); }
+                    e.cover = cv;
+                    refresh();
+                });
                 else if (id == 3) { Notebook.setMeta(e.dir, "favorite", Boolean.toString(!e.favorite)); refresh(); }
                 else if (id == 10) { Notebook.setMeta(e.dir, "folder", ""); refresh(); }
                 else if (id >= 100) { Notebook.setMeta(e.dir, "folder", fl.get(id - 100)); refresh(); }
@@ -1280,26 +1316,6 @@ public final class LibraryActivity extends Activity {
         if (Notebook.trash(this, e.dir)) Toast.makeText(this, "Moved to the trash · kept 30 days", Toast.LENGTH_SHORT).show();
         else Toast.makeText(this, "Could not delete", Toast.LENGTH_SHORT).show();
         refresh();
-    }
-
-    private void newNotebook(boolean canvas) {
-        try {
-            String title = new SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(new Date());
-            String folder = isFolderFilter() ? filter : "";
-            // the page style chosen with "Use for new notebooks", else dotted; Graphite theme defaults to dark paper
-            Notebook.Page proto = new Notebook.Page(Notebook.BG_DOTS);
-            int paper = Ui.dark(this) ? Notebook.PAPER_DARK : Notebook.PAPER_WHITE;
-            String def = prefs.getString("defStyle", null);
-            if (def != null) {
-                org.json.JSONObject o = new org.json.JSONObject(def);
-                proto = EditorActivity.lookOf(o);
-                paper = o.optInt("p", paper);
-            }
-            File dir = Notebook.create(this, title, proto, folder, canvas, paper);
-            open(dir);
-        } catch (Exception ex) {
-            Toast.makeText(this, "Could not create notebook", Toast.LENGTH_SHORT).show();
-        }
     }
 
     private void open(File dir) { open(dir, 0); }

@@ -23,9 +23,9 @@ import java.util.Properties;
 final class Notebook {
     static final float PW = 1000f, PH = 1414f;
     static final int BG_BLANK = 0, BG_LINED = 1, BG_GRID = 2, BG_DOTS = 3, BG_NARROW = 4, BG_CORNELL = 5, BG_MUSIC = 6,
-            BG_ENGINEERING = 7, BG_ISO = 8, BG_SITE = 9;
+            BG_ENGINEERING = 7, BG_ISO = 8, BG_SITE = 9, BG_GRAPH = 10, BG_FINE_DOTS = 11, BG_HEX = 12, BG_DAILY = 13, BG_WEEKLY = 14;
     static final String[] BG_NAMES = {"Blank", "Lined", "Grid", "Dotted", "Narrow lined", "Cornell notes", "Music staff",
-            "Engineering", "Isometric", "Site inspection"};
+            "Engineering", "Isometric", "Site inspection", "Graph 5 mm", "Fine dots", "Hexagon", "Daily planner", "Weekly planner"};
     static final int PAPER_WHITE = 0, PAPER_CREAM = 1, PAPER_DARK = 2;
     static final String[] PAPER_NAMES = {"White paper", "Cream paper", "Dark paper"};
     private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235, MAGIC6 = 0x4E494236, MAGIC7 = 0x4E494237;
@@ -190,6 +190,7 @@ final class Notebook {
 
     ArrayList<Page> pages = new ArrayList<>();
     String title = "Untitled", folder = "";
+    String cover; // Covers value ("design:colour"), null = none; kept in meta.properties, written by setCover only
     boolean favorite;
     boolean canvas; // infinite canvas: one unbounded page you can pan in every direction
     boolean loadFailed; // ink.bin couldn't be read in full (a copy of it was kept)
@@ -203,6 +204,7 @@ final class Notebook {
         Properties m = meta(dir);
         nb.title = m.getProperty("title", "Untitled");
         nb.folder = m.getProperty("folder", "");
+        nb.cover = m.getProperty("cover");
         nb.favorite = Boolean.parseBoolean(m.getProperty("favorite", "false"));
         nb.canvas = Boolean.parseBoolean(m.getProperty("canvas", "false"));
         nb.paper = Integer.parseInt(m.getProperty("paper", "0"));
@@ -279,6 +281,7 @@ final class Notebook {
         Notebook n = new Notebook();
         n.title = title;
         n.folder = folder;
+        n.cover = cover;
         n.favorite = favorite;
         n.canvas = canvas;
         n.paper = paper;
@@ -417,6 +420,13 @@ final class Notebook {
         tmp.renameTo(new File(dir, "meta.properties"));
     }
 
+    /** Sets or (null) removes a notebook's cover. */
+    static void setCover(File dir, String cover) throws IOException {
+        Properties m = meta(dir);
+        if (cover == null) m.remove("cover"); else m.setProperty("cover", cover);
+        writeMeta(dir, m);
+    }
+
     static void setMeta(File dir, String key, String value) throws IOException {
         Properties m = meta(dir);
         m.setProperty(key, value);
@@ -425,7 +435,7 @@ final class Notebook {
 
     static final class Entry {
         File dir;
-        String title, folder;
+        String title, folder, cover;
         boolean favorite, canvas;
         long modified, created, trashedAt;
         int pages;
@@ -487,6 +497,7 @@ final class Notebook {
             e.dir = d;
             e.title = m.getProperty("title", "Untitled");
             e.folder = m.getProperty("folder", "");
+            e.cover = m.getProperty("cover");
             e.favorite = Boolean.parseBoolean(m.getProperty("favorite", "false"));
             e.modified = parseLong(m.getProperty("modified"), d.lastModified());
             e.created = parseLong(m.getProperty("created"), e.modified);

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hero Patterns by Steve Schoger, heropatterns.com, CC BY 4.0 (see licenses/) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="32dp" android:height="64dp" android:viewportWidth="32" android:viewportHeight="64">
+  <path android:fillColor="#FF000000" android:fillType="evenOdd" android:pathData="M0 28h20V16h-4v8H4V4h28v28h-4V8H8v12h4v-8h12v20H0v-4zm12 8h20v4H16v24H0v-4h12V36zm16 12h-4v12h8v4H20V44h12v12h-4v-8zM0 36h8v20H0v-4h4V40H0v-4z"/>
+</vector>

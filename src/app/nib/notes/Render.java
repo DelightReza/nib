@@ -151,6 +151,88 @@ final class Render {
                 }
                 break;
             }
+            case Notebook.BG_GRAPH: {
+                float sp = 23.81f * k;
+                for (int i = 1; i * sp < PW; i++) {
+                    boolean major = i % 2 == 0;
+                    l.setColor(major ? c1 : c2);
+                    l.setStrokeWidth((major ? 1.6f : 1.1f) * bold);
+                    c.drawLine(i * sp, 0, i * sp, h, l);
+                }
+                for (int i = 1; i * sp < h; i++) {
+                    boolean major = i % 2 == 0;
+                    l.setColor(major ? c1 : c2);
+                    l.setStrokeWidth((major ? 1.6f : 1.1f) * bold);
+                    c.drawLine(0, i * sp, PW, i * sp, l);
+                }
+                break;
+            }
+            case Notebook.BG_FINE_DOTS: {
+                float sp = 11.905f * k;
+                l.setColor(c3);
+                for (float x = sp; x < PW; x += sp) for (float y = sp; y < h; y += sp) c.drawCircle(x, y, 1.1f * bold, l);
+                break;
+            }
+            case Notebook.BG_HEX: { // pointy-top hexagons, flat-to-flat F; each hex draws its three right-hand edges
+                float F = 36f * k, sd = F / (float) Math.sqrt(3);
+                l.setColor(c2);
+                l.setStrokeWidth(1.1f * bold);
+                float[] ang = {-90, -30, 30, 90};
+                for (int row = 0; row * 0.8660254f * F < h + F; row++) {
+                    float cy = row * 0.8660254f * F, off = (row & 1) == 1 ? F / 2 : 0;
+                    for (float cx = off - F; cx < PW + F; cx += F)
+                        for (int e = 0; e < 3; e++) {
+                            double a0 = Math.toRadians(ang[e]), a1 = Math.toRadians(ang[e + 1]);
+                            c.drawLine(cx + sd * (float) Math.cos(a0), cy + sd * (float) Math.sin(a0),
+                                    cx + sd * (float) Math.cos(a1), cy + sd * (float) Math.sin(a1), l);
+                        }
+                }
+                break;
+            }
+            case Notebook.BG_DAILY: {
+                l.setColor(c1);
+                l.setStrokeWidth(1.4f * bold);
+                Paint s = strokeOf(l);
+                c.drawLine(100, 84, 520, 84, l);
+                for (int i = 0; i < 7; i++) c.drawCircle(620 + i * 52, 72, 17, s);
+                for (int i = 0; i < 3; i++) {
+                    float yy = 195 + i * 45;
+                    c.drawLine(76, yy, 956, yy, l);
+                    c.drawRoundRect(44, yy - 22, 64, yy - 2, 2, 2, s);
+                }
+                float y0 = 370, y1 = h - 300, rh = (y1 - y0) / 17f;
+                Paint dash = new Paint(l);
+                dash.setColor(c2);
+                dash.setPathEffect(new android.graphics.DashPathEffect(new float[]{7, 7}, 40 % 14));
+                for (int j = 0; j <= 17; j++) {
+                    c.drawLine(40, y0 + j * rh, 960, y0 + j * rh, l);
+                    if (j < 17) c.drawLine(40, y0 + j * rh + rh / 2, 960, y0 + j * rh + rh / 2, dash);
+                }
+                c.drawLine(120, y0, 120, y1, l);
+                for (float y = h - 215; y < h - 30; y += 40) c.drawLine(40, y, 960, y, l);
+                plannerLabels(c, p.bg, nb.paper, h);
+                break;
+            }
+            case Notebook.BG_WEEKLY: {
+                l.setColor(c1);
+                l.setStrokeWidth(1.4f * bold);
+                c.drawLine(130, 84, 560, 84, l);
+                float y0 = 120, bh = (h - 40 - y0) / 4f;
+                Paint outer = strokeOf(l);
+                outer.setStrokeWidth(2f * bold);
+                c.drawRect(40, y0, 960, h - 40, outer);
+                c.drawLine(500, y0, 500, h - 40, l);
+                for (int j = 1; j < 4; j++) c.drawLine(40, y0 + j * bh, 960, y0 + j * bh, l);
+                Paint wl = new Paint(l);
+                wl.setColor(c2);
+                for (int j = 0; j < 4; j++)
+                    for (float iy = 60; iy < bh - 8; iy += 36) {
+                        c.drawLine(52, y0 + j * bh + iy, 488, y0 + j * bh + iy, wl);
+                        c.drawLine(512, y0 + j * bh + iy, 948, y0 + j * bh + iy, wl);
+                    }
+                plannerLabels(c, p.bg, nb.paper, h);
+                break;
+            }
             case Notebook.BG_SITE: {
                 l.setColor(c1);
                 l.setStrokeWidth(2f * bold);
@@ -188,6 +270,84 @@ final class Render {
         Paint s = new Paint(l);
         s.setStyle(Paint.Style.STROKE);
         return s;
+    }
+
+    // ---- planner labels: drawn into the page on the Canvas path; on screen, small transparent textures per band ------
+
+    private static final String[] WEEK_BOXES = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Notes"};
+
+    /** Where a planner's printed labels are (page units), so the GPU path can draw each as a small texture; null = none. */
+    static android.graphics.RectF[] labelBands(int bg, float h) {
+        if (bg == Notebook.BG_DAILY) {
+            float y1 = h - 300;
+            return new android.graphics.RectF[]{new android.graphics.RectF(0, 40, 1000, 362), new android.graphics.RectF(0, 362, 118, y1 + 4),
+                    new android.graphics.RectF(0, h - 262, 260, h - 222)};
+        }
+        if (bg == Notebook.BG_WEEKLY) {
+            float y0 = 120, bh = (h - 40 - y0) / 4f;
+            android.graphics.RectF[] r = new android.graphics.RectF[9];
+            r[0] = new android.graphics.RectF(0, 56, 140, 100);
+            for (int b = 0; b < 8; b++) {
+                float bx = b % 2 == 0 ? 40 : 500, by = y0 + (b / 2) * bh;
+                r[b + 1] = new android.graphics.RectF(bx, by, bx + 220, by + 44);
+            }
+            return r;
+        }
+        return null;
+    }
+
+    /** One label band as a transparent bitmap (2 px per unit), for the GPU path. */
+    static Bitmap labelBand(int bg, int paper, float h, android.graphics.RectF r) {
+        float k = 2f;
+        Bitmap b = Bitmap.createBitmap(Math.max(1, Math.round(r.width() * k)), Math.max(1, Math.round(r.height() * k)), Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        c.scale(k, k);
+        c.translate(-r.left, -r.top);
+        plannerLabels(c, bg, paper, h);
+        return b;
+    }
+
+    /** The printed text of the daily / weekly planner templates. */
+    static void plannerLabels(Canvas c, int bg, int paper, float h) {
+        int strong = paper == Notebook.PAPER_DARK ? 0xffc9ced8 : paper == Notebook.PAPER_CREAM ? 0xff4d4434 : 0xff3a4250;
+        int soft = paper == Notebook.PAPER_DARK ? 0xff8f97a6 : paper == Notebook.PAPER_CREAM ? 0xff8a7c63 : 0xff7a8396;
+        Paint t = new Paint(Paint.ANTI_ALIAS_FLAG);
+        if (bg == Notebook.BG_DAILY) {
+            t.setTypeface(Ui.font(400));
+            t.setTextSize(15);
+            t.setColor(soft);
+            c.drawText("Date", 44, 89, t);
+            t.setTextAlign(Paint.Align.CENTER);
+            t.setTypeface(Ui.font(600));
+            t.setColor(strong);
+            String[] days = {"M", "T", "W", "T", "F", "S", "S"};
+            for (int i = 0; i < 7; i++) c.drawText(days[i], 620 + i * 52, 77.5f, t);
+            t.setTextAlign(Paint.Align.LEFT);
+            t.setTextSize(18);
+            c.drawText("Top priorities", 44, 150, t);
+            c.drawText("Schedule", 44, 350, t);
+            c.drawText("Notes", 44, h - 232, t);
+            float y0 = 370, rh = (h - 300 - y0) / 17f;
+            t.setTypeface(Ui.font(400));
+            t.setTextSize(13);
+            t.setColor(soft);
+            t.setTextAlign(Paint.Align.RIGHT);
+            for (int j = 0; j < 17; j++) {
+                int hr = 6 + j;
+                String s = hr < 12 ? hr + " am" : hr == 12 ? "12 pm" : (hr - 12) + " pm";
+                c.drawText(s, 112, y0 + j * rh + 18, t);
+            }
+        } else if (bg == Notebook.BG_WEEKLY) {
+            t.setTypeface(Ui.font(400));
+            t.setTextSize(15);
+            t.setColor(soft);
+            c.drawText("Week of", 44, 89, t);
+            t.setTypeface(Ui.font(600));
+            t.setTextSize(16);
+            t.setColor(strong);
+            float y0 = 120, bh = (h - 40 - y0) / 4f;
+            for (int b = 0; b < 8; b++) c.drawText(WEEK_BOXES[b], (b % 2 == 0 ? 40 : 500) + 14, y0 + (b / 2) * bh + 30, t);
+        }
     }
 
     /** Printed labels of the site-inspection template: the header band (top) or the sign-off box (bottom). */
