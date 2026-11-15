@@ -63,6 +63,17 @@ public class PalmTest {
     p = new PalmTest(); for (int s = 0; s < 5; s++) { p.touch(0, 300, 500, TIP); p.move(0, 320, 500); p.lift(0); }
     p.out.clear(); p.touch(0, 300, 900, 45 * D); p.lift(0);
     check("learned tip size: 45 dp is a palm", p, "IGNORE");
+    // 10 index then middle finger side by side (level, to the right): scroll, not a palm
+    p = new PalmTest(); p.touch(0, 500, 1300, TIP); p.t += 30; p.touch(1, 580, 1290, TIP); p.move(0, 500, 1200); p.move(1, 580, 1190); p.lift(1); p.lift(0);
+    check("two fingers side by side: scroll", p, "WRITE_DOWN#0 PASS");
+    // 11 second finger lands 300 ms later, after the first drifted ~15 dp: still scroll
+    p = new PalmTest(); p.touch(0, 500, 1300, TIP); for (int i = 0; i < 5; i++) p.move(0, 500 + i * 10, 1300); p.t += 260;
+    p.touch(1, 250, 1000, TIP); p.move(0, 540, 1200); p.lift(1); p.lift(0);
+    check("late second finger after drift: scroll", p, "WRITE_DOWN#0 WRITE_MOVE#0 PASS");
+    // 12 a real stroke, then a small touch level with the tip: stray, the stroke goes on
+    p = new PalmTest(); p.touch(0, 300, 1000, TIP); for (int i = 0; i < 30; i++) p.move(0, 300 + i * 10, 1000);
+    p.touch(1, 700, 1010, TIP); p.move(0, 600, 1000); p.lift(0); p.lift(1);
+    check("small touch after a real stroke: ignored", p, "WRITE_DOWN#0 WRITE_MOVE#0 IGNORE WRITE_MOVE#0 WRITE_UP#0 IGNORE");
     System.out.println(fails == 0 ? "all passed" : fails + " failed");
     System.exit(fails == 0 ? 0 : 1);
   }

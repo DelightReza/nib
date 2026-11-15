@@ -14,8 +14,9 @@ package app.nib.notes;
  *  - size: a contact wider than palmSize() is a palm (learned from the writer's own tip size; 40 dp until then);
  *  - zone: a contact landing below and on the writing-hand side of the tip (or touching a known palm) is a palm;
  *  - palm first: the gesture waits in palm state; the next small contact clear of the palm becomes the writer;
- *  - tip first: a later palm is ignored and the stroke goes on; a small second touch clear of the zone within
- *    TWO_FINGER_MS of the start (and before the tip has moved) still means two-finger scroll, as before;
+ *  - tip first: a later palm is ignored and the stroke goes on; a small second touch clear of the zone (or roughly
+ *    level with the tip, like two fingers side by side) means two-finger scroll / zoom, as before, unless the tip has
+ *    already written a real stroke (then it's a stray touch and the stroke goes on);
  *  - retro-cancel: if the "tip" grows into a palm, or a big contact lands right next to it within LEAD_MS, it was the
  *    palm's leading edge: the stroke is cancelled before it's saved.
  */
@@ -24,7 +25,7 @@ final class PalmFilter {
     // actions (the same values as MotionEvent's, so Engine can pass them straight through)
     static final int DOWN = 0, UP = 1, MOVE = 2, CANCEL = 3, POINTER_DOWN = 5, POINTER_UP = 6;
 
-    static final long TWO_FINGER_MS = 120, LEAD_MS = 80, GROW_MS = 160;
+    static final long LEAD_MS = 80, GROW_MS = 160;
 
     private final float dp;
     boolean rightHanded = true;
@@ -39,7 +40,7 @@ final class PalmFilter {
     private int palms;
     private long writeStart;
     private float startX, startY, refX, refY, writerMax;
-    private boolean writerMoved;
+    private boolean writerTravelled; // the tip has gone far enough to be writing, not starting a scroll
     // the writer's tip size over recent strokes, to tell a palm from it
     private final float[] tips = new float[30];
     private int tipN;
@@ -77,8 +78,12 @@ final class PalmFilter {
                         state = PALM;
                         return write(CANCEL, writerId);
                     }
-                    if (big || inZone(xs[i], ys[i], refX, refY) || nearPalm(xs[i], ys[i])) { addPalm(actionId, xs[i], ys[i]); return IGNORE; }
-                    if (t - writeStart < TWO_FINGER_MS && !writerMoved) { state = PASSING; return PASS; } // two fingers: scroll
+                    boolean level = Math.abs(ys[i] - refY) < 45 * dp && Math.abs(xs[i] - refX) < 200 * dp;
+                    if (big || nearPalm(xs[i], ys[i]) || (!level && inZone(xs[i], ys[i], refX, refY))) {
+                        addPalm(actionId, xs[i], ys[i]);
+                        return IGNORE;
+                    }
+                    if (!writerTravelled) { state = PASSING; return PASS; } // two fingers: scroll / zoom
                     return IGNORE; // a stray touch while writing
                 }
                 if (state == PALM) {
@@ -101,7 +106,7 @@ final class PalmFilter {
                     state = PALM;
                     return write(CANCEL, writerId);
                 }
-                if (dist(xs[i], ys[i], startX, startY) > 8 * dp) writerMoved = true;
+                if (dist(xs[i], ys[i], startX, startY) > 40 * dp) writerTravelled = true;
                 refX = xs[i];
                 refY = ys[i];
                 return write(MOVE, writerId);
@@ -137,7 +142,7 @@ final class PalmFilter {
         startX = refX = x;
         startY = refY = y;
         writerMax = major;
-        writerMoved = false;
+        writerTravelled = false;
         return write(DOWN, id);
     }
 
@@ -147,7 +152,7 @@ final class PalmFilter {
         if (writerMax > 0 && !isPalm(writerMax)) tips[tipN++ % tips.length] = writerMax;
     }
 
-    private void reset() { state = IDLE; palms = 0; writerId = -1; writerMoved = false; }
+    private void reset() { state = IDLE; palms = 0; writerId = -1; writerTravelled = false; }
 
     private boolean isPalm(float major) { return major > palmSize(); }
 

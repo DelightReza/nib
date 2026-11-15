@@ -280,6 +280,9 @@ public final class LibraryActivity extends Activity {
         // only on a fresh launch: a theme change recreates this screen with the same intent, and must not open a notebook
         if (b == null && (resume || getIntent().getBooleanExtra("reopen", false)) && last != null && new File(last).isDirectory()) {
             getIntent().removeExtra("reopen");
+            // cleared before opening (and set again only when the editor is left normally), so a notebook that
+            // crashes while opening can't trap every later launch in that crash: the next start shows this screen
+            prefs.edit().putBoolean("resumeEditor", false).commit();
             open(new File(last));
         }
     }
@@ -842,7 +845,7 @@ public final class LibraryActivity extends Activity {
             ripple.setOnClickListener(v -> trashMenu(v, e));
             ripple.setOnLongClickListener(v -> { startSelecting(e); return true; });
         } else {
-            ripple.setOnClickListener(v -> open(e.dir, hit != null ? hit.page : 0));
+            ripple.setOnClickListener(v -> open(e.dir, hit != null ? hit.page : -1));
             ripple.setOnLongClickListener(v -> { startSelecting(e); return true; }); // hold to select
         }
         card.addView(frame);
@@ -1318,7 +1321,10 @@ public final class LibraryActivity extends Activity {
         refresh();
     }
 
-    private void open(File dir) { open(dir, 0); }
+    /** Opens where it was left. */
+    private void open(File dir) { open(dir, -1); }
+
+    /** page: a search hit's page (0-based), or -1 for where the notebook was left. */
 
     private void open(File dir, int page) {
         prefs.edit().putString("lastDir", dir.getPath()).apply();

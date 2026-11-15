@@ -1111,7 +1111,8 @@ final class Engine implements Choreographer.FrameCallback {
             z = fitZ * Math.max(minZ() / fitZ, Math.min(maxZoomRel, pendingZ));
             ox = pendingX;
             oy = tops[pendingPage] + pendingFrac * book.pages.get(pendingPage).h;
-        } else if (pendingPage > 0 && pendingPage < tops.length) oy = tops[pendingPage] - topPad / z; // opened from a search hit
+        } else if (pendingPage >= 0 && pendingPage < tops.length) // opened from a search hit
+            oy = pendingPage == 0 ? 0 : tops[pendingPage] - topPad / z;
         else if (coverOn()) oy = -Notebook.PH; // nothing saved: open at the cover, like a real notebook
         pendingPage = -1;
         pendingZ = 0;
@@ -1777,7 +1778,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     private float cacheOx = Float.NaN, cacheOy, cacheZ;
     private int cacheW, cacheH;
-    /** Front-buffer requests this surface ignored; after a few, stop asking (each try cost an extra swap per frame). */
+    /** Front-buffer requests this surface ignored in a row; after a few, stop asking (each try costs an extra swap). */
     private int frontRefused;
     private static final int FRONT_TRIES = 3;
 
@@ -1811,6 +1812,7 @@ final class Engine implements Choreographer.FrameCallback {
                     Log.w(Gl.TAG, "front buffer requests not honoured " + FRONT_TRIES + " times: ink is drawn double-buffered on this surface");
             }
             if (f) {
+                frontRefused = 0; // it does honour the mode: only refusals in a row count
                 // Just entered front-buffer mode: the buffer now on screen may still hold stale memory. Paint the
                 // whole page into it once, so later partial redraws (eraser ring, ink) never reveal the rest.
                 gl.noScissor();
@@ -1873,6 +1875,7 @@ final class Engine implements Choreographer.FrameCallback {
         Stroke[] s = new Stroke[64];
         int[] from = new int[64], to = new int[64];
         byte[] look = new byte[64];
+        boolean[] made = new boolean[64]; // segments were emitted for entry i (a stroke built lifted has none)
         int n;
         int gone; // segments of removed strokes still taking room
 
@@ -1880,25 +1883,30 @@ final class Engine implements Choreographer.FrameCallback {
 
         void reset() { pen.clear(); hl.clear(); n = 0; gone = 0; java.util.Arrays.fill(s, null); }
 
-        void free() { pen.free(); hl.free(); s = new Stroke[0]; from = to = new int[0]; look = new byte[0]; n = 0; gone = 0; }
+        void free() { pen.free(); hl.free(); s = new Stroke[0]; from = to = new int[0]; look = new byte[0]; made = new boolean[0]; n = 0; gone = 0; }
 
         void add(Stroke st, byte lk, int greyArgb) {
             if (n == s.length) {
                 int c = Math.max(64, n * 2);
                 s = Arrays.copyOf(s, c); from = Arrays.copyOf(from, c); to = Arrays.copyOf(to, c); look = Arrays.copyOf(look, c);
+                made = Arrays.copyOf(made, c);
             }
             SegBuf b = st.hl() ? hl : pen;
             int f = b.count;
             if (lk != LOOK_LIFTED) st.emitAll(0, b); // a lifted stroke is drawn by the selection; built when it comes back
-            s[n] = st; from[n] = f; to[n] = b.count; look[n] = lk;
+            s[n] = st; from[n] = f; to[n] = b.count; look[n] = lk; made[n] = lk != LOOK_LIFTED;
             if (lk == LOOK_GREY) b.recolor(f, b.count, greyArgb);
             n++;
         }
 
-        /** Entry i should now look lk; returns false if it can't be done in place (a lifted stroke coming back). */
+        /** Entry i should now look lk; returns false if it can't be done in place (a stroke never emitted coming back). */
         boolean setLook(int i, byte lk, int greyArgb) {
             if (look[i] == lk) return true;
-            if (look[i] == LOOK_LIFTED && lk != LOOK_GONE) return false; // never emitted: needs emitting where it is
+            if (!made[i]) { // built while lifted, so no segments: hiding it is free, showing it needs emitting
+                if (lk != LOOK_GONE && lk != LOOK_LIFTED) return false;
+                look[i] = lk;
+                return true;
+            }
             SegBuf b = s[i].hl() ? hl : pen;
             b.recolor(from[i], to[i], lk == LOOK_INK ? s[i].color : lk == LOOK_GREY ? greyArgb : SegBuf.HIDDEN);
             if (lk == LOOK_GONE) gone += to[i] - from[i];

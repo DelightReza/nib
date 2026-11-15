@@ -154,6 +154,9 @@ final class Covers {
     private static void heroTiles(Context ctx, Canvas c, int res, int argb, float W, float h, float k) {
         android.graphics.drawable.Drawable d = ctx.getDrawable(res);
         if (d == null) return;
+        // its own copy: covers are drawn on several threads at once, and tint, alpha and the vector's native
+        // render cache would otherwise be shared between them
+        d = d.mutate();
         float tw = d.getIntrinsicWidth() / ctx.getResources().getDisplayMetrics().density * HERO_SCALE; // tile, page units
         float th = d.getIntrinsicHeight() / ctx.getResources().getDisplayMetrics().density * HERO_SCALE;
         int bw = Math.max(1, Math.round(tw * k)), bh = Math.max(1, Math.round(th * k));

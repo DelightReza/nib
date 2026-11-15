@@ -123,6 +123,7 @@ final class NewNotebookSheet {
                 previews.get(i).setImageBitmap(preview(a, ch.look, ch.paper >= 0 && i >= Notebook.BG_NAMES.length ? ch.paper : paper[0]));
             }
         };
+        final LinearLayout[] paperSeg = {null}; // the Paper control below, so a template's paper shows there too
         for (int i = 0; i < choices.size(); i++) {
             final int k = i;
             LinearLayout tile = new LinearLayout(a);
@@ -143,7 +144,12 @@ final class NewNotebookSheet {
                 picked[0] = k;
                 Choice ch = choices.get(k);
                 look[0] = ch.look;
-                if (ch.paper >= 0) paper[0] = ch.paper;
+                if (ch.paper >= 0 && ch.paper != paper[0]) {
+                    paper[0] = ch.paper;
+                    int seg = Math.max(0, Math.min(2, ch.paper));
+                    if (paperSeg[0] != null) paperSeg[0].getChildAt(seg).callOnClick(); // selects it and redraws
+                    else redraw.run();
+                }
                 mark.run();
             });
             previews.add(iv);
@@ -156,7 +162,8 @@ final class NewNotebookSheet {
 
         // paper
         box.addView(caption(a, "Paper"));
-        box.addView(Ui.segmented(a, new String[]{"White", "Cream", "Dark"}, Math.max(0, Math.min(2, paper[0])), i -> { paper[0] = i; redraw.run(); }));
+        paperSeg[0] = Ui.segmented(a, new String[]{"White", "Cream", "Dark"}, Math.max(0, Math.min(2, paper[0])), i -> { paper[0] = i; redraw.run(); });
+        box.addView(paperSeg[0]);
 
         // cover
         coverBox.addView(Ui.switchRow(a, "Cover", "Shown on the notes screen and before page 1", true, on -> {

@@ -185,7 +185,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         panes[1].setVisibility(View.GONE);
         root.addView(paneRow, new FrameLayout.LayoutParams(-1, -1));
         buildSplitKnob();
-        restoreTabs(new File(dirPath), getIntent().getIntExtra("page", 0), getIntent().getBooleanExtra("split", false));
+        restoreTabs(new File(dirPath), getIntent().getIntExtra("page", -1), getIntent().getBooleanExtra("split", false));
         ruler = new Ruler(this, this);
         root.addView(ruler, new FrameLayout.LayoutParams(-1, -1));
         buildTopCapsules();
@@ -349,7 +349,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         InkView ink;
         SelectionView sel;
         Engine.State state;
-        int scale, page;
+        int scale;
+        int page;           // page to open at (a search hit, 0-based); -1: where it was left
         String title;
 
         Doc(File dir, int page, boolean lazy) {
@@ -365,9 +366,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             // the page fills the screen; the insets only let its ends scroll clear of the floating bars
             engine.setInsets(insetTop(), insetBottom());
             engine.setTheme(Ui.color(EditorActivity.this, R.color.desk), Ui.dark(EditorActivity.this) ? 0.45f : 0.11f);
-            if (page > 0) engine.openAtPage(page); // a search hit: that page
-            else restoreView(this);                 // else where it was left
-            page = 0;
+            if (page >= 0) { engine.openAtPage(page); engine.setZoomLock(savedZoomLock(this)); } // a search hit: that page
+            else restoreView(this);                                                              // else where it was left
+            page = -1;
             ink = new InkView(EditorActivity.this, engine);
             ink.penListener = EditorActivity.this::onPen;
             sel = new SelectionView(EditorActivity.this);
@@ -400,6 +401,12 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         prefs.edit().putString("view:" + d.dir.getName(), s.topPage + "," + s.topFrac + "," + s.zRel + "," + s.viewX + "," + (s.zoomLocked ? 1 : 0)).apply();
     }
 
+    /** The zoom lock saved with d's view (kept whichever way the notebook is opened). */
+    private boolean savedZoomLock(Doc d) {
+        String[] f = prefs.getString("view:" + d.dir.getName(), "").split(",");
+        return f.length > 4 && "1".equals(f[4]);
+    }
+
     private void restoreView(Doc d) {
         String v = prefs.getString("view:" + d.dir.getName(), null);
         if (v == null) return;
@@ -415,6 +422,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private TextView zoomPct;
     private ImageView zoomLock;
     private int maxZoomPct;
+    private boolean chipLocked; // the chip shows a lock (and so has no hide pending)
     private final Runnable hideZoomChip = () -> {
         if (zoomChip == null || (state != null && state.zoomLocked)) return;
         zoomChip.animate().alpha(0f).setDuration(200).withEndAction(() -> zoomChip.setVisibility(View.GONE)).start();
@@ -456,6 +464,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void setZoomChipLook(int pct, boolean locked) {
+        chipLocked = locked;
         zoomPct.setText(pct + "%");
         zoomLock.setImageResource(locked ? R.drawable.ic_lock : R.drawable.ic_lock_open);
         zoomLock.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, locked ? R.color.accent : R.color.icon)));
@@ -521,7 +530,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private Doc openDoc(File dir, int page) {
         Doc d = findDoc(dir);
         if (d != null) {
-            if (page > 0) { if (d.engine != null) d.engine.gotoPage(page); else d.page = page; }
+            if (page >= 0) { if (d.engine != null) d.engine.gotoPage(page); else d.page = page; }
             return d;
         }
         d = new Doc(dir, page, true);
@@ -536,7 +545,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             org.json.JSONArray a = new org.json.JSONArray(prefs.getString("tabs", "[]"));
             for (int i = 0; i < a.length() && docs.size() < 12; i++) {
                 File f = new File(a.getString(i));
-                if (new File(f, "ink.bin").exists() && !f.getPath().equals(want.getPath())) docs.add(new Doc(f, 0, true));
+                if (new File(f, "ink.bin").exists() && !f.getPath().equals(want.getPath())) docs.add(new Doc(f, -1, true));
             }
         } catch (Exception ignored) { }
         Doc w = openDoc(want, page);
@@ -823,6 +832,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void closeDoc(Doc d) {
         commitTextEdit();
         if (d.engine != null) {
+            saveView(d); // reopen where it was left, like leaving the app does
             d.engine.saveNow();
             Handwriting.indexLater(getApplicationContext(), d.dir);
         }
@@ -1456,7 +1466,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             boolean isTab = findDoc(e.dir) != null;
             String meta = (e.canvas ? "Canvas" : e.pages + (e.pages == 1 ? " page" : " pages")) + (isTab ? " · open in a tab" : "");
             View row = Ui.actionRow(this, e.canvas ? R.drawable.ic_maximize : R.drawable.ic_book, e.title, meta,
-                    v -> { pop.dismiss(); then.accept(openDoc(e.dir, 0)); });
+                    v -> { pop.dismiss(); then.accept(openDoc(e.dir, -1)); });
             if (isTab) list.addView(row, 0); else list.addView(row);
             shownN++;
         }
@@ -3682,7 +3692,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         renderTabs();
         if (zoomChip != null) {
             if (s.zoomLocked) showZoomChip(s.zoom, true); // a locked notebook always shows its lock
-            else if (zoomChip.getVisibility() == View.VISIBLE) setZoomChipLook(s.zoom, false);
+            else if (zoomChip.getVisibility() == View.VISIBLE) {
+                if (chipLocked) showZoomChip(s.zoom, false); // was a locked notebook's: now hides after a while
+                else setZoomChipLook(s.zoom, false);
+            }
         }
         boolean narrowW = root.getWidth() > 0 && root.getWidth() < Ui.dp(this, 520);
         pagesB.setVisibility(s.canvas || narrowW ? View.GONE : View.VISIBLE);
