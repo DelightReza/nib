@@ -334,6 +334,7 @@ final class Gl {
             + "out vec2 vP; flat out vec4 vSeg; flat out vec2 vRad; flat out vec4 vColor;\n"
             + "vec2 xf(vec2 p){ return (p-uXf.xy)*uXf.z+uXf.xy+uXt; }\n"
             + "void main(){\n"
+            + "  if(aColor==vec4(0.0)){ gl_Position=vec4(2.0,2.0,2.0,1.0); vP=vec2(0.0); vSeg=vec4(0.0); vRad=vec2(0.0); vColor=vec4(0.0); return; }\n" // SegBuf.HIDDEN
             + "  vec2 a=(xf(aSeg.xy)-uView.xy)*uView.z; vec2 b=(xf(aSeg.zw)-uView.xy)*uView.z;\n"
             + "  bool bx=aRad.y<0.0;\n" // chisel highlighter: a box (half sizes) swept along the segment
             + "  vec2 r=max(abs(aRad)*uXf.z*uView.z, vec2(0.6)); float R=(bx? length(r) : max(r.x,r.y))+1.5;\n"

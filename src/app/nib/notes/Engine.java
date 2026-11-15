@@ -906,15 +906,7 @@ final class Engine implements Choreographer.FrameCallback {
             boolean sizeChanged = w != W || hh != H;
             float cx = ox + W / (2 * z), cy = oy + H / (2 * z);
             gl.setSurface(s, w, hh);
-            gl.pen.lost();
-            gl.hl.lost();
-            gl.pred.lost();
-            gl.selPen.lost();
-            gl.selHl.lost();
-            gl.laser.lost();
-            for (Tex t : texs.values()) gl.deleteTex(t.id);
-            texs.clear();
-            texBytes = 0;
+            dropGpu();
             setFront(false, "surface changed");
             W = w;
             H = hh;
@@ -942,7 +934,10 @@ final class Engine implements Choreographer.FrameCallback {
     void surfaceDestroyed() {
         CountDownLatch done = new CountDownLatch(1);
         h.post(() -> {
-            if (gl != null) gl.dropSurface();
+            if (gl != null) {
+                if (gl.hasSurface()) dropGpu(); // a hidden tab or the app in the background keeps no ink or textures
+                gl.dropSurface();
+            }
             setFront(false, "surface destroyed");
             done.countDown();
         });
@@ -1041,6 +1036,7 @@ final class Engine implements Choreographer.FrameCallback {
             if (choreo != null) choreo.removeFrameCallback(this);
             if (gl != null) gl.release();
             io.shutdown();
+            inkAhead.shutdownNow();
             worker.execute(() -> { if (pdf != null) pdf.close(); });
             worker.shutdown();
             thread.quitSafely();
@@ -1472,9 +1468,10 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private void drawScene() {
+        int first = drawFirst(), last = drawLast();
+        if (needRebuild || !inkCovers(pageAt(oy), pageAt(oy + H / z))) rebuild(); // on screen but not built (yet)
         gl.clear(deskColor);
         gl.resetXform();
-        int first = Math.max(0, pageAt(oy) - 1), last = Math.min(tops.length - 1, pageAt(oy + H / z) + 1);
         boolean hiRes = z > fitZ * 1.5f;
         for (int i = first; i <= last; i++) {
             Notebook.Page p = book.pages.get(i);
@@ -1506,8 +1503,24 @@ final class Engine implements Choreographer.FrameCallback {
             gl.setLook(lastP.spacing, lastP.strength, lastP.lineColor, lastP.margins);
             gl.page(0, docH, PW, Notebook.PH, 0, docH, lastP.pdf >= 0 ? Notebook.BG_LINED : lastP.bg, true, true);
         }
+        // highlighter under ink: every page's highlighter, then the recent one, then every page's ink, then the recent ink
+        for (int i = first; i <= last; i++) {
+            PageInk pk = inks.get(book.pages.get(i));
+            if (pk == null || pk.hl.count == 0) continue;
+            gl.setXform(0, 0, 1, 0, tops[i]);
+            gl.drawSegs(pk.hl, 0, pk.hl.count, 1);
+        }
+        gl.resetXform();
         gl.drawSegs(gl.hl, 0, gl.hl.count, 1);
+        for (int i = first; i <= last; i++) {
+            PageInk pk = inks.get(book.pages.get(i));
+            if (pk == null || pk.pen.count == 0) continue;
+            gl.setXform(0, 0, 1, 0, tops[i]);
+            gl.drawSegs(pk.pen, 0, pk.pen.count, 0);
+        }
+        gl.resetXform();
         gl.drawSegs(gl.pen, 0, gl.pen.count, 0);
+        buildAhead();
         // tape goes over the ink it hides
         for (int i = first; i <= last; i++)
             for (Notebook.Item it : book.pages.get(i).items)
@@ -1714,7 +1727,97 @@ final class Engine implements Choreographer.FrameCallback {
         gl.flush();
     }
 
+    // ---- ink buffers: one per page near the screen ---------------------------------------------
+    //
+    // Each page's ink is emitted once, page-local, into its own pair of buffers and drawn with the page's top as
+    // a transform. Only pages around the view are built; the rest hold nothing. A change on a page is applied by
+    // walking its stroke list against what was built: strokes that are unchanged stay, removed ones are hidden in
+    // place, greyed (erase preview) or lifted (selected) ones are recoloured in place, and new ones are appended —
+    // so writing, erasing, selecting and undo cost what they touch, not what the notebook holds. A page is emitted
+    // again only when a stroke appears in the middle of its list (undo of an erase, a partial erase lifting), or
+    // when hidden segments outweigh the rest. gl.pen / gl.hl now hold just the live stroke, strokes written since
+    // the last sync, and the pieces a partial erase would leave (all in doc coordinates).
+
+    private static final byte LOOK_INK = 0, LOOK_GREY = 1, LOOK_LIFTED = 2, LOOK_GONE = 3;
+
+    /** The built ink of one page (page-local coordinates). */
+    private static final class PageInk {
+        final SegBuf pen = new SegBuf(4096), hl = new SegBuf(256);
+        Stroke[] s = new Stroke[64];
+        int[] from = new int[64], to = new int[64];
+        byte[] look = new byte[64];
+        int n;
+        int gone; // segments of removed strokes still taking room
+
+        int total() { return pen.count + hl.count; }
+
+        void reset() { pen.clear(); hl.clear(); n = 0; gone = 0; java.util.Arrays.fill(s, null); }
+
+        void free() { pen.free(); hl.free(); s = new Stroke[0]; from = to = new int[0]; look = new byte[0]; n = 0; gone = 0; }
+
+        void add(Stroke st, byte lk, int greyArgb) {
+            if (n == s.length) {
+                int c = Math.max(64, n * 2);
+                s = Arrays.copyOf(s, c); from = Arrays.copyOf(from, c); to = Arrays.copyOf(to, c); look = Arrays.copyOf(look, c);
+            }
+            SegBuf b = st.hl() ? hl : pen;
+            int f = b.count;
+            if (lk != LOOK_LIFTED) st.emitAll(0, b); // a lifted stroke is drawn by the selection; built when it comes back
+            s[n] = st; from[n] = f; to[n] = b.count; look[n] = lk;
+            if (lk == LOOK_GREY) b.recolor(f, b.count, greyArgb);
+            n++;
+        }
+
+        /** Entry i should now look lk; returns false if it can't be done in place (a lifted stroke coming back). */
+        boolean setLook(int i, byte lk, int greyArgb) {
+            if (look[i] == lk) return true;
+            if (look[i] == LOOK_LIFTED && lk != LOOK_GONE) return false; // never emitted: needs emitting where it is
+            SegBuf b = s[i].hl() ? hl : pen;
+            b.recolor(from[i], to[i], lk == LOOK_INK ? s[i].color : lk == LOOK_GREY ? greyArgb : SegBuf.HIDDEN);
+            if (lk == LOOK_GONE) gone += to[i] - from[i];
+            look[i] = lk;
+            return true;
+        }
+    }
+
+    private final IdentityHashMap<Notebook.Page, PageInk> inks = new IdentityHashMap<>();
+    /** Builds the ink of pages just outside the view ahead of time, so scrolling onto them doesn't stall. */
+    private final ExecutorService inkAhead = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "nib-ink-ahead");
+        t.setPriority(Thread.MIN_PRIORITY + 1);
+        return t;
+    });
+    private final java.util.Set<Notebook.Page> inkPending = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+
+    private int greyFor(Stroke s) {
+        boolean dk = book.paper == Notebook.PAPER_DARK;
+        return s.hl() ? (dk ? 0xff3a3d44 : 0xffe6e8ec) : (dk ? 0xff5a5f69 : 0xffc6cad2);
+    }
+
+    /** Pages drawn for the current view: the visible ones and one either side. */
+    private int drawFirst() { return Math.max(0, pageAt(oy) - 1); }
+
+    private int drawLast() { return Math.min(tops.length - 1, pageAt(oy + H / z) + 1); }
+
+    /** Pages whose ink is kept (and built ahead): two more either side of the drawn ones. */
+    private int keepFirst() { return Math.max(0, drawFirst() - 2); }
+
+    private int keepLast() { return Math.min(tops.length - 1, drawLast() + 2); }
+
     private void rebuild() {
+        long t0 = System.nanoTime();
+        int[] work = new int[2];
+        rebuildInk(work);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        if (ms >= 8 || work[1] > 0) {
+            long bytes = 0;
+            for (PageInk pk : inks.values()) bytes += pk.pen.bytes() + pk.hl.bytes();
+            Log.i(Gl.TAG, String.format(Locale.US, "ink sync %d ms: %d pages built, %d emitted in full, %d kept · %.1f MB",
+                    ms, work[0], work[1], inks.size(), bytes / 1048576f));
+        }
+    }
+
+    private void rebuildInk(int[] work) {
         needRebuild = false;
         gl.pen.clear();
         gl.hl.clear();
@@ -1722,21 +1825,25 @@ final class Engine implements Choreographer.FrameCallback {
         gl.selHl.clear();
         IdentityHashMap<Stroke, Boolean> sel = new IdentityHashMap<>();
         for (Stroke s : selStrokes) sel.put(s, Boolean.TRUE);
-        for (int i = 0; i < book.pages.size(); i++) {
-            float top = tops[i];
-            for (Stroke s : book.pages.get(i).strokes) {
-                if (gest == G_ERASE && (doomed.contains(s) || pieces.containsKey(s))) {
-                    boolean dk = book.paper == Notebook.PAPER_DARK;
-                    int grey = s.hl() ? (dk ? 0xff3a3d44 : 0xffe6e8ec) : (dk ? 0xff5a5f69 : 0xffc6cad2);
-                    s.withColor(grey).emitAll(top, s.hl() ? gl.hl : gl.pen); // greyed: goes when the pen lifts
-                    ArrayList<Stroke> ps = pieces.get(s);
-                    if (ps != null) for (Stroke q : ps) q.emitAll(top, q.hl() ? gl.hl : gl.pen);
-                    continue;
-                }
-                if (i == selPage && sel.containsKey(s)) s.emitAll(0, s.hl() ? gl.selHl : gl.selPen);
-                else s.emitAll(top, s.hl() ? gl.hl : gl.pen);
-            }
+        int n = book.pages.size();
+        int first = keepFirst(), last = keepLast(), vf = pageAt(oy), vl = pageAt(oy + H / z);
+        // pages on screen are built now; built pages nearby are brought up to date; the rest is left to inkAhead
+        for (int i = first; i <= last; i++) if ((i >= vf && i <= vl) || inks.containsKey(book.pages.get(i))) syncPage(i, sel, work);
+        // pages well away from the view give their memory back
+        java.util.Set<Notebook.Page> keep = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int i = first; i <= last; i++) keep.add(book.pages.get(i));
+        for (Iterator<Map.Entry<Notebook.Page, PageInk>> it = inks.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<Notebook.Page, PageInk> e = it.next();
+            if (!keep.contains(e.getKey())) { e.getValue().free(); it.remove(); }
         }
+        if (selPage >= 0 && selPage < n && !sel.isEmpty()) // in page order, like they were drawn on the page
+            for (Stroke s : book.pages.get(selPage).strokes) if (sel.containsKey(s)) s.emitAll(0, s.hl() ? gl.selHl : gl.selPen);
+        if (gest == G_ERASE) // what a partial erase would leave of the strokes it touched
+            for (int i = first; i <= last; i++)
+                for (Stroke s : book.pages.get(i).strokes) {
+                    ArrayList<Stroke> ps = pieces.get(s);
+                    if (ps != null) for (Stroke q : ps) q.emitAll(tops[i], q.hl() ? gl.hl : gl.pen);
+                }
         if (live != null) {
             SegBuf b = buf();
             liveFirst = b.count;
@@ -1744,6 +1851,103 @@ final class Engine implements Choreographer.FrameCallback {
             for (int k = 0; k + 2 < live.n; k++) live.emitInterval(k, live.n - 1, liveTop, b);
         }
         needCache = true;
+    }
+
+    /** Brings page i's built ink up to date with its stroke list (see the note above). */
+    private void syncPage(int i, IdentityHashMap<Stroke, Boolean> sel, int[] work) {
+        Notebook.Page p = book.pages.get(i);
+        PageInk pk = inks.get(p);
+        boolean fresh = pk == null;
+        if (fresh) { pk = new PageInk(); inks.put(p, pk); work[0]++; }
+        ArrayList<Stroke> list = p.strokes;
+        if (!fresh && !patchPage(pk, i, list, sel)) fresh = true;
+        if (!fresh && pk.gone > 4096 && pk.gone * 2 > pk.total()) fresh = true; // mostly holes: compact
+        if (fresh) {
+            if (inks.get(p) == pk && pk.n > 0) work[1]++;
+            pk.reset();
+            for (Stroke s : list) pk.add(s, lookOf(s, i, sel), greyFor(s));
+        }
+    }
+
+    private byte lookOf(Stroke s, int page, IdentityHashMap<Stroke, Boolean> sel) {
+        if (page == selPage && sel.containsKey(s)) return LOOK_LIFTED;
+        if (gest == G_ERASE && (doomed.contains(s) || pieces.containsKey(s))) return LOOK_GREY;
+        return LOOK_INK;
+    }
+
+    /** In-place update of a built page; false = emit it again in full. */
+    private boolean patchPage(PageInk pk, int page, ArrayList<Stroke> list, IdentityHashMap<Stroke, Boolean> sel) {
+        int j = 0, oldN = pk.n;
+        IdentityHashMap<Stroke, Integer> at = null; // built index of each stroke, made only when the lists part ways
+        for (int k = 0; k < list.size(); k++) {
+            Stroke s = list.get(k);
+            byte lk = lookOf(s, page, sel);
+            int idx = -1;
+            if (j < oldN && pk.s[j] == s) idx = j;
+            else if (j < oldN) {
+                if (at == null) { at = new IdentityHashMap<>(); for (int m = 0; m < oldN; m++) at.put(pk.s[m], m); }
+                Integer f = at.get(s);
+                if (f != null && f >= j) idx = f;
+            }
+            if (idx >= 0) {
+                for (int m = j; m < idx; m++) pk.setLook(m, LOOK_GONE, 0); // removed (or moved later in the list)
+                if (!pk.setLook(idx, lk, greyFor(s))) return false;
+                j = idx + 1;
+                continue;
+            }
+            if (lk == LOOK_LIFTED) continue; // new and selected: nothing to draw here yet
+            // a new stroke: everything after it in the list must draw after it, so what's left of the old order goes
+            for (int m = j; m < oldN; m++) pk.setLook(m, LOOK_GONE, 0);
+            j = oldN;
+            pk.add(s, lk, greyFor(s));
+        }
+        for (int m = j; m < oldN; m++) pk.setLook(m, LOOK_GONE, 0);
+        return true;
+    }
+
+    /** Hands the pages near the view that have no ink yet to inkAhead. */
+    private void buildAhead() {
+        for (int i = keepFirst(), last = keepLast(); i <= last; i++) {
+            Notebook.Page p = book.pages.get(i);
+            if (inks.containsKey(p) || p.strokes.isEmpty() || !inkPending.add(p)) continue;
+            final ArrayList<Stroke> list = new ArrayList<>(p.strokes); // strokes never change; the list may
+            try {
+                inkAhead.execute(() -> {
+                    PageInk pk = new PageInk();
+                    for (Stroke s : list) pk.add(s, LOOK_INK, 0);
+                    h.post(() -> {
+                        inkPending.remove(p);
+                        if (book == null || gl == null || !gl.hasSurface() || inks.containsKey(p)) return; // hidden tab: keep nothing
+                        int at = book.pages.indexOf(p);
+                        if (at < keepFirst() || at > keepLast()) return; // scrolled away meanwhile
+                        inks.put(p, pk);
+                        needRebuild = true; // the next sync checks it against the page as it is by then
+                    });
+                });
+            } catch (java.util.concurrent.RejectedExecutionException e) { inkPending.remove(p); return; } // released
+        }
+    }
+
+    /** Every page in [first, last] has built ink (else a sync is due before drawing). */
+    private boolean inkCovers(int first, int last) {
+        for (int i = first; i <= last; i++) if (!inks.containsKey(book.pages.get(i))) return false;
+        return true;
+    }
+
+    /** Frees all GPU memory this engine holds except what's needed to draw again (surface gone / changed). */
+    private void dropGpu() {
+        for (PageInk pk : inks.values()) pk.free();
+        inks.clear();
+        gl.pen.lost();
+        gl.hl.lost();
+        gl.pred.lost();
+        gl.selPen.lost();
+        gl.selHl.lost();
+        gl.laser.lost();
+        for (Tex t : texs.values()) gl.deleteTex(t.id);
+        texs.clear();
+        texBytes = 0;
+        needRebuild = true;
     }
 
     // ---- input -----------------------------------------------------------------------------

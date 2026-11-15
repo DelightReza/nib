@@ -86,6 +86,8 @@ final class Stroke {
         else buf.put(x0, y0, x1, y1, r0, r1, c);
     }
 
+    private static float len(float dx, float dy) { return (float) Math.sqrt(dx * dx + dy * dy); }
+
     float x(int i) { return p[4 * i]; }
     float y(int i) { return p[4 * i + 1]; }
     float rad(int i) { return p[4 * i + 3]; }
@@ -110,10 +112,11 @@ final class Stroke {
         float x0, y0, x3, y3;
         if (k > 0) { x0 = x(k - 1); y0 = y(k - 1); } else { x0 = 2 * x1 - x2; y0 = 2 * y1 - y2; }
         if (k + 2 <= last) { x3 = x(k + 2); y3 = y(k + 2); } else { x3 = 2 * x2 - x1; y3 = 2 * y2 - y1; }
-        float d01 = (float) Math.sqrt(Math.hypot(x1 - x0, y1 - y0)), d12 = (float) Math.sqrt(Math.hypot(x2 - x1, y2 - y1)),
-                d23 = (float) Math.sqrt(Math.hypot(x3 - x2, y3 - y2));
+        // plain sqrt, not Math.hypot: hypot is a slow library call on ART and this runs for every point of every stroke
+        float len = len(x2 - x1, y2 - y1);
+        float d01 = (float) Math.sqrt(len(x1 - x0, y1 - y0)), d12 = (float) Math.sqrt(len),
+                d23 = (float) Math.sqrt(len(x3 - x2, y3 - y2));
         float r1 = rad(k), r2 = rad(k + 1);
-        float len = (float) Math.hypot(x2 - x1, y2 - y1);
         int segs = Math.max(1, Math.min(24, (int) Math.ceil(len / 0.7f)));
         bl = Math.min(x1, x2); br = Math.max(x1, x2); bt = Math.min(y1, y2); bb = Math.max(y1, y2);
         float px = x1, py = y1, pr = r1;
