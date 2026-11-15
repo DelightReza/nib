@@ -1252,19 +1252,31 @@ final class Engine implements Choreographer.FrameCallback {
         else if (!hovering && hoverPt != null && !laserDown && laserMode != LASER_TRAIL_MODE && now - laserUpAt < LASER_TIP && (n == 0 || laserPts.get(n - 1)[2] < hoverPt[2])) { last = hoverPt; tipOnLine = true; }
         for (int k = 0; k < 3; k++) {
             float r = pass[k][0] * px, a0 = pass[k][1];
+            // each point's width follows its age, so neighbouring pieces meet at the same width (a smooth taper,
+            // not a string of beads); overlaps are taken care of by the MAX blend below
             if (laserMode != LASER_DOT) for (int i = 1; i < n; i++) {
                 float[] p0 = laserPts.get(i - 1), p1 = laserPts.get(i);
                 if (Float.isNaN(p0[0]) || Float.isNaN(p1[0])) continue;
-                float a = laserMode == LASER_INK ? a0 * inkA : a0 * Math.max(0f, 1f - (now - p1[2]) / (float) laserLen);
+                boolean ink = laserMode == LASER_INK;
+                float f0 = ink ? 1f : Math.max(0f, 1f - (now - p0[2]) / (float) laserLen);
+                float f1 = ink ? 1f : Math.max(0f, 1f - (now - p1[2]) / (float) laserLen);
+                float a = ink ? a0 * inkA : a0 * f1;
                 if (a <= 0.01f) continue;
-                b.put(p0[0], p0[1], p1[0], p1[1], laserMode == LASER_INK ? r : r * 0.8f, r, ((int) (a * 255) << 24) | col[k]);
+                b.put(p0[0], p0[1], p1[0], p1[1], ink ? r : r * (0.45f + 0.55f * f0), ink ? r : r * (0.45f + 0.55f * f1),
+                        ((int) (a * 255) << 24) | col[k]);
             }
             if (last != null && tipOnLine && tipA > 0) {
                 float tr = r * (k == 0 ? 1.6f : 1.5f);
                 b.put(last[0], last[1], last[0], last[1], tr, tr, ((int) (a0 * tipA * 255) << 24) | col[k]);
             }
         }
-        gl.drawSegs(b, 0, b.count, 0);
+        // drawn into a transparent overlay with MAX blending, then laid over the page: where the pieces' round ends
+        // overlap, the glow no longer doubles up into darker dots
+        gl.bindOverlay();
+        gl.drawSegs(b, 0, b.count, 4);
+        gl.bindWindow();
+        gl.noScissor();
+        gl.blitOverlay();
         if (laserActive()) requestFrame();
         else { wantFront = true; needPresent = true; requestFrame(); } // back to front-buffer inking
     }

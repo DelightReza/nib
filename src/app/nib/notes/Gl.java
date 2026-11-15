@@ -51,6 +51,7 @@ final class Gl {
     }
     private int tView, tSize, tRect, tXf, tXt, tTex;
     private int fbo, tex;
+    private int ovFbo, ovTex; // transparent overlay the laser is drawn into (MAX blend: overlaps don't add up)
     final SegBuf pen = new SegBuf(), hl = new SegBuf(), pred = new SegBuf(), selPen = new SegBuf(), selHl = new SegBuf(), laser = new SegBuf();
     /** Ink is hidden outside [clipX0, clipX1] (the page's left/right edges; unbounded on an infinite canvas). */
     float clipX0 = 0, clipX1 = Notebook.PW;
@@ -151,6 +152,11 @@ final class Gl {
             glDeleteFramebuffers(1, new int[]{fbo}, 0);
             glDeleteTextures(1, new int[]{tex}, 0);
         }
+        if (ovFbo != 0) {
+            glDeleteFramebuffers(1, new int[]{ovFbo}, 0);
+            glDeleteTextures(1, new int[]{ovTex}, 0);
+            ovFbo = ovTex = 0; // made on first use
+        }
         int[] t = new int[1];
         glGenTextures(1, t, 0);
         tex = t[0];
@@ -168,6 +174,42 @@ final class Gl {
     }
 
     void bindCache() { glBindFramebuffer(GL_FRAMEBUFFER, fbo); glViewport(0, 0, W, H); }
+
+    /** Binds the overlay and clears it to transparent (made the first time, window-sized). */
+    void bindOverlay() {
+        if (ovFbo == 0) {
+            int[] t = new int[1];
+            glGenTextures(1, t, 0);
+            ovTex = t[0];
+            glBindTexture(GL_TEXTURE_2D, ovTex);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, W, H);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glGenFramebuffers(1, t, 0);
+            ovFbo = t[0];
+            glBindFramebuffer(GL_FRAMEBUFFER, ovFbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ovTex, 0);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, ovFbo);
+        glViewport(0, 0, W, H);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+    /** Draws the overlay (premultiplied) over whatever is bound. */
+    void blitOverlay() {
+        if (ovTex == 0) return;
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(blitProg);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, ovTex);
+        glUniform1i(bTex, 0);
+        bindQuad();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
 
     void bindWindow() { glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, W, H); }
 
@@ -288,6 +330,8 @@ final class Gl {
         glEnable(GL_BLEND);
         if (mode == 1) {
             glBlendEquation(darkPaper ? GL_MAX : GL_MIN);
+        } else if (mode == 4) { // ink shading, but overlapping pieces keep the stronger value instead of adding up (laser)
+            glBlendEquation(GL_MAX);
         } else {
             glBlendEquation(GL_FUNC_ADD);
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
