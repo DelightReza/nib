@@ -152,6 +152,7 @@ public final class LibraryActivity extends Activity {
         int pad = Ui.dp(this, 30);
         col.setPadding(pad, Ui.dp(this, 30), pad, Ui.dp(this, 48));
         sv.addView(col);
+        contentCol = col;
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
         Ui.IconButton nav = new Ui.IconButton(this, R.drawable.ic_sidebar, "Folders and lists");
@@ -188,6 +189,8 @@ public final class LibraryActivity extends Activity {
         newB.setSingleLine(true);
         newB.setBackground(Ui.ripple(this, Ui.round(Ui.color(this, R.color.accent), Ui.dp(this, 22)), Ui.dp(this, 22)));
         newB.setOnClickListener(this::showNew);
+        newB.setContentDescription("New notebook");
+        newButton = newB;
         LinearLayout.LayoutParams nbl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 44));
         nbl.leftMargin = Ui.dp(this, 10);
         TextView selB = Ui.text(this, "Select", 15, Ui.color(this, R.color.accent), Ui.bold());
@@ -255,11 +258,12 @@ public final class LibraryActivity extends Activity {
         rootRow.addOnLayoutChangeListener((v, l, t, r, b2, ol, ot, or, ob) -> {
             if (r - l == or - ol) return;
             boolean narrow = r - l < Ui.dp(this, 600);
+            boolean phone = r - l < Ui.dp(this, 480);
             ui.post(() -> {
                 sidePanel.setVisibility(narrow ? View.GONE : View.VISIBLE);
                 sideRule.setVisibility(narrow ? View.GONE : View.VISIBLE);
                 navButton.setVisibility(narrow ? View.VISIBLE : View.GONE);
-
+                setCompact(phone);
             });
         });
 
@@ -273,6 +277,45 @@ public final class LibraryActivity extends Activity {
             open(new File(last));
         }
     }
+
+    /** Phone-width layout: tighter margins, a smaller title, New as a round + button, dates under the titles. */
+    private void setCompact(boolean on) {
+        if (on == compact && compactSet) return;
+        compactSet = true;
+        compact = on;
+        int pad = Ui.dp(this, on ? 16 : 30);
+        contentCol.setPadding(pad, Ui.dp(this, on ? 16 : 30), pad, Ui.dp(this, 48));
+        ((EditText) searchBox).setHint(on ? "Search" : "Search, even handwriting");
+        pageTitle.setTextSize(on ? 30 : 38);
+        if (on) {
+            newButton.setText("");
+            newButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_plus, 0, 0, 0);
+            newButton.setCompoundDrawablePadding(0);
+            newButton.setGravity(Gravity.CENTER);
+            newButton.setPadding(Ui.dp(this, 10), 0, Ui.dp(this, 10), 0);
+            newButton.setLayoutParams(sized(newButton, Ui.dp(this, 44)));
+        } else {
+            newButton.setText("New");
+            newButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_nib, 0, 0, 0);
+            newButton.setCompoundDrawablePadding(Ui.dp(this, 7));
+            newButton.setGravity(Gravity.CENTER_VERTICAL);
+            newButton.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 18), 0);
+            newButton.setLayoutParams(sized(newButton, android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        newButton.setTooltipText(on ? "New" : null);
+        updatePicked();
+        fillGrid(); // cards put the date under the title
+    }
+
+    private static LinearLayout.LayoutParams sized(View v, int w) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams((LinearLayout.LayoutParams) v.getLayoutParams());
+        lp.width = w;
+        return lp;
+    }
+
+    private boolean compact, compactSet;
+    private LinearLayout contentCol;
+    private TextView newButton;
 
     private void showNew(View anchor) {
         PopupMenu pm = new PopupMenu(this, anchor);
@@ -592,9 +635,13 @@ public final class LibraryActivity extends Activity {
         for (Notebook.Entry e : shown) grid.addView(card(e, trash));
     }
 
-    private static String when(long t) {
+    private static String when(long t) { return when(t, false); }
+
+    /** short: "5 min. ago" instead of "5 minutes ago" (narrow cards). */
+    private static String when(long t, boolean shortForm) {
         long now = System.currentTimeMillis();
-        return now - t < 60_000 ? "Just now" : DateUtils.getRelativeTimeSpanString(t, now, DateUtils.MINUTE_IN_MILLIS).toString();
+        return now - t < 60_000 ? "Just now" : DateUtils.getRelativeTimeSpanString(t, now, DateUtils.MINUTE_IN_MILLIS,
+                shortForm ? DateUtils.FORMAT_ABBREV_RELATIVE : 0).toString();
     }
 
     private void emptyTrash() {
@@ -773,7 +820,8 @@ public final class LibraryActivity extends Activity {
         t.setEllipsize(android.text.TextUtils.TruncateAt.END);
         tr.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
         TextView w = Ui.text(this, trashed ? daysLeft(e) : when(e.modified), small ? 11 : 12.5f, Ui.color(this, R.color.on_surface_variant), null);
-        if (small && !trashed) w.setVisibility(View.GONE); // room for the title
+        boolean dateBelow = compact && cardSize() == 1 && !trashed; // phone, two narrow columns: the date moves to the line below
+        if ((small && !trashed) || dateBelow) w.setVisibility(View.GONE); // room for the title
         w.setPadding(Ui.dp(this, 8), 0, 0, 0);
         tr.addView(w);
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(-1, -2);
@@ -781,6 +829,7 @@ public final class LibraryActivity extends Activity {
         card.addView(tr, tl);
         String meta = e.canvas ? "Canvas" : e.pages + (e.pages == 1 ? " page" : " pages");
         if (!e.folder.isEmpty() && !filter.equals(e.folder)) meta = (isFolderFilter() ? e.folder.substring(Math.min(e.folder.length(), filter.length() + 1)) : leaf(e.folder)).replace("/", " › ") + " · " + meta;
+        if (dateBelow) meta = meta + " · " + when(e.modified, true);
         if (hit != null) meta = "p. " + (hit.page + 1) + " · " + hit.snippet; // matched in the handwriting
         TextView mt = Ui.text(this, meta, small ? 11.5f : 12.5f, Ui.color(this, R.color.on_surface_variant), null);
         mt.setSingleLine(true);
@@ -828,7 +877,7 @@ public final class LibraryActivity extends Activity {
     }
 
     private void updatePicked() {
-        if (pickedLabel != null) pickedLabel.setText(picked.isEmpty() ? "Select notebooks" : picked.size() + " selected");
+        if (pickedLabel != null) pickedLabel.setText(picked.isEmpty() ? (compact ? "" : "Select notebooks") : compact ? String.valueOf(picked.size()) : picked.size() + " selected");
         if (moreB != null) moreB.setVisibility(picked.size() == 1 && !filter.equals(TRASH) ? View.VISIBLE : View.GONE);
         for (int i = 0; i < selRow.getChildCount(); i++) {
             View v = selRow.getChildAt(i);

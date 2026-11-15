@@ -102,7 +102,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private Ui.IconButton undoB, redoB, pagesB, bookmarkB;
     private LinearLayout favRow;
     private Ruler ruler;
-    private Ui.ToolDisc rulerB, fingerB;
+    private Ui.ToolDisc rulerB, fingerB, moreToolsB;
+    private Ui.IconButton imgB;
     private int drawScale; // 1:N for this notebook; 0 = none
     private View favSep;
     private final java.util.ArrayList<int[]> favs = new java.util.ArrayList<>(); // tool, penType, colour, width bits
@@ -193,6 +194,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         applyDock();
         buildSelectionBar();
         setContentView(root);
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int ime = insets.getInsets(WindowInsets.Type.ime()).bottom;
+            if (ime != imeBottom) { imeBottom = ime; updateImeLift(); }
+            return insets;
+        });
         activate(cur);
         root.addOnLayoutChangeListener((v, l, t, r, bt, ol, ot, or, ob) -> { if (r - l != or - ol) ui.post(this::fitCapsule); });
     }
@@ -512,6 +518,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void openSplit(Doc d) {
         if (shown[0] == d) { toast("That notebook is already on screen"); return; }
+        // a phone in portrait has no room for two columns: stack them (the saved choice stays for wider screens)
+        if (!splitVert && root.getWidth() < Ui.dp(this, 520)) { splitVert = true; layoutSplit(); }
         panes[1].setVisibility(View.VISIBLE);
         splitDivider.setVisibility(View.VISIBLE);
         showInPane(1, d);
@@ -920,7 +928,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 v -> { pop.dismiss(); showScale(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_share, "Export & share", "PDF or image", v -> { pop.dismiss(); showShare(anchor); }));
         if (shown[1] != null) p.add(Ui.actionRow(this, R.drawable.ic_sidebar, "Close split view", "Keep only this side", v -> { pop.dismiss(); closeSplit(focusPane); }));
-        else p.add(Ui.actionRow(this, R.drawable.ic_sidebar, "Split view", "Two notebooks side by side · both editable",
+        else p.add(Ui.actionRow(this, R.drawable.ic_sidebar, "Split view",
+                (splitVert || root.getWidth() < Ui.dp(this, 520) ? "Two notebooks, one above the other" : "Two notebooks side by side") + " · both editable",
                 v -> { pop.dismiss(); pickNotebook(anchor, "Open beside this", this::openSplit); }));
         p.add(Ui.actionRow(this, R.drawable.ic_settings, "Settings", null, v -> { pop.dismiss(); showSettings(); }));
         p.show(anchor);
@@ -956,20 +965,24 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         tapeB = toolDisc(R.drawable.ic_tape, "Tape", Engine.TOOL_TAPE, false);
         laserB = toolDisc(0, "Laser pointer", Engine.TOOL_LASER, true);
         textB = toolDisc(R.drawable.ic_text, "Text", Engine.TOOL_TEXT, false);
+        // narrow screens (phones): tools that don't fit fold into this disc (fitCapsule decides)
+        moreToolsB = new Ui.ToolDisc(this, R.drawable.ic_more, "More tools", false);
+        moreToolsB.setTooltipText("More tools");
+        moreToolsB.setOnClickListener(this::showMoreTools);
+        moreToolsB.setOnLongClickListener(v -> { if (hiddenToolActive()) openToolPanel(v); else showMoreTools(v); return true; });
+        moreToolsB.setVisibility(View.GONE);
+        capTools.addView(moreToolsB);
         Ui.IconButton img = icon(R.drawable.ic_image, "Insert image");
-        img.setOnClickListener(v -> startActivityForResult(new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*"), REQ_IMAGE));
+        img.setOnClickListener(v -> pickImage());
         capTools.addView(img);
+        imgB = img;
         rulerB = new Ui.ToolDisc(this, R.drawable.ic_ruler, "Ruler", false);
         rulerB.setOnClickListener(v -> toggleRuler());
         rulerB.setTooltipText("Ruler");
         capTools.addView(rulerB);
         fingerB = new Ui.ToolDisc(this, R.drawable.ic_touch, "Write with finger", false);
         fingerB.setTooltipText("Write with finger");
-        fingerB.setOnClickListener(v -> {
-            fingerDraw = !fingerDraw;
-            saveOptions();
-            toast(fingerDraw ? "Fingers write · use two fingers to scroll and zoom" : "Only the pen writes · fingers scroll");
-        });
+        fingerB.setOnClickListener(v -> toggleFinger());
         fingerB.set(fingerDraw, 0, 0);
         capTools.addView(fingerB);
         favSep = Ui.divider(this);
@@ -1244,6 +1257,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         appliedTool = tool;
         updatePaste();
         renderFavs();
+        updateMoreTools();
         SharedPreferences.Editor e = prefs.edit().putInt("tool", tool).putInt("penColor", penSlot).putInt("hlColor", hlSlot)
                 .putFloat("penW", penW).putFloat("hlW", hlW).putFloat("textPt", textPt).putString("textStyle", textStyleEnc).putInt("penType", penType)
                 .putFloat("eraserDp", eraserDp);
@@ -1356,20 +1370,93 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     /** Narrow windows (split screen): drop the least-needed controls until the tool capsule fits. */
+    private void pickImage() {
+        startActivityForResult(new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*"), REQ_IMAGE);
+    }
+
+    private void toggleFinger() {
+        fingerDraw = !fingerDraw;
+        saveOptions();
+        toast(fingerDraw ? "Fingers write · use two fingers to scroll and zoom" : "Only the pen writes · fingers scroll");
+    }
+
+    /** The current tool's button is folded into "More tools". */
+    private boolean hiddenToolActive() {
+        return (tool == Engine.TOOL_TAPE && tapeB.getVisibility() != View.VISIBLE)
+                || (tool == Engine.TOOL_LASER && laserB.getVisibility() != View.VISIBLE);
+    }
+
+    /** "More tools" shows the folded tool that's in use (as a coloured disc), else just ⋯. */
+    private void updateMoreTools() {
+        if (moreToolsB == null) return;
+        boolean tape = tool == Engine.TOOL_TAPE && tapeB.getVisibility() != View.VISIBLE;
+        boolean laser = tool == Engine.TOOL_LASER && laserB.getVisibility() != View.VISIBLE;
+        moreToolsB.setImageResource(tape ? R.drawable.ic_tape : laser ? R.drawable.ic_laser : R.drawable.ic_more);
+        moreToolsB.set(tape || laser, tape ? TAPE_COLORS[tapeCol] : laser ? LASER_COLORS[laserCol] : 0, 0);
+    }
+
+    /** The tools that didn't fit in the bar, as a short list. */
+    private void showMoreTools(View anchor) {
+        Ui.Popover p = newPop(300);
+        p.title("More tools");
+        if (favsFolded && !favs.isEmpty()) {
+            p.section("Favourite pens");
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            for (int[] f : favs) {
+                Ui.FavDot d = new Ui.FavDot(this, f[0] == Engine.TOOL_HL, f[2], Float.intBitsToFloat(f[3]));
+                d.setSel(favMatches(f));
+                d.setOnClickListener(v -> { pop.dismiss(); applyFav(f); });
+                row.addView(d);
+            }
+            android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this);
+            hs.setHorizontalScrollBarEnabled(false);
+            hs.addView(row);
+            p.add(hs);
+            p.section("Tools");
+        }
+        if (tapeB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_tape, "Tape",
+                tool == Engine.TOOL_TAPE ? "In use · tap for its options" : "Cover answers, tap to peel back", v -> {
+                    pop.dismiss();
+                    if (tool == Engine.TOOL_TAPE) { openToolPanel(anchor); return; }
+                    commitTextEdit(); tool = Engine.TOOL_TAPE; applyTool();
+                }));
+        if (laserB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_laser, "Laser pointer",
+                tool == Engine.TOOL_LASER ? "In use · tap for its options" : "Point things out · never saved", v -> {
+                    pop.dismiss();
+                    if (tool == Engine.TOOL_LASER) { openToolPanel(anchor); return; }
+                    commitTextEdit(); tool = Engine.TOOL_LASER; applyTool();
+                }));
+        if (imgB.getVisibility() != View.VISIBLE)
+            p.add(Ui.actionRow(this, R.drawable.ic_image, "Insert image", null, v -> { pop.dismiss(); pickImage(); }));
+        if (rulerB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_ruler, "Ruler",
+                ruler.getVisibility() == View.VISIBLE ? "On · tap to put it away" : "Off · straight lines along its edge", v -> { pop.dismiss(); toggleRuler(); }));
+        if (fingerB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_touch, "Write with finger",
+                fingerDraw ? "On · tap to turn off" : "Off · only the pen writes", v -> { pop.dismiss(); toggleFinger(); }));
+        p.show(anchor);
+    }
+
     private void fitCapsule() {
         if (capTools == null || root.getWidth() == 0) return;
-        View[] order = {favRow, favSep, sw[0], sw[1], sw[2], sw[3], rulerB, fingerB};
+        // dropped in this order until the bar fits; the tools from rulerB on stay reachable under "More tools"
+        View[] order = {favRow, favSep, sw[0], sw[1], sw[2], sw[3], rulerB, fingerB, imgB, laserB, tapeB};
+        java.util.List<View> folds = java.util.Arrays.asList(rulerB, fingerB, imgB, laserB, tapeB);
         boolean vert = dockVertical();
         // a column must clear the top bars; a row must fit the width
         int avail = vert ? root.getHeight() - Ui.dp(this, 2 * (EDGE_DP + CAP_DP + 12)) : root.getWidth() - Ui.dp(this, 2 * EDGE_DP);
         for (View v : order) if (v != null && v != favRow && v != favSep) v.setVisibility(View.VISIBLE);
+        moreToolsB.setVisibility(View.GONE);
+        favsFolded = false;
         renderFavs();
         int tc = View.MeasureSpec.makeMeasureSpec(Ui.dp(this, TOOLCAP_DP), View.MeasureSpec.EXACTLY), free = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
         for (View v : order) {
             if (vert) capTools.measure(tc, free); else capTools.measure(free, tc);
             if ((vert ? capTools.getMeasuredHeight() : capTools.getMeasuredWidth()) <= avail) break;
             if (v != null) v.setVisibility(View.GONE);
+            if (v == favRow && !favs.isEmpty()) favsFolded = true;
+            if (folds.contains(v) || (v == favRow && favsFolded)) moreToolsB.setVisibility(View.VISIBLE);
         }
+        updateMoreTools();
         // narrow window: bookmark + pages leave the top-right capsule (both stay in ⋯ / the page counter)
         boolean narrow = root.getWidth() < Ui.dp(this, 520);
         boolean canvas = state != null && state.canvas;
@@ -1478,10 +1565,13 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             favRow.addView(d);
             if (capTools != null && dockVertical()) orient(d, true);
         }
-        int vis = favs.isEmpty() ? View.GONE : View.VISIBLE;
+        int vis = favs.isEmpty() || favsFolded ? View.GONE : View.VISIBLE; // folded: fitCapsule moved them to "More tools"
         favRow.setVisibility(vis);
         favSep.setVisibility(vis);
     }
+
+    /** Favourite pens didn't fit in the bar (they're listed under "More tools" instead). */
+    private boolean favsFolded;
 
     private void applyFav(int[] f) {
         commitTextEdit();
@@ -2243,7 +2333,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         col.addView(Ui.switchRow(this, "Latency overlay", "Shows front-buffer state and input-to-pixel timings",
                 hud, v -> { hud = v; if (!hud) hudView.setVisibility(View.GONE); saveOptions(); }));
 
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(Ui.dp(this, 420), -1, Gravity.END);
+        // a side sheet on tablets; on a phone it takes the width, less the margins
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(Math.min(Ui.dp(this, 420), root.getWidth() - Ui.dp(this, 24)), -1, Gravity.END);
         lp.setMargins(Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12));
         sheet.addView(sv, lp);
         root.addView(sheet, new FrameLayout.LayoutParams(-1, -1));
@@ -2358,14 +2449,20 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         pagesPanel.setElevation(Ui.dp(this, 20)); // above the app bar, dock and page chip
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        int side = Ui.dp(this, 28);
-        col.setPadding(side, Ui.dp(this, 28), side, Ui.dp(this, 28));
+        boolean narrow = root.getWidth() < Ui.dp(this, 520);
+        int side = Ui.dp(this, narrow ? 16 : 28);
+        android.view.WindowInsets wi = root.getRootWindowInsets(); // full screen: keep clear of the status and nav bars
+        android.graphics.Insets bars = wi == null ? android.graphics.Insets.NONE : wi.getInsets(android.view.WindowInsets.Type.systemBars());
+        col.setPadding(side, Math.max(Ui.dp(this, narrow ? 12 : 28), bars.top + Ui.dp(this, 8)), side,
+                Math.max(Ui.dp(this, narrow ? 12 : 28), bars.bottom + Ui.dp(this, 8)));
         LinearLayout head = new LinearLayout(this);
         head.setGravity(Gravity.CENTER_VERTICAL);
         head.addView(Ui.text(this, "Pages", 22, Ui.color(this, R.color.on_surface), Ui.bold()), new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView hint = Ui.text(this, "Long-press a page for options", 13, Ui.color(this, R.color.on_surface_variant), null);
-        hint.setPadding(0, 0, Ui.dp(this, 16), 0);
-        head.addView(hint);
+        TextView hint = Ui.text(this, narrow ? "Hold a page for options" : "Long-press a page for options", 13, Ui.color(this, R.color.on_surface_variant), null);
+        hint.setPadding(0, 0, Ui.dp(this, 8), 0);
+        hint.setSingleLine(true);
+        hint.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        head.addView(hint, narrow ? new LinearLayout.LayoutParams(0, -2, 1.6f) : new LinearLayout.LayoutParams(-2, -2));
         Ui.IconButton close = icon(R.drawable.ic_close, "Close");
         close.setOnClickListener(v -> closePages());
         head.addView(close);
@@ -2379,7 +2476,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             marks.setVisibility(i == 1 ? View.VISIBLE : View.GONE);
             if (i == 1) fillMarks(marks, grid); else fillPages(grid);
         });
-        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(Ui.dp(this, 300), -2);
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(Math.min(Ui.dp(this, 300), root.getWidth() - 2 * side), -2);
         tl.topMargin = Ui.dp(this, 16);
         col.addView(tabs, tl);
         LinearLayout body = new LinearLayout(this);
@@ -2737,8 +2834,31 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         b.addView(t, new LinearLayout.LayoutParams(-2, -2)); // vertical default is match_parent → squeezed to icon width
         b.setOnClickListener(l);
         b.setMinimumWidth(Ui.dp(this, 72)); // labels like "Duplicate" were clipped to "Dup"
+        b.setContentDescription(label);
+        b.setTooltipText(label);
         t.setSingleLine(true);
         return b;
+    }
+
+    private int selFitKey = -1;
+
+    /** Fits the selection bar into avail px: full size, then tighter with smaller labels, then icons only (phones). */
+    private void fitSelBar(int avail) {
+        for (int level = 0; level < 3; level++) {
+            for (int i = 0; i < selBar.getChildCount(); i++) {
+                View c = selBar.getChildAt(i);
+                if (!(c instanceof LinearLayout)) continue;
+                LinearLayout b = (LinearLayout) c;
+                int pad = Ui.dp(this, level == 0 ? 12 : 4);
+                b.setPadding(pad, Ui.dp(this, level == 2 ? 10 : 4), pad, Ui.dp(this, level == 2 ? 10 : 2));
+                b.setMinimumWidth(Ui.dp(this, level == 0 ? 72 : level == 1 ? 48 : 44));
+                TextView t = (TextView) b.getChildAt(1);
+                t.setTextSize(level == 0 ? 11.5f : 10.5f);
+                t.setVisibility(level == 2 ? View.GONE : View.VISIBLE);
+            }
+            selBar.measure(0, 0);
+            if (selBar.getMeasuredWidth() <= avail) return;
+        }
     }
 
     @Override
@@ -2749,7 +2869,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             return;
         }
         selBar.setVisibility(View.VISIBLE);
-        selBar.measure(0, 0);
+        int availW = panes[focusPane].getWidth() - Ui.dp(this, 24), fitKey = availW * 2 + (editTextB.getVisibility() == View.VISIBLE ? 1 : 0);
+        if (fitKey != selFitKey) { selFitKey = fitKey; fitSelBar(availW); } // not on every frame of a drag
+        else selBar.measure(0, 0);
         float bw = selBar.getMeasuredWidth(), bh = selBar.getMeasuredHeight();
         float px = paneLeft();
         float x = Math.max(px + Ui.dp(this, 12), Math.min(px + panes[focusPane].getWidth() - bw - Ui.dp(this, 12), px + r.centerX() - bw / 2));
@@ -2792,6 +2914,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         root.addView(textEdit, lp);
         applyEditLook();
         addTextTools(e, lp.leftMargin, lp.topMargin);
+        textEdit.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (b - t != ob - ot) updateImeLift(); }); // grows as you type
         textEdit.requestFocus();
         textEdit.setSelection(textEdit.getText().length());
         ui.postDelayed(() -> {
@@ -3236,7 +3359,26 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(et.getWindowToken(), 0);
         root.removeView(et);
         if (textTools != null) { root.removeView(textTools); textTools = null; }
+        updateImeLift();
         ui.postDelayed(this::immersive, 300);
+    }
+
+    // ---- keyboard: the window doesn't resize for it (adjustNothing keeps the ink surface still), so while a text box
+    // is being typed in, the page and the box slide up just enough to keep the box above the keyboard (phones) --------
+
+    private int imeBottom;
+
+    private void updateImeLift() {
+        float lift = 0;
+        if (textEdit != null && imeBottom > 0 && root.getHeight() > 0) {
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) textEdit.getLayoutParams();
+            int boxBottom = lp.topMargin + textEdit.getHeight();
+            lift = Math.max(0, boxBottom - (root.getHeight() - imeBottom - Ui.dp(this, 16)));
+        }
+        for (View v : new View[]{paneRow, textEdit, textTools}) {
+            if (v == null) continue;
+            if (v.getTranslationY() != -lift) v.animate().translationY(-lift).setDuration(160).start();
+        }
     }
 
     // ---- images --------------------------------------------------------------------------

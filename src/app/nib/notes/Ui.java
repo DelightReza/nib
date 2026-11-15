@@ -296,18 +296,36 @@ final class Ui {
         final android.widget.LinearLayout body;
         final Context c;
         final int width;
+        private final MaxScroll scroll;
+
+        /** Scrolls the card's content when it's taller than the room it has (phones, a bar docked at the top). */
+        private static final class MaxScroll extends android.widget.ScrollView {
+            int maxH = Integer.MAX_VALUE;
+            MaxScroll(Context c) { super(c); }
+            @Override protected void onMeasure(int ws, int hs) {
+                int mode = MeasureSpec.getMode(hs), size = MeasureSpec.getSize(hs);
+                int cap = mode == MeasureSpec.UNSPECIFIED ? maxH : Math.min(size, maxH);
+                super.onMeasure(ws, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST));
+            }
+        }
 
         Popover(Context c, int widthDp) {
             this.c = c;
-            width = dp(c, widthDp);
+            // never wider than the screen less a margin either side (a 470 dp panel on a 360 dp phone)
+            width = Math.min(dp(c, widthDp), c.getResources().getDisplayMetrics().widthPixels - dp(c, 24));
             body = new android.widget.LinearLayout(c);
             body.setOrientation(android.widget.LinearLayout.VERTICAL);
             int p = dp(c, 16);
             body.setPadding(p, dp(c, 14), p, dp(c, 16));
             GradientDrawable g = round(color(c, R.color.surface), dp(c, 14));
             g.setStroke(hairline(c), color(c, R.color.outline));
-            body.setBackground(g);
-            pw = new android.widget.PopupWindow(body, width, ViewGroup.LayoutParams.WRAP_CONTENT, true);
+            scroll = new MaxScroll(c);
+            scroll.setBackground(g);
+            scroll.setClipToOutline(true);
+            scroll.setVerticalScrollBarEnabled(false);
+            scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+            scroll.addView(body, new ViewGroup.LayoutParams(-1, -2));
+            pw = new android.widget.PopupWindow(scroll, width, ViewGroup.LayoutParams.WRAP_CONTENT, true);
             pw.setElevation(dp(c, 12));
             pw.setOutsideTouchable(true);
             pw.setAnimationStyle(android.R.style.Animation_Dialog);
@@ -336,7 +354,8 @@ final class Ui {
             int screenW = c.getResources().getDisplayMetrics().widthPixels, screenH = c.getResources().getDisplayMetrics().heightPixels;
             int x = loc[0] + anchor.getWidth() / 2 - width / 2;
             x = Math.max(dp(c, 12), Math.min(screenW - width - dp(c, 12), x));
-            int y;
+            int y, m = dp(c, 12);
+            scroll.maxH = screenH - 2 * m; // narrowed below to the room on the chosen side
             View bar = (View) anchor.getParent(); // the floating capsule the button sits in
             while (bar != null && bar.getParent() instanceof android.widget.LinearLayout) bar = (View) bar.getParent();
             if (bar instanceof android.widget.LinearLayout && ((android.widget.LinearLayout) bar).getOrientation() == android.widget.LinearLayout.VERTICAL
@@ -346,8 +365,9 @@ final class Ui {
                 body.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
                 boolean leftEdge = bl[0] + bar.getWidth() / 2 < screenW / 2;
                 x = leftEdge ? bl[0] + bar.getWidth() + dp(c, 10) : bl[0] - width - dp(c, 10);
-                y = loc[1] + anchor.getHeight() / 2 - body.getMeasuredHeight() / 2;
-                y = Math.max(dp(c, 12), Math.min(screenH - body.getMeasuredHeight() - dp(c, 12), y));
+                int bh = Math.min(body.getMeasuredHeight(), scroll.maxH);
+                y = loc[1] + anchor.getHeight() / 2 - bh / 2;
+                y = Math.max(m, Math.min(screenH - bh - m, y));
             } else if (loc[1] > screenH / 2) {
                 // measure so the card's bottom edge lands just above the capsule
                 View host = (View) anchor.getParent(); // climb to the floating capsule itself
@@ -355,14 +375,22 @@ final class Ui {
                 int[] hl = new int[2];
                 if (host != null) host.getLocationOnScreen(hl); else hl[1] = loc[1];
                 body.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-                y = Math.max(dp(c, 12), hl[1] - body.getMeasuredHeight() - dp(c, 10));
+                scroll.maxH = Math.max(dp(c, 120), hl[1] - dp(c, 10) - m - topInset(anchor));
+                y = Math.max(m + topInset(anchor), hl[1] - Math.min(body.getMeasuredHeight(), scroll.maxH) - dp(c, 10));
             } else {
                 y = loc[1] + anchor.getHeight() + dp(c, 8);
+                scroll.maxH = Math.max(dp(c, 120), screenH - y - m);
             }
             pw.showAtLocation(anchor, android.view.Gravity.TOP | android.view.Gravity.START, x, y);
         }
 
         void dismiss() { pw.dismiss(); }
+
+        /** Status bar height, so a tall card opening upwards stops below it. */
+        private static int topInset(View v) {
+            android.view.WindowInsets wi = v.getRootWindowInsets();
+            return wi == null ? 0 : wi.getInsets(android.view.WindowInsets.Type.statusBars()).top;
+        }
     }
 
     /** Segmented control (pill group). */
