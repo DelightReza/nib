@@ -28,7 +28,9 @@ final class Notebook {
             "Engineering", "Isometric", "Site inspection"};
     static final int PAPER_WHITE = 0, PAPER_CREAM = 1, PAPER_DARK = 2;
     static final String[] PAPER_NAMES = {"White paper", "Cream paper", "Dark paper"};
-    private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235, MAGIC6 = 0x4E494236; // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths, NIB6 +text style
+    private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235, MAGIC6 = 0x4E494236, MAGIC7 = 0x4E494237;
+    // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths, NIB6 +text style, NIB7 = NIB6 with int-length strings.
+    // NIB7 is written only when a string is too long for writeUTF (64 KB), so other notebooks stay readable by older Nib.
     static final int MARGIN_LEFT = 1, MARGIN_HEADER = 2, MARGIN_BORDER = 4;
 
     /** Text box or picture placed on a page (page-local units). */
@@ -210,8 +212,9 @@ final class Notebook {
         if (f.exists()) {
             try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f), 1 << 16))) {
                 int magic = in.readInt();
-                if (magic < MAGIC1 || magic > MAGIC6) throw new IOException("bad magic");
+                if (magic < MAGIC1 || magic > MAGIC7) throw new IOException("bad magic");
                 boolean v2 = magic >= MAGIC2, v3 = magic >= MAGIC3, v4 = magic >= MAGIC4, v5 = magic >= MAGIC5, v6 = magic >= MAGIC6;
+                boolean v7 = magic >= MAGIC7;
                 int pages = in.readInt();
                 for (int i = 0; i < pages; i++) {
                     Page p = new Page(in.readInt());
@@ -233,7 +236,7 @@ final class Notebook {
                         for (int k = 0; k < ni; k++) {
                             int type = in.readInt();
                             float x = in.readFloat(), y = in.readFloat(), w = in.readFloat(), h = in.readFloat();
-                            String text = in.readUTF();
+                            String text = readStr(in, v7);
                             float size = in.readFloat();
                             int color = in.readInt();
                             float[] pts = null;
@@ -246,11 +249,11 @@ final class Notebook {
                                 pts = hz ? new float[]{x, y + h / 2, x + w, y + h / 2} : new float[]{x + w / 2, y, x + w / 2, y + h};
                                 size = hz ? h : w;
                             }
-                            String style = v6 && in.readBoolean() ? in.readUTF() : null;
+                            String style = v6 && in.readBoolean() ? readStr(in, v7) : null;
                             p.items.add(new Item(type, x, y, w, h, text, size, color, pts, style));
                         }
                     }
-                    if (v3 && in.readBoolean()) p.mark = in.readUTF();
+                    if (v3 && in.readBoolean()) p.mark = readStr(in, v7);
                     if (v4) {
                         p.spacing = in.readFloat();
                         p.lineColor = in.readInt();
@@ -289,7 +292,8 @@ final class Notebook {
         dir.mkdirs();
         File tmp = new File(dir, "ink.bin.tmp");
         try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(tmp), 1 << 16))) {
-            out.writeInt(MAGIC6);
+            boolean v7 = needsLongStrings();
+            out.writeInt(v7 ? MAGIC7 : MAGIC6);
             out.writeInt(pages.size());
             for (Page p : pages) {
                 out.writeInt(p.bg);
@@ -314,16 +318,16 @@ final class Notebook {
                     out.writeFloat(it.y);
                     out.writeFloat(it.w);
                     out.writeFloat(it.h);
-                    out.writeUTF(it.text);
+                    writeStr(out, it.text, v7);
                     out.writeFloat(it.size);
                     out.writeInt(it.color);
                     out.writeInt(it.pts == null ? 0 : it.pts.length);
                     if (it.pts != null) for (float f : it.pts) out.writeFloat(f);
                     out.writeBoolean(it.style != null);
-                    if (it.style != null) out.writeUTF(it.style);
+                    if (it.style != null) writeStr(out, it.style, v7);
                 }
                 out.writeBoolean(p.mark != null);
-                if (p.mark != null) out.writeUTF(p.mark);
+                if (p.mark != null) writeStr(out, p.mark, v7);
                 out.writeFloat(p.spacing);
                 out.writeInt(p.lineColor);
                 out.writeFloat(p.strength);
@@ -333,6 +337,44 @@ final class Notebook {
         if (!tmp.renameTo(new File(dir, "ink.bin"))) throw new IOException("rename failed");
         writeMetaFields(dir);
         Render.writeThumb(this, dir, new File(dir, "thumb.png"));
+    }
+
+    // ---- strings: writeUTF holds at most 65535 bytes; a longer text box made every save fail ----------
+
+    /** Bytes writeUTF would need (modified UTF-8). */
+    static int utfLength(String s) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            n += c >= 1 && c <= 0x7f ? 1 : c <= 0x7ff ? 2 : 3;
+        }
+        return n;
+    }
+
+    private static boolean tooLong(String s) { return s != null && s.length() > 65535 / 3 && utfLength(s) > 65535; }
+
+    private boolean needsLongStrings() {
+        for (Page p : pages) {
+            if (tooLong(p.mark)) return true;
+            for (Item it : p.items) if (tooLong(it.text) || tooLong(it.style)) return true;
+        }
+        return false;
+    }
+
+    private static void writeStr(DataOutputStream out, String s, boolean v7) throws IOException {
+        if (!v7) { out.writeUTF(s); return; }
+        byte[] b = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        out.writeInt(b.length);
+        out.write(b);
+    }
+
+    private static String readStr(DataInputStream in, boolean v7) throws IOException {
+        if (!v7) return in.readUTF();
+        int n = in.readInt();
+        if (n < 0 || n > 64 << 20) throw new IOException("bad string length " + n);
+        byte[] b = new byte[n];
+        in.readFully(b);
+        return new String(b, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     void writeMetaFields(File dir) throws IOException {
