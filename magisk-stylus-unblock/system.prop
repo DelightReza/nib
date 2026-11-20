@@ -1,0 +1,4 @@
+# HyperOS pins the screen at 120 Hz whenever the Xiaomi pen touches it ("Smartpen" rule in MiSurfaceFlinger:
+# setSmartpenFps), whatever the app asks for. With this off, Nib's request for the panel's fastest rate (144 Hz on
+# the Pad 6) applies while writing. Remove the module to undo.
+ro.vendor.display.smartpen_vrr_fps=false

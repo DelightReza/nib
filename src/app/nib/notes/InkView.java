@@ -13,6 +13,8 @@ final class InkView extends SurfaceView implements SurfaceHolder.Callback {
     /** Pen (or eraser end) touched down / lifted: lets the editor fade its floating tools while writing. */
     interface PenListener { void pen(boolean down); }
     PenListener penListener;
+    /** Keeps the display at full speed while the pen is in use (see RateKeeper). */
+    RateKeeper rateKeeper;
 
     InkView(Context c, Engine e) {
         super(c);
@@ -36,6 +38,7 @@ final class InkView extends SurfaceView implements SurfaceHolder.Callback {
         int tt = ev.getToolType(0);
         if (tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER) {
             int a = ev.getActionMasked();
+            if (rateKeeper != null) rateKeeper.poke();
             engine.hoverAt(ev.getX(), ev.getY(), a == MotionEvent.ACTION_HOVER_EXIT);
         }
         return true;
@@ -54,6 +57,7 @@ final class InkView extends SurfaceView implements SurfaceHolder.Callback {
             }
         }
         engine.touch(MotionEvent.obtain(ev), now);
+        if (rateKeeper != null && (t0 == MotionEvent.TOOL_TYPE_STYLUS || t0 == MotionEvent.TOOL_TYPE_ERASER)) rateKeeper.poke();
         if (penListener != null && (t0 == MotionEvent.TOOL_TYPE_STYLUS || t0 == MotionEvent.TOOL_TYPE_ERASER)) {
             int a = ev.getActionMasked();
             if (a == MotionEvent.ACTION_DOWN) penListener.pen(true);

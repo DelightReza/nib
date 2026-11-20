@@ -96,6 +96,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     // Zen layout: no bars; three floating capsules that fade while the pen is writing.
     private static final int CAP_DP = 48, TOOLCAP_DP = 60, EDGE_DP = 16;
     private FrameLayout root;
+    private RateKeeper rateKeeper;
+    private float fastestRate = 144f;
     private LinearLayout capLeft, capRight, capTools;
     private TextView hudView, toastView, pasteChip;
     private Ui.ToolDisc penB, hlB, eraserB, lassoB, laserB, textB, tapeB;
@@ -170,6 +172,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         getWindow().setDecorFitsSystemWindows(false);
 
         root = new FrameLayout(this);
+        rateKeeper = new RateKeeper(this);
+        rateKeeper.setRate(fastestRate);
         paneRow = new LinearLayout(this);
         panes[0] = new Pane(0);
         panes[1] = new Pane(1);
@@ -195,6 +199,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         applyDock();
         buildSelectionBar();
         buildZoomChip();
+        root.addView(rateKeeper, new FrameLayout.LayoutParams(1, 1));
         setContentView(root);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             int ime = insets.getInsets(WindowInsets.Type.ime()).bottom;
@@ -213,7 +218,6 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setEraseOptions(holdErase, erasePreview);
         engine.setTaper(taper);
         engine.setZoomLimit(maxZoomPct / 100f);
-        engine.setPalm(prefs.getBoolean("palmReject", true), prefs.getBoolean("rightHand", true));
         pushLaser();
         pushTape();
     }
@@ -371,6 +375,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             page = -1;
             ink = new InkView(EditorActivity.this, engine);
             ink.penListener = EditorActivity.this::onPen;
+            ink.rateKeeper = rateKeeper;
             sel = new SelectionView(EditorActivity.this);
             scale = prefs.getInt("scale:" + dir.getName(), 0);
         }
@@ -2451,13 +2456,6 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 shapeSnap, v -> { shapeSnap = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Write with finger", "Fingers write like the pen; two fingers scroll and zoom. Also in the tool bar (hand button)",
                 fingerDraw, v -> { fingerDraw = v; saveOptions(); }));
-        col.addView(Ui.switchRow(this, "Palm rejection", "When writing with a finger or a rubber-tip stylus, your hand can rest on the screen: Nib keeps the tip, ignores the palm",
-                prefs.getBoolean("palmReject", true), v -> { prefs.edit().putBoolean("palmReject", v).apply(); pushOptions(); }));
-        TextView wh = Ui.text(this, "Writing hand", 14.5f, Ui.color(this, R.color.on_surface), null);
-        wh.setPadding(0, Ui.dp(this, 6), 0, Ui.dp(this, 8));
-        col.addView(wh);
-        col.addView(Ui.segmented(this, new String[]{"Right", "Left"}, prefs.getBoolean("rightHand", true) ? 0 : 1,
-                i -> { prefs.edit().putBoolean("rightHand", i == 0).apply(); pushOptions(); }));
         col.addView(Ui.switchRow(this, "Hide tools while writing", "The floating bars fade while the pen is on the page",
                 autoHide, v -> { autoHide = v; if (!v) showChrome.run(); prefs.edit().putBoolean("autoHide", v).apply(); }));
         col.addView(Ui.text(this, "Maximum zoom", 14.5f, Ui.color(this, R.color.on_surface), null));
@@ -3760,6 +3758,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         WindowManager.LayoutParams lp = getWindow().getAttributes();
         lp.preferredDisplayModeId = best.getModeId();
         lp.preferredRefreshRate = best.getRefreshRate();
+        fastestRate = best.getRefreshRate();
+        if (rateKeeper != null) rateKeeper.setRate(fastestRate);
         getWindow().setAttributes(lp);
     }
 

@@ -140,7 +140,7 @@ final class Engine implements Choreographer.FrameCallback {
     // gestures
     private static final int G_NONE = 0, G_INK = 1, G_ERASE = 2, G_PAN = 3, G_IGNORE = 4, G_LASSO = 5, G_SEL = 6, G_TAP = 7, G_LASER = 8, G_TAPE = 9;
     private int gest = G_NONE;
-    private volatile long penNear, stylusAt; // stylusAt: only the real pen (hover / touch), for palm rejection
+    private volatile long penNear, stylusAt; // stylusAt: only the real pen (hover / touch), so fingers don't write next to it
     private boolean fingerGest;             // the current gesture was started by a finger (finger drawing on)
     private static final float FINGER_P = 0.5f; // fingers report contact size, not pressure: draw at the nominal width
     /** This stroke has no real pressure (finger, or a stylus without it): the fountain pen tapers in and out instead. */
@@ -216,7 +216,6 @@ final class Engine implements Choreographer.FrameCallback {
     Engine(Context c, File dir, Listener l) {
         app = c.getApplicationContext();
         density = c.getResources().getDisplayMetrics().density;
-        palm = new PalmFilter(density);
         listener = l;
         this.dir = dir;
         thread.start();
@@ -2096,57 +2095,7 @@ final class Engine implements Choreographer.FrameCallback {
         panEvent(ev, a);
     }
 
-    // ---- palm rejection for finger / passive-stylus writing (PalmFilter decides; the writer becomes a 1-finger gesture)
-
-    private final PalmFilter palm;
-    private boolean palmOn = true;
-    private int[] pIds = new int[10];
-    private float[] pXs = new float[10], pYs = new float[10], pMaj = new float[10];
-
-    void setPalm(boolean on, boolean rightHanded) { h.post(() -> { palmOn = on; palm.rightHanded = rightHanded; }); }
-
-    private static boolean allFingers(MotionEvent ev) {
-        for (int i = 0; i < ev.getPointerCount(); i++) {
-            int t = ev.getToolType(i);
-            if (t != MotionEvent.TOOL_TYPE_FINGER && t != MotionEvent.TOOL_TYPE_UNKNOWN) return false;
-        }
-        return true;
-    }
-
     private void handle(MotionEvent ev, long recv) {
-        if (!fingerDraw || !palmOn || !allFingers(ev)) { handleTouch(ev, recv); return; }
-        int n = Math.min(ev.getPointerCount(), pIds.length);
-        for (int i = 0; i < n; i++) { pIds[i] = ev.getPointerId(i); pXs[i] = ev.getX(i); pYs[i] = ev.getY(i); pMaj[i] = ev.getTouchMajor(i); }
-        int r = palm.onEvent(ev.getActionMasked(), ev.getPointerId(ev.getActionIndex()), n, pIds, pXs, pYs, pMaj, ev.getEventTime());
-        if (r == PalmFilter.PASS) { handleTouch(ev, recv); return; }
-        if (r == PalmFilter.IGNORE) return;
-        MotionEvent we = writerEvent(ev, palm.writerId, palm.writeAction);
-        if (we == null) return;
-        try { handleTouch(we, recv); } finally { we.recycle(); }
-    }
-
-    /** The writing pointer alone, as a one-finger event (its historical samples kept); its size zeroed (it's no palm). */
-    private static MotionEvent writerEvent(MotionEvent ev, int id, int action) {
-        int idx = ev.findPointerIndex(id);
-        if (idx < 0) idx = 0;
-        MotionEvent.PointerProperties[] pp = {new MotionEvent.PointerProperties()};
-        pp[0].id = 0;
-        pp[0].toolType = MotionEvent.TOOL_TYPE_FINGER;
-        MotionEvent.PointerCoords[] pc = {new MotionEvent.PointerCoords()};
-        int hs = action == MotionEvent.ACTION_MOVE ? ev.getHistorySize() : 0;
-        if (hs > 0) ev.getHistoricalPointerCoords(idx, 0, pc[0]); else ev.getPointerCoords(idx, pc[0]);
-        pc[0].touchMajor = pc[0].touchMinor = 0;
-        MotionEvent out = MotionEvent.obtain(ev.getDownTime(), hs > 0 ? ev.getHistoricalEventTime(0) : ev.getEventTime(), action, 1, pp, pc,
-                ev.getMetaState(), ev.getButtonState(), 1f, 1f, ev.getDeviceId(), 0, ev.getSource(), ev.getFlags());
-        for (int h = 1; h <= hs; h++) {
-            if (h < hs) ev.getHistoricalPointerCoords(idx, h, pc[0]); else ev.getPointerCoords(idx, pc[0]);
-            pc[0].touchMajor = pc[0].touchMinor = 0;
-            out.addBatch(h < hs ? ev.getHistoricalEventTime(h) : ev.getEventTime(), pc, ev.getMetaState());
-        }
-        return out;
-    }
-
-    private void handleTouch(MotionEvent ev, long recv) {
         int a = ev.getActionMasked();
         if (a == MotionEvent.ACTION_DOWN) {
             int tt = ev.getToolType(0);

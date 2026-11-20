@@ -27,7 +27,7 @@ and handwriting that turns into text in English, Punjabi, Hindi or Arabic.
 - Laser pointer, never saved: fading trail, dot, or vanishing ink; six colours, three sizes; can follow the hovering pen
 - Tape for studying: cover answers with straight or freeform tape, tap to peel it back, tap again to cover
 - Pen side buttons: first button toggles the eraser, second toggles the lasso
-- Write with your finger too (one toggle), with palm rejection; two fingers scroll and zoom
+- Write with your finger too (one toggle); two fingers scroll and zoom
 - Favourite pens in the tool bar, one tap to switch; drag the tool bar to the bottom, top, left or right edge
 
 **Handwriting to text**
