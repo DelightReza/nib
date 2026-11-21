@@ -952,8 +952,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             txt.addView(t);
             if (act && d.state != null) {
                 Engine.State st = d.state;
+                String layerName = null;
+                if (st.layerIds.length > 1) for (int li = 0; li < st.layerIds.length; li++) if (st.layerIds[li] == st.activeLayer) layerName = st.layerNames[li];
                 TextView sub = Ui.text(this, (st.canvas ? "Infinite canvas" : "Page " + (st.page + 1) + " of " + st.pages)
-                        + (Math.abs(st.zoom - 100) > 3 ? "  ·  " + st.zoom + "%" : ""), 11f, Ui.color(this, R.color.on_surface_variant), null);
+                        + (Math.abs(st.zoom - 100) > 3 ? "  ·  " + st.zoom + "%" : "") + (layerName != null ? "  ·  " + layerName : ""),
+                        11f, Ui.color(this, R.color.on_surface_variant), null);
                 sub.setPadding(0, Ui.dp(this, 1), 0, 0);
                 txt.addView(sub);
             }
@@ -1011,6 +1014,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     };
 
     private void onPen(boolean down) {
+        if (down && shelfOpen && !shelfPinned) ui.post(() -> setShelfOpen(false)); // writing on the page: the shelf steps aside
         if (!autoHide) return;
         ui.removeCallbacks(showChrome);
         boolean writing = tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER
@@ -1090,6 +1094,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
         p.add(Ui.actionRow(this, R.drawable.ic_text, "Handwriting tools", "To text language · convert as I write · beautify",
                 v -> { pop.dismiss(); showLassoPanel(anchor); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_layers, "Layers", layersSummary(), v -> { pop.dismiss(); showLayers(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_template, canvas ? "Background" : "Page style", "Pattern and paper colour", v -> { pop.dismiss(); showStyle(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_book, "Cover", canvas ? "Shown on the notes screen" : "Design and colour · shown before page 1", v -> {
             pop.dismiss();
@@ -1164,6 +1169,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         Ui.IconButton toText = icon(R.drawable.ic_to_text, "Handwriting to text");
         toText.setOnClickListener(this::toTextFromShelf);
         advRow.addView(toText);
+        layersB = icon(R.drawable.ic_layers, "Layers");
+        layersB.setOnClickListener(v -> showLayers(shelfAnchor(v)));
+        advRow.addView(layersB);
         advDiv1 = Ui.divider(this);
         advDiv2 = Ui.divider(this);
         pinB = icon(R.drawable.ic_pin, "Keep these tools open");
@@ -1216,9 +1224,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         grip.setOnTouchListener(this::dragToolbar);
         capTools.addView(grip);
         root.addView(capTools, new FrameLayout.LayoutParams(-2, Ui.dp(this, TOOLCAP_DP), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
-        View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, fingerB, beaut, toText};
+        View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, fingerB, beaut, toText, layersB};
         System.arraycopy(tv, 0, toolViews, 0, tv.length);
-        for (View v : new View[]{imgB, rulerB, fingerB, beaut, toText}) v.setOnLongClickListener(this::showMoveMenu);
+        for (View v : new View[]{imgB, rulerB, fingerB, beaut, toText, layersB}) v.setOnLongClickListener(this::showMoveMenu);
         applyToolLayout();
     }
 
@@ -1353,9 +1361,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     // ---- which tools sit in the bar and which on the shelf: the owner's choice (long-press a tool → Move …) -------
 
     /** Every movable button in one fixed order; each side shows its own in this order. */
-    private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "finger", "beautify", "totext"};
+    private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "finger", "beautify", "totext", "layers"};
     private static final String[] TOOL_NAMES = {"Pen", "Highlighter", "Eraser", "Lasso", "Text", "Shapes", "Tape", "Laser pointer", "Image or sticker",
-            "Ruler", "Write with finger", "Beautify", "Handwriting to text"};
+            "Ruler", "Write with finger", "Beautify", "Handwriting to text", "Layers"};
     private static final String BASIC_DEFAULT = "pen,hl,eraser,lasso";
     private final View[] toolViews = new View[TOOL_IDS.length];
     private final java.util.HashSet<String> basicIds = new java.util.HashSet<>();
@@ -1396,7 +1404,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         for (int i = 0; i < TOOL_IDS.length; i++) {
             View v = toolViews[i];
             if (basicIds.contains(TOOL_IDS[i])) { capTools.addView(v, at++); continue; }
-            boolean action = TOOL_IDS[i].equals("beautify") || TOOL_IDS[i].equals("totext");
+            boolean action = TOOL_IDS[i].equals("beautify") || TOOL_IDS[i].equals("totext") || TOOL_IDS[i].equals("layers");
             if (action && anyTool && !anyAction) advRow.addView(advDiv1); // tools, then actions on the selection / page
             advRow.addView(v);
             if (action) anyAction = true; else anyTool = true;
@@ -1451,6 +1459,123 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         addMoveRow(p);
         p.show(v);
         return true;
+    }
+
+    // ---- layers: one list for the whole notebook; new writing goes on the active one -----------------------------
+
+    private Ui.IconButton layersB;
+    private View toLayerB;
+    private LinearLayout layersBox; // the open Layers panel's list (redrawn when the engine reports a change)
+
+    private String layersSummary() {
+        if (state == null || state.layerIds.length < 2) return "Keep writing apart: e.g. lecture, notes, answers";
+        String act = "";
+        for (int i = 0; i < state.layerIds.length; i++) if (state.layerIds[i] == state.activeLayer) act = state.layerNames[i];
+        return state.layerIds.length + " layers · writing on " + act;
+    }
+
+    private void showLayers(View anchor) {
+        Ui.Popover p = newPop(340).title("Layers");
+        TextView hint = Ui.text(this, "New writing goes on the highlighted layer, and only that layer can be erased or selected. "
+                + "Hidden layers aren't shown or exported.", 12.5f, Ui.color(this, R.color.on_surface_variant), null);
+        hint.setPadding(0, 0, 0, Ui.dp(this, 8));
+        p.add(hint);
+        layersBox = new LinearLayout(this);
+        layersBox.setOrientation(LinearLayout.VERTICAL);
+        p.add(layersBox);
+        renderLayers(layersBox);
+        p.add(Ui.actionRow(this, R.drawable.ic_plus, "New layer", "Added above the highlighted one", v -> {
+            int n = state == null ? 1 : state.layerIds.length;
+            engine.addLayer("Layer " + (n + 1));
+        }));
+        p.show(anchor);
+    }
+
+    /** One row per layer, top layer first (the order they're drawn in, read from the top). */
+    private void renderLayers(LinearLayout box) {
+        box.removeAllViews();
+        if (state == null) return;
+        int n = state.layerIds.length;
+        int acc = Ui.color(this, R.color.accent);
+        for (int k = n - 1; k >= 0; k--) {
+            final int id = state.layerIds[k], rank = k;
+            final String name = state.layerNames[k];
+            final boolean vis = state.layerVisible[k], act = id == state.activeLayer;
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(Ui.dp(this, 2), 0, Ui.dp(this, 2), 0);
+            row.setBackground(act ? Ui.round(Ui.color(this, R.color.accent_container), Ui.dp(this, 12)) : Ui.ripple(this, null, Ui.dp(this, 12)));
+            Ui.IconButton eye = icon(vis ? R.drawable.ic_eye : R.drawable.ic_eye_off, vis ? "Hide " + name : "Show " + name);
+            eye.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, vis ? R.color.icon : R.color.on_surface_variant)));
+            eye.setOnClickListener(v -> engine.setLayerVisible(id, !vis));
+            row.addView(eye);
+            TextView t = Ui.text(this, name, 15, Ui.color(this, act ? R.color.on_surface : vis ? R.color.on_surface : R.color.on_surface_variant),
+                    act ? Ui.bold() : null);
+            t.setPadding(Ui.dp(this, 6), Ui.dp(this, 12), Ui.dp(this, 6), Ui.dp(this, 12));
+            row.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
+            if (act) {
+                TextView tag = Ui.text(this, "Writing", 11.5f, acc, Ui.medium());
+                tag.setPadding(0, 0, Ui.dp(this, 4), 0);
+                row.addView(tag);
+            }
+            Ui.IconButton more = icon(R.drawable.ic_more, "Options for " + name);
+            more.setOnClickListener(v -> layerMenu(v, id, name, rank, n));
+            row.addView(more);
+            row.setOnClickListener(v -> engine.setActiveLayer(id));
+            row.setOnLongClickListener(v -> { renameLayer(id, name); return true; });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.bottomMargin = Ui.dp(this, 2);
+            box.addView(row, lp);
+        }
+    }
+
+    private void layerMenu(View anchor, int id, String name, int rank, int n) {
+        Ui.Popover m = new Ui.Popover(this, 260); // over the Layers panel, which stays open
+        m.title(name);
+        java.util.List<Ui.Popover> self = new java.util.ArrayList<>();
+        self.add(m);
+        m.add(Ui.actionRow(this, R.drawable.ic_text, "Rename", null, v -> { m.dismiss(); renameLayer(id, name); }));
+        if (rank < n - 1) m.add(Ui.actionRow(this, R.drawable.ic_chevron, "Move up", "Drawn over the layer above", v -> { m.dismiss(); engine.moveLayer(id, +1); }));
+        if (rank > 0) {
+            m.add(Ui.actionRow(this, R.drawable.ic_chevron, "Move down", null, v -> { m.dismiss(); engine.moveLayer(id, -1); }));
+            m.add(Ui.actionRow(this, R.drawable.ic_layers, "Merge down", "Puts everything on it onto the layer below", v -> { m.dismiss(); engine.mergeLayerDown(id); }));
+        }
+        if (n > 1) m.add(Ui.actionRow(this, R.drawable.ic_trash, "Delete layer", "Removes it and its writing from every page", v -> {
+            m.dismiss();
+            new AlertDialog.Builder(this).setTitle("Delete \"" + name + "\"?")
+                    .setMessage("Everything on this layer, on every page, goes with it. Undo brings it back.")
+                    .setPositiveButton("Delete", (d, x) -> engine.deleteLayer(id))
+                    .setNegativeButton("Cancel", null).show();
+        }));
+        m.show(anchor);
+    }
+
+    private void renameLayer(int id, String name) {
+        EditText et = new EditText(this);
+        et.setText(name);
+        et.setSelectAllOnFocus(true);
+        et.setSingleLine(true);
+        FrameLayout w = new FrameLayout(this);
+        int pd = Ui.dp(this, 22);
+        w.setPadding(pd, Ui.dp(this, 8), pd, 0);
+        w.addView(et);
+        new AlertDialog.Builder(this).setTitle("Layer name").setView(w)
+                .setPositiveButton("Save", (d, x) -> engine.renameLayer(id, et.getText().toString()))
+                .setNegativeButton("Cancel", null).show();
+        et.requestFocus();
+    }
+
+    /** Selection bar → Layer: move what's selected onto another layer. */
+    private void pickLayerForSelection(View anchor) {
+        if (state == null || state.layerIds.length < 2) return;
+        Ui.Popover p = newPop(280).title("Move to layer");
+        for (int k = state.layerIds.length - 1; k >= 0; k--) {
+            final int id = state.layerIds[k];
+            if (id == state.activeLayer) continue;
+            p.add(Ui.actionRow(this, state.layerVisible[k] ? R.drawable.ic_layers : R.drawable.ic_eye_off, state.layerNames[k],
+                    state.layerVisible[k] ? null : "Hidden", v -> { pop.dismiss(); engine.selToLayer(id); }));
+        }
+        p.show(anchor);
     }
 
     /** "To text" on the shelf: converts the selection, or with nothing selected, the next thing lassoed. */
@@ -1714,6 +1839,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setEraserSize(eraserDp);
         // only a tool change drops the selection (colour / size changes recolour or keep a fresh shape's handles)
         if (tool != appliedTool && tool != Engine.TOOL_LASSO) hideSelection();
+        // a tool was picked (from the bar or the shelf): the shelf closes unless it's pinned open
+        if (tool != appliedTool && appliedTool != -1 && shelfOpen && !shelfPinned && pendingToText == null) setShelfOpen(false);
         appliedTool = tool;
         updatePaste();
         renderFavs();
@@ -3266,6 +3393,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         editTextB.setVisibility(View.GONE);
         selBar.addView(editTextB, 0);
         selBar.addView(selAction(R.drawable.ic_sparkle, "Beautify", v -> beautify(false)));
+        toLayerB = selAction(R.drawable.ic_layers, "Layer", this::pickLayerForSelection);
+        toLayerB.setVisibility(View.GONE);
+        selBar.addView(toLayerB);
         selBar.addView(selAction(R.drawable.ic_trash, "Delete", v -> engine.selDelete()));
         root.addView(selBar, new FrameLayout.LayoutParams(-2, -2));
     }
@@ -4076,6 +4206,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     @Override
     public void onState(Engine.State s) {
         if (editTextB != null) editTextB.setVisibility(s.selText ? View.VISIBLE : View.GONE);
+        if (toLayerB != null) toLayerB.setVisibility(s.layerIds.length > 1 ? View.VISIBLE : View.GONE);
+        if (layersBox != null && pop != null && layersBox.isAttachedToWindow()) ui.post(() -> renderLayers(layersBox));
         state = s;
         undoB.setEnabledLook(s.canUndo);
         redoB.setEnabledLook(s.canRedo);

@@ -31,6 +31,9 @@ final class Notebook {
     private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235, MAGIC6 = 0x4E494236, MAGIC7 = 0x4E494237;
     // NIB8 (Nib 2.3): ink.bin is only an index; each page's ink and items are in pages/<id>.bin ("NIBP")
     private static final int MAGIC8 = 0x4E494238, MAGIC_PAGE = 0x4E494250;
+    // layers (2.5): a block after the index's pages, and after a page file's items (each item's layer); a stroke's
+    // layer rides in the top byte of its tool word, which older Nib masks off
+    private static final int MAGIC_LAYERS = 0x4C415952;
     // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths, NIB6 +text style, NIB7 = NIB6 with int-length strings.
     // NIB7 is written only when a string is too long for writeUTF (64 KB), so other notebooks stay readable by older Nib.
     static final int MARGIN_LEFT = 1, MARGIN_HEADER = 2, MARGIN_BORDER = 4;
@@ -46,6 +49,10 @@ final class Notebook {
         final int color;     // TEXT / TAPE colour
         final float[] pts;   // TAPE: the centre line x0,y0,x1,y1,… (page-local); size = its thickness
         final String style;  // TEXT: font, bold/italic/underline/strike, alignment (Fonts.Style); null = default
+        int layer;           // the notebook layer it's on (set when it's made; copies keep it)
+
+        /** Sets the layer (on a just-made item) and returns it. */
+        Item lay(int l) { layer = l; return this; }
 
         Item(int type, float x, float y, float w, float h, String text, float size, int color) {
             this(type, x, y, w, h, text, size, color, null);
@@ -126,21 +133,23 @@ final class Notebook {
                 np = new float[pts.length];
                 for (int i = 0; i + 1 < pts.length; i += 2) { np[i] = (pts[i] - px) * s + px + tx; np[i + 1] = (pts[i + 1] - py) * s + py + ty; }
             }
-            return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size * s, color, np, Fonts.scaled(style, s));
+            return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size * s, color, np, Fonts.scaled(style, s)).lay(layer);
         }
 
-        Item withText(String t, float nh) { return new Item(type, x, y, w, nh, t, size, color, pts, style); }
+        Item withText(String t, float nh) { return new Item(type, x, y, w, nh, t, size, color, pts, style).lay(layer); }
 
-        Item withStyle(String st) { return new Item(type, x, y, w, h, text, size, color, pts, st); }
+        Item withStyle(String st) { return new Item(type, x, y, w, h, text, size, color, pts, st).lay(layer); }
 
-        Item withColor(int c) { return new Item(type, x, y, w, h, text, size, c, pts, style); }
+        Item withColor(int c) { return new Item(type, x, y, w, h, text, size, c, pts, style).lay(layer); }
+
+        Item onLayer(int l) { return new Item(type, x, y, w, h, text, size, color, pts, style).lay(l); }
 
         /** TAPE: text holds the pattern, plus "|open" while the tape is peeled back to show what's under it. */
         boolean revealed() { return type == TAPE && text.endsWith("|open"); }
 
         String pattern() { return type == TAPE ? (revealed() ? text.substring(0, text.length() - 5) : text) : ""; }
 
-        Item withRevealed(boolean r) { return new Item(type, x, y, w, h, pattern() + (r ? "|open" : ""), size, color, pts, style); }
+        Item withRevealed(boolean r) { return new Item(type, x, y, w, h, pattern() + (r ? "|open" : ""), size, color, pts, style).lay(layer); }
 
         boolean contains(float px, float py, float pad) {
             if (px < x - pad || px > x + w + pad || py < y - pad || py > y + h + pad) return false;
@@ -298,6 +307,72 @@ final class Notebook {
         Page origin; // snapCopy: the page it was copied from
     }
 
+    /**
+     * A layer of the whole notebook (the same list on every page). Every stroke and item carries a layer id; layers
+     * draw bottom to top in list order, a hidden one isn't drawn or exported. New ink goes on the active layer, and
+     * the eraser and lasso only touch that one.
+     */
+    static final class Layer {
+        final int id;
+        String name;
+        boolean visible = true;
+        Layer(int id, String name) { this.id = id; this.name = name; }
+        Layer copy() { Layer l = new Layer(id, name); l.visible = visible; return l; }
+    }
+
+    /** Bottom to top. Never empty. */
+    ArrayList<Layer> layers = new ArrayList<>(java.util.Collections.singletonList(new Layer(0, "Layer 1")));
+    int activeLayer;
+
+    Layer layer(int id) {
+        for (Layer l : layers) if (l.id == id) return l;
+        return null;
+    }
+
+    /** Draw position of a layer id (unknown ids — from a layer since deleted — draw with the first layer). */
+    int layerRank(int id) {
+        for (int i = 0; i < layers.size(); i++) if (layers.get(i).id == id) return i;
+        return 0;
+    }
+
+    boolean layerVisible(int id) {
+        Layer l = layer(id);
+        return l == null || l.visible;
+    }
+
+    /** True when there's more than one layer, or a hidden one: then drawing has to look at layers at all. */
+    boolean layered() { return layers.size() > 1 || !layers.get(0).visible; }
+
+    /** A free layer id (ids are stored in a byte of each stroke: 0..255). */
+    int newLayerId() {
+        for (int id = 0; id < 256; id++) if (layer(id) == null) return id;
+        return -1;
+    }
+
+    static ArrayList<Layer> copyLayers(ArrayList<Layer> src) {
+        ArrayList<Layer> o = new ArrayList<>();
+        for (Layer l : src) o.add(l.copy());
+        return o;
+    }
+
+    /** Strokes in drawing order: by layer (bottom first), keeping each layer's own order. Hidden ones are kept. */
+    ArrayList<Stroke> inDrawOrder(ArrayList<Stroke> list) {
+        if (layers.size() < 2) return list;
+        boolean sorted = true;
+        for (int i = 1; i < list.size() && sorted; i++) if (layerRank(list.get(i).layer) < layerRank(list.get(i - 1).layer)) sorted = false;
+        if (sorted) return list;
+        ArrayList<Stroke> o = new ArrayList<>(list);
+        o.sort((a, b) -> Integer.compare(layerRank(a.layer), layerRank(b.layer))); // stable
+        return o;
+    }
+
+    ArrayList<Item> itemsInDrawOrder(ArrayList<Item> list) {
+        if (layers.size() < 2) return list;
+        ArrayList<Item> o = new ArrayList<>(list);
+        o.sort((a, b) -> Integer.compare(layerRank(a.layer), layerRank(b.layer)));
+        return o;
+    }
+
     ArrayList<Page> pages = new ArrayList<>();
     String title = "Untitled", folder = "";
     String cover; // Covers value ("design:colour"), null = none; kept in meta.properties, written by setCover only
@@ -367,6 +442,19 @@ final class Notebook {
             p.margins = in.readInt();
             nb.pages.add(p);
         }
+        if (in.available() >= 8 && in.readInt() == MAGIC_LAYERS) {
+            int n = in.readInt();
+            if (n < 1 || n > 256) throw new IOException("bad layer count " + n);
+            ArrayList<Layer> ls = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                Layer l = new Layer(in.readInt(), readStr(in, true));
+                l.visible = in.readBoolean();
+                ls.add(l);
+            }
+            nb.layers = ls;
+            nb.activeLayer = in.readInt();
+            if (nb.layer(nb.activeLayer) == null) nb.activeLayer = ls.get(ls.size() - 1).id;
+        }
     }
 
     /** NIB1–7: everything in one file. Read in full; the first save turns it into the index + page files. */
@@ -407,6 +495,7 @@ final class Notebook {
             if (n < 0 || n > 50_000_000) throw new IOException("bad point count " + n);
             Stroke st = new Stroke(tw & 0xffff, color, width, n); // exactly as big as it needs
             st.shape = (tw >>> 16) & 0xff;
+            st.layer = (tw >>> 24) & 0xff;
             for (int k = 0; k < n; k++) st.add(in.readFloat(), in.readFloat(), in.readFloat());
             out.add(st);
         }
@@ -443,6 +532,10 @@ final class Notebook {
             if (in.readInt() > 1) throw new IOException("page from a newer Nib");
             readStrokes(in, st);
             readItems(in, it, true, true, true);
+            if (in.available() >= 8 && in.readInt() == MAGIC_LAYERS) {
+                int n = in.readInt();
+                for (int i = 0; i < n && i < it.size(); i++) it.get(i).layer = in.readInt();
+            }
         }
     }
 
@@ -454,7 +547,7 @@ final class Notebook {
             out.writeInt(1);
             out.writeInt(st.size());
             for (Stroke s : st) {
-                out.writeInt(s.tool | (s.shape << 16));
+                out.writeInt(s.tool | (s.shape << 16) | ((s.layer & 0xff) << 24));
                 out.writeInt(s.color);
                 out.writeFloat(s.width);
                 out.writeInt(s.n);
@@ -479,6 +572,13 @@ final class Notebook {
                 out.writeBoolean(i.style != null);
                 if (i.style != null) writeStr(out, i.style, true);
             }
+            boolean anyLayer = false;
+            for (Item i : it) if (i.layer != 0) { anyLayer = true; break; }
+            if (anyLayer) { // each item's layer, after the items (older Nib stops before this)
+                out.writeInt(MAGIC_LAYERS);
+                out.writeInt(it.size());
+                for (Item i : it) out.writeInt(i.layer);
+            }
             out.flush();
             fo.getFD().sync(); // on disk before the index names it
         }
@@ -498,6 +598,8 @@ final class Notebook {
         n.title = title;
         n.canvas = canvas;
         n.paper = paper;
+        n.layers = copyLayers(layers);
+        n.activeLayer = activeLayer;
         return n;
     }
 
@@ -518,6 +620,8 @@ final class Notebook {
             n.pages.add(p.snapCopy());
         }
         n.nextId = nextId;
+        n.layers = copyLayers(layers);
+        n.activeLayer = activeLayer;
         n.legacy = legacy;
         n.loadFailed = loadFailed;
         // the notes screen's picture of page 1: only redrawn when page 1 or its look changed
@@ -571,6 +675,15 @@ final class Notebook {
                 out.writeFloat(p.strength);
                 out.writeInt(p.margins);
             }
+            // layers (2.5): after the pages, so older Nib reads the pages and ignores them
+            out.writeInt(MAGIC_LAYERS);
+            out.writeInt(layers.size());
+            for (Layer l : layers) {
+                out.writeInt(l.id);
+                writeStr(out, l.name, true);
+                out.writeBoolean(l.visible);
+            }
+            out.writeInt(activeLayer);
             out.flush();
             fo.getFD().sync();
         }

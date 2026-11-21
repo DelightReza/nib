@@ -486,6 +486,7 @@ final class Beautify {
     private static Stroke rebuild(S k) {
         Stroke o = new Stroke(k.src.tool, k.src.color, k.src.width);
         o.shape = k.src.shape;
+        o.layer = k.src.layer;
         for (int i = 0; i < k.n; i++) o.add(k.x[i], k.y[i], k.pr[i]);
         return o;
     }

@@ -14,6 +14,8 @@ final class Stroke {
     final float width;
     /** Clean shape this stroke is: 0 freehand, LINE, or CLOSED (snapped circle / polygon). Shapes keep handles. */
     int shape;
+    /** The notebook layer it's on (Notebook.Layer id); 0 = the first layer. Copies keep it. */
+    int layer;
     static final int LINE = 1, CLOSED = 2;
     float[] p = new float[4 * 64]; // x, y, pressure(smoothed), radius
     int n;
@@ -168,6 +170,7 @@ final class Stroke {
     Stroke transformed(float px, float py, float sc, float tx, float ty) {
         Stroke o = new Stroke(tool, color, width * sc, n);
         o.shape = shape;
+        o.layer = layer;
         for (int i = 0; i < n; i++) o.add((x(i) - px) * sc + px + tx, (y(i) - py) * sc + py + ty, p[4 * i + 2]);
         return o;
     }
@@ -175,7 +178,15 @@ final class Stroke {
     Stroke withColor(int c) {
         Stroke o = new Stroke(tool, c, width, n);
         o.shape = shape;
+        o.layer = layer;
         for (int i = 0; i < n; i++) o.add(x(i), y(i), p[4 * i + 2]);
+        return o;
+    }
+
+    /** The same stroke on another layer. */
+    Stroke onLayer(int l) {
+        Stroke o = transformed(0, 0, 1, 0, 0);
+        o.layer = l;
         return o;
     }
 
@@ -200,7 +211,7 @@ final class Stroke {
                 if (cur != null && cur.n > 0) out.add(cur.trim());
                 cur = null;
             } else {
-                if (cur == null) cur = new Stroke(tool, color, width);
+                if (cur == null) { cur = new Stroke(tool, color, width); cur.layer = layer; }
                 cur.add(x(i), y(i), p[4 * i + 2]);
             }
         }

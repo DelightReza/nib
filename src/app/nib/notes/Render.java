@@ -424,7 +424,8 @@ final class Render {
                 b.recycle();
             }
         }
-        for (Notebook.Item it : p.items()) if (it.type != Notebook.Item.TAPE) item(c, dir, it, dark(nb));
+        // layer by layer (bottom first); hidden layers aren't drawn, so not exported either
+        for (Notebook.Item it : nb.itemsInDrawOrder(p.items())) if (it.type != Notebook.Item.TAPE && nb.layerVisible(it.layer)) item(c, dir, it, dark(nb));
         boolean dk = dark(nb);
         SegBuf tmp = new SegBuf();
         Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -432,11 +433,11 @@ final class Render {
         Paint hl = new Paint(ink);
         if (!forPdf) hl.setXfermode(new PorterDuffXfermode(dk ? PorterDuff.Mode.LIGHTEN : PorterDuff.Mode.DARKEN));
         // this page's strokes, then the parts of the neighbours' strokes that run onto it (shifted into its coordinates)
-        java.util.ArrayList<Stroke> all = new java.util.ArrayList<>(p.strokes());
+        java.util.ArrayList<Stroke> all = new java.util.ArrayList<>();
         java.util.ArrayList<Float> dys = new java.util.ArrayList<>();
-        for (int i = 0; i < all.size(); i++) dys.add(0f);
-        if (prev != null) for (Stroke s : prev.strokes()) if (s.b > prev.h) { all.add(s); dys.add(-prev.h); }
-        if (next != null) for (Stroke s : next.strokes()) if (s.t < 0) { all.add(s); dys.add(p.h); }
+        for (Stroke s : nb.inDrawOrder(p.strokes())) if (nb.layerVisible(s.layer)) { all.add(s); dys.add(0f); }
+        if (prev != null) for (Stroke s : prev.strokes()) if (s.b > prev.h && nb.layerVisible(s.layer)) { all.add(s); dys.add(-prev.h); }
+        if (next != null) for (Stroke s : next.strokes()) if (s.t < 0 && nb.layerVisible(s.layer)) { all.add(s); dys.add(p.h); }
         for (int pass = 0; pass < 2; pass++) {
             for (int si = 0; si < all.size(); si++) {
                 Stroke s = all.get(si);
@@ -453,7 +454,8 @@ final class Render {
                 segs(c, tmp, pt);
             }
         }
-        for (Notebook.Item it : p.items()) if (it.type == Notebook.Item.TAPE) tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f);
+        for (Notebook.Item it : nb.itemsInDrawOrder(p.items()))
+            if (it.type == Notebook.Item.TAPE && nb.layerVisible(it.layer)) tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f);
     }
 
     /** Draws emitted segments: round capsules, or for the chisel highlighter one filled outline (no overlaps darken). */
