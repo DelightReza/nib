@@ -181,18 +181,24 @@ final class Ui {
             setContentDescription("Stroke size");
         }
         int tint;
-        void set(float f) { frac = f; invalidate(); }
+        float diam = -1; // ink diameter in px as it lands on the page now; -1 = a relative size (frac)
+        boolean chosen;
+        void set(float f) { frac = f; diam = -1; invalidate(); }
+        /** Shows the real thickness: a dot as wide as the ink this size writes at the current zoom. */
+        void ink(float px) { diam = px; invalidate(); }
+        void chosen(boolean on) { if (chosen != on) { chosen = on; invalidate(); } }
         void tint(int c) { tint = c; invalidate(); }
         @Override protected void onDraw(Canvas cv) {
             Context c = getContext();
-            float cx = getWidth() / 2f, cy = getHeight() / 2f;
+            float cx = getWidth() / 2f, cy = getHeight() / 2f, ring = dp(c, 12.5f);
+            float r = diam >= 0 ? Math.max(0.75f, Math.min(diam / 2f, Math.min(cx, cy) - dp(c, 2))) : dp(c, 2f + 7.5f * frac);
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(Math.max(1, dp(c, 1)));
-            p.setColor(color(c, R.color.outline));
-            cv.drawCircle(cx, cy, dp(c, 12.5f), p);
+            p.setStrokeWidth(Math.max(1, dp(c, chosen ? 1.6f : 1)));
+            p.setColor(color(c, chosen ? R.color.accent : R.color.outline));
+            if (r < ring - dp(c, 2)) cv.drawCircle(cx, cy, ring, p);
             p.setStyle(Paint.Style.FILL);
             p.setColor(tint != 0 ? tint : color(c, R.color.icon));
-            cv.drawCircle(cx, cy, dp(c, 2f + 7.5f * frac), p);
+            cv.drawCircle(cx, cy, r, p);
         }
     }
 
@@ -511,9 +517,13 @@ final class Ui {
             p.setStrokeCap(Paint.Cap.ROUND);
             setBackground(round(color(c, R.color.surface_variant), dp(c, 10)));
         }
+        float zoom; // screen px per page unit (the page's zoom now), 0 = a typical fit-width zoom
         void set(int tool, int color, float width) { this.tool = tool; this.color = color; this.width = width; invalidate(); }
+        void zoom(float z) { zoom = z; invalidate(); }
         @Override protected void onDraw(Canvas cv) {
-            float w = getWidth(), h = getHeight(), k = 1.7f * getResources().getDisplayMetrics().density / 2.5f;
+            // drawn at the page's zoom, so the sample is exactly as thick as the ink will be
+            float w = getWidth(), h = getHeight(), k = zoom > 0 ? zoom : 1.7f * getResources().getDisplayMetrics().density / 2.5f;
+            k = Math.min(k, h * 0.4f / Math.max(1f, width)); // zoomed far in: keep a thick pen inside the box
             Stroke s = new Stroke(tool, color, width);
             int n = 90;
             for (int i = 0; i <= n; i++) {

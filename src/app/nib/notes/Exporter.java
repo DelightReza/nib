@@ -44,6 +44,7 @@ final class Exporter {
                 cv.scale(k, k);
                 Render.page(cv, nb, dir, p, src, 1600, true);
                 doc.finishPage(pg);
+                p.unload(); // a long notebook is exported a page at a time, not all in memory at once
             }
             try (FileOutputStream o = new FileOutputStream(out)) {
                 doc.writeTo(o);

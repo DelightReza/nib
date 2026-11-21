@@ -60,8 +60,22 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     static final int[] HL_PALETTE = {
             0xffffe066, 0xfffff3a0, 0xffffd0a6, 0xffffbfe0, 0xfff3c4ff, 0xffd9c8ff, 0xffaedcff,
             0xffa8f0e8, 0xffb2f2a6, 0xffd8f5a2, 0xffe6e6e6, 0xffffc2c2, 0xffc2e0ff, 0xfffde2b8};
-    private static final float PEN_MIN = 0.8f, PEN_MAX = 8f, HL_MIN = 8f, HL_MAX = 48f;
-    private static final float[] PEN_PRESETS = {1.5f, 2.6f, 4.6f}, HL_PRESETS = {14f, 22f, 36f};
+    private static final float PEN_MIN = 0.5f, PEN_MAX = 16f, HL_MIN = 6f, HL_MAX = 64f;
+    private static final float[] PEN_PRESETS = {1.2f, 2.6f, 6f}, HL_PRESETS = {12f, 22f, 40f};
+
+    /** Thickness slider 0..100 ↔ width: even steps feel even (each step is the same ratio, not the same amount). */
+    private static float sliderToW(int v, float min, float max) { return (float) (min * Math.pow(max / min, v / 100.0)); }
+
+    private static int wToSlider(float w, float min, float max) {
+        w = Math.max(min, Math.min(max, w));
+        return (int) Math.round(Math.log(w / min) / Math.log(max / min) * 100);
+    }
+
+    /** Ink diameter in screen px for this pen at normal writing pressure, at the current zoom. */
+    private float inkPx(int tool, float w) {
+        float z = state != null && state.z > 0 ? state.z : 1.8f;
+        return new Stroke(tool, 0, w).radius(0.5f) * 2 * z;
+    }
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
     private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14;
@@ -460,12 +474,28 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         placeZoomChip();
     }
 
-    /** Under the top bars, or under the tool bar when that's docked at the top. */
+    /**
+     * Under the top bars (or under the tool bar when that's docked at the top), centred over the notebook being
+     * zoomed: in split view that's the pane in use, not the middle of the window.
+     */
     private void placeZoomChip() {
         if (zoomChip == null) return;
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) zoomChip.getLayoutParams();
-        lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 10 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 : 0));
+        lp.gravity = Gravity.TOP | Gravity.START;
+        lp.topMargin = 0;
         zoomChip.setLayoutParams(lp);
+        int below = Ui.dp(this, EDGE_DP + CAP_DP + 10 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 + shelfDp() : 0));
+        float left = 0, width = root.getWidth(), top = below;
+        Pane pn = shown[1] != null ? panes[focusPane] : null;
+        if (pn != null && pn.getWidth() > 0) {
+            left = paneRow.getLeft() + pn.getLeft();
+            width = pn.getWidth();
+            float pt = paneRow.getTop() + pn.getTop();
+            if (pt > 0) top = pt + Ui.dp(this, 12); // the lower of two stacked panes: just inside its top edge
+        }
+        zoomChip.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        zoomChip.setTranslationX(left + (width - zoomChip.getMeasuredWidth()) / 2f);
+        zoomChip.setTranslationY(top);
     }
 
     private void setZoomChipLook(int pct, boolean locked) {
@@ -480,6 +510,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void showZoomChip(int pct, boolean locked) {
         if (zoomChip == null) return;
         setZoomChipLook(pct, locked);
+        placeZoomChip();
         if (zoomChip.getVisibility() != View.VISIBLE) {
             zoomChip.setAlpha(0f);
             zoomChip.setVisibility(View.VISIBLE);
@@ -594,6 +625,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         updatePaneBars();
         renderTabs();
         saveTabs();
+        placeZoomChip();
     }
 
     private void focusPaneIdx(int p) {
@@ -635,7 +667,6 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private boolean splitVert;   // true: notebooks stacked top and bottom; false: side by side
     private float splitRatio;    // share of the window the first pane gets
     private LinearLayout splitKnob;
-    private Ui.IconButton knobOrient;
     private ImageView knobGrip;
     private View splitGrab;      // invisible strip along the rule: drag it to resize
     private View splitGuide;     // accent line that follows the finger while the handle is dragged
@@ -663,8 +694,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 return drag;
             }
             @Override public boolean onTouchEvent(MotionEvent e) {
-                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { downX = e.getRawX(); downY = e.getRawY(); return true; }
-                if (e.getActionMasked() == MotionEvent.ACTION_MOVE) drag = true;
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN) { downX = e.getRawX(); downY = e.getRawY(); drag = false; return true; }
+                if (a == MotionEvent.ACTION_MOVE && Math.hypot(e.getRawX() - downX, e.getRawY() - downY) > Ui.dp(EditorActivity.this, 6)) drag = true;
+                if (a == MotionEvent.ACTION_UP && !drag) { showSplitMenu(this); return true; } // a tap: the split's options
                 splitDrag(e, drag);
                 return true;
             }
@@ -697,29 +730,28 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         splitGrab.setContentDescription("Drag to resize the panes, double-tap for equal halves");
         splitGrab.setVisibility(View.GONE);
         root.addView(splitGrab, new FrameLayout.LayoutParams(Ui.dp(this, 28), -1));
+        // a slim handle sitting on the rule: drag it to resize, tap it for the split's options
         splitKnob.setGravity(Gravity.CENTER);
-        int pad = Ui.dp(this, 3);
-        splitKnob.setPadding(pad, pad, pad, pad);
-        Ui.capsule(splitKnob, this, 20);
-        knobGrip = new ImageView(this); // shows the handle can be dragged
+        Ui.capsule(splitKnob, this, 8);
+        splitKnob.setContentDescription("Split view: drag to resize, tap for options");
+        knobGrip = new ImageView(this);
         knobGrip.setImageResource(R.drawable.ic_grip);
-        knobGrip.setScaleType(ImageView.ScaleType.CENTER);
+        knobGrip.setScaleType(ImageView.ScaleType.FIT_CENTER);
         knobGrip.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, R.color.on_surface_variant)));
-        knobGrip.setContentDescription("Drag to resize");
-        splitKnob.addView(knobGrip, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 28)));
-        knobOrient = new Ui.IconButton(this, R.drawable.ic_split_rows, "Stack top and bottom");
-        knobOrient.setOnClickListener(v -> setSplitVert(!splitVert));
-        Ui.IconButton swap = new Ui.IconButton(this, R.drawable.ic_swap, "Swap sides");
-        swap.setOnClickListener(v -> swapPanes());
-        Ui.IconButton close = new Ui.IconButton(this, R.drawable.ic_close, "Close split view");
-        close.setOnClickListener(v -> closeSplit(focusPane));
-        for (Ui.IconButton b : new Ui.IconButton[]{knobOrient, swap, close}) {
-            b.setTooltipText(b.getContentDescription());
-            splitKnob.addView(b, new LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 36)));
-        }
+        splitKnob.addView(knobGrip, new LinearLayout.LayoutParams(Ui.dp(this, 14), Ui.dp(this, 20)));
         splitKnob.setVisibility(View.GONE);
         root.addView(splitKnob, new FrameLayout.LayoutParams(-2, -2));
         paneRow.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> placeKnob());
+    }
+
+    private void showSplitMenu(View anchor) {
+        Ui.Popover p = newPop(280);
+        p.add(Ui.actionRow(this, splitVert ? R.drawable.ic_split_cols : R.drawable.ic_split_rows, splitVert ? "Side by side" : "Stack top and bottom", null,
+                v -> { pop.dismiss(); setSplitVert(!splitVert); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_swap, "Swap sides", null, v -> { pop.dismiss(); swapPanes(); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_grip, "Equal halves", null, v -> { pop.dismiss(); setSplitRatio(0.5f); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_close, "Close split view", "Keeps the notebook you're writing in", v -> { pop.dismiss(); closeSplit(focusPane); }));
+        p.show(anchor);
     }
 
     /** Drag on the handle or the rule: a guide line follows, the panes take the new sizes on lift. */
@@ -799,12 +831,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             splitGrab.setTranslationX(splitDivider.getLeft() + splitDivider.getWidth() / 2f - g / 2f);
             splitGrab.setTranslationY(0);
         }
-        splitKnob.setOrientation(splitVert ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        knobOrient.setImageResource(splitVert ? R.drawable.ic_split_cols : R.drawable.ic_split_rows);
-        knobOrient.setContentDescription(splitVert ? "Side by side" : "Stack top and bottom");
-        knobOrient.setTooltipText(knobOrient.getContentDescription());
+        // lies along the rule: 16 × 48 dp across a vertical rule, 48 × 16 dp along a horizontal one
+        int thin = Ui.dp(this, 16), lng = Ui.dp(this, 48);
+        FrameLayout.LayoutParams kl = (FrameLayout.LayoutParams) splitKnob.getLayoutParams();
+        kl.width = splitVert ? lng : thin;
+        kl.height = splitVert ? thin : lng;
+        splitKnob.setLayoutParams(kl);
         splitKnob.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int kw = splitKnob.getMeasuredWidth(), kh = splitKnob.getMeasuredHeight();
+        int kw = kl.width, kh = kl.height;
         if (splitVert) {
             float y = splitDivider.getTop() + splitDivider.getHeight() / 2f;
             // off-centre to the right so it never sits on the tool capsule's column or the middle of the writing
@@ -946,15 +980,16 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     // ---- fade the capsules while writing ---------------------------------------------------
 
     private final Runnable showChrome = () -> {
-        for (View v : new View[]{capLeft, capRight, capTools}) v.animate().alpha(1f).setDuration(110).start();
+        for (View v : new View[]{capLeft, capRight, capTools, this.capAdv}) if (v != null) v.animate().alpha(1f).setDuration(110).start();
     };
 
     private void onPen(boolean down) {
         if (!autoHide) return;
         ui.removeCallbacks(showChrome);
-        boolean writing = tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE;
+        boolean writing = tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER
+                || tool == Engine.TOOL_TAPE || tool == Engine.TOOL_SHAPE;
         if (down && writing) {
-            for (View v : new View[]{capLeft, capRight, capTools}) v.animate().alpha(0f).setDuration(90).start();
+            for (View v : new View[]{capLeft, capRight, capTools, capAdv}) if (v != null) v.animate().alpha(0f).setDuration(90).start();
         } else if (!down) {
             ui.postDelayed(showChrome, 200); // short enough to feel instant, long enough not to flash between words
         }
@@ -1071,33 +1106,55 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         capTools.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 10), 0);
         Ui.capsule(capTools, this, 20);
         capTools.setClipToOutline(false); // the selected disc's soft shadow may spill a little
+        // basic: the tools written with all day
         penB = toolDisc(R.drawable.ic_pen, "Pen", Engine.TOOL_PEN, false);
         hlB = toolDisc(R.drawable.ic_highlighter, "Highlighter", Engine.TOOL_HL, false);
         eraserB = toolDisc(R.drawable.ic_eraser, "Eraser", Engine.TOOL_ERASER, false);
         lassoB = toolDisc(R.drawable.ic_lasso, "Lasso select", Engine.TOOL_LASSO, false);
-        tapeB = toolDisc(R.drawable.ic_tape, "Tape", Engine.TOOL_TAPE, false);
-        laserB = toolDisc(0, "Laser pointer", Engine.TOOL_LASER, true);
-        textB = toolDisc(R.drawable.ic_text, "Text", Engine.TOOL_TEXT, false);
-        // narrow screens (phones): tools that don't fit fold into this disc (fitCapsule decides)
-        moreToolsB = new Ui.ToolDisc(this, R.drawable.ic_more, "More tools", false);
-        moreToolsB.setTooltipText("More tools");
-        moreToolsB.setOnClickListener(this::showMoreTools);
-        moreToolsB.setOnLongClickListener(v -> { if (hiddenToolActive()) openToolPanel(v); else showMoreTools(v); return true; });
-        moreToolsB.setVisibility(View.GONE);
-        capTools.addView(moreToolsB);
-        Ui.IconButton img = icon(R.drawable.ic_image, "Insert image");
-        img.setOnClickListener(this::showInsert);
-        capTools.addView(img);
+        // advanced: the shelf that slides out above the bar (built here, placed by applyDock)
+        advRow = new LinearLayout(this);
+        advRow.setGravity(Gravity.CENTER_VERTICAL);
+        textB = toShelf(toolDisc(R.drawable.ic_text, "Text", Engine.TOOL_TEXT, false));
+        shapeB = toShelf(toolDisc(R.drawable.ic_shapes, "Shapes", Engine.TOOL_SHAPE, false));
+        tapeB = toShelf(toolDisc(R.drawable.ic_tape, "Tape", Engine.TOOL_TAPE, false));
+        laserB = toShelf(toolDisc(0, "Laser pointer", Engine.TOOL_LASER, true));
+        Ui.IconButton img = icon(R.drawable.ic_image, "Image or sticker");
+        img.setOnClickListener(v -> showInsert(shelfAnchor(v)));
+        advRow.addView(img);
         imgB = img;
         rulerB = new Ui.ToolDisc(this, R.drawable.ic_ruler, "Ruler", false);
-        rulerB.setOnClickListener(v -> toggleRuler());
+        rulerB.setOnClickListener(v -> { toggleRuler(); shelfUsed(); });
         rulerB.setTooltipText("Ruler");
-        capTools.addView(rulerB);
+        advRow.addView(rulerB);
         fingerB = new Ui.ToolDisc(this, R.drawable.ic_touch, "Write with finger", false);
         fingerB.setTooltipText("Write with finger");
-        fingerB.setOnClickListener(v -> toggleFinger());
+        fingerB.setOnClickListener(v -> { toggleFinger(); shelfUsed(); });
         fingerB.set(fingerDraw, 0, 0);
-        capTools.addView(fingerB);
+        advRow.addView(fingerB);
+        advRow.addView(Ui.divider(this));
+        Ui.IconButton beaut = icon(R.drawable.ic_sparkle, "Beautify · the selection, or the whole page");
+        beaut.setOnClickListener(v -> { beautify(state == null || !state.hasSelection); shelfUsed(); });
+        advRow.addView(beaut);
+        Ui.IconButton toText = icon(R.drawable.ic_to_text, "Handwriting to text");
+        toText.setOnClickListener(this::toTextFromShelf);
+        advRow.addView(toText);
+        advRow.addView(Ui.divider(this));
+        pinB = icon(R.drawable.ic_pin, "Keep these tools open");
+        pinB.setOnClickListener(v -> {
+            shelfPinned = !shelfPinned;
+            prefs.edit().putBoolean("shelfPin", shelfPinned).apply();
+            styleShelf();
+            toast(shelfPinned ? "These tools stay open" : "These tools close after you pick one");
+        });
+        advRow.addView(pinB);
+        shelfOpen = prefs.getBoolean("shelfOpen", false);
+        shelfPinned = prefs.getBoolean("shelfPin", false);
+        // narrow screens (phones): favourites that don't fit fold into this disc (fitCapsule decides)
+        moreToolsB = new Ui.ToolDisc(this, R.drawable.ic_more, "Favourite pens", false);
+        moreToolsB.setTooltipText("Favourite pens");
+        moreToolsB.setOnClickListener(this::showMoreTools);
+        moreToolsB.setVisibility(View.GONE);
+        capTools.addView(moreToolsB);
         favSep = Ui.divider(this);
         capTools.addView(favSep);
         favRow = new LinearLayout(this);
@@ -1121,12 +1178,148 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         sizeB.setLayoutParams(new ViewGroup.MarginLayoutParams(Ui.dp(this, 40), Ui.dp(this, 44)));
         sizeB.setOnClickListener(v -> openToolPanel(v)); // no longer in the bar: tapping the active tool again opens the same panel
         capTools.addView(palette);
+        capTools.addView(Ui.divider(this));
+        // opens / closes the shelf; while it's closed and one of its tools is in use, it shows that tool
+        shelfB = new Ui.ToolDisc(this, R.drawable.ic_chevron, "More tools", false);
+        shelfB.setOnClickListener(v -> setShelfOpen(!shelfOpen));
+        shelfB.setOnLongClickListener(v -> { if (advancedTool(tool)) openToolPanel(v); else setShelfOpen(!shelfOpen); return true; });
+        capTools.addView(shelfB);
         grip = new Ui.IconButton(this, R.drawable.ic_grip, "Move tool bar: drag to any edge");
         grip.setTooltipText("Drag to move the tool bar");
         grip.setLayoutParams(new ViewGroup.MarginLayoutParams(Ui.dp(this, 22), Ui.dp(this, 44)));
         grip.setOnTouchListener(this::dragToolbar);
         capTools.addView(grip);
         root.addView(capTools, new FrameLayout.LayoutParams(-2, Ui.dp(this, TOOLCAP_DP), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+    }
+
+    // ---- the advanced shelf: a second capsule beside the bar (above it at the bottom) ------------------
+
+    private static final int SHELF_DP = 52;
+    private LinearLayout advRow;
+    private FrameLayout capAdv;          // HorizontalScrollView / ScrollView holding advRow, by dock
+    private Ui.ToolDisc shapeB, shelfB;
+    private Ui.IconButton pinB;
+    private boolean shelfOpen, shelfPinned;
+    private View pendingToText;          // "To text" asked with nothing selected: convert the next lasso
+
+    private <T extends View> T toShelf(T v) {
+        ((ViewGroup) v.getParent()).removeView(v);
+        advRow.addView(v);
+        return v;
+    }
+
+    private static boolean advancedTool(int t) {
+        return t == Engine.TOOL_TEXT || t == Engine.TOOL_SHAPE || t == Engine.TOOL_TAPE || t == Engine.TOOL_LASER;
+    }
+
+    /** Something on the shelf was used: unless it's pinned open, it gets out of the way. */
+    private void shelfUsed() { if (!shelfPinned && shelfOpen) setShelfOpen(false); }
+
+    /** Closes the shelf (unless pinned) and gives the view a popover should point at: v, or the bar's shelf disc. */
+    private View shelfAnchor(View v) {
+        shelfUsed();
+        return shelfOpen ? v : shelfB;
+    }
+
+    private void setShelfOpen(boolean open) {
+        shelfOpen = open;
+        prefs.edit().putBoolean("shelfOpen", open).apply();
+        placeShelf(true);
+        styleShelf();
+        for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
+        placeZoomChip();
+        placeChips();
+    }
+
+    private void styleShelf() {
+        if (shelfB == null) return;
+        boolean adv = advancedTool(tool);
+        int icon = !shelfOpen && adv ? (tool == Engine.TOOL_TEXT ? R.drawable.ic_text : tool == Engine.TOOL_SHAPE ? R.drawable.ic_shapes
+                : tool == Engine.TOOL_TAPE ? R.drawable.ic_tape : R.drawable.ic_laser) : R.drawable.ic_chevron;
+        shelfB.setImageResource(icon);
+        // the chevron points toward the shelf when closed, away from it when open
+        float toward = dock == DOCK_BOTTOM ? -90 : dock == DOCK_TOP ? 90 : dock == DOCK_LEFT ? 0 : 180;
+        shelfB.setRotation(icon == R.drawable.ic_chevron ? (shelfOpen ? toward + 180 : toward) : 0);
+        int c = tool == Engine.TOOL_TAPE ? TAPE_COLORS[tapeCol] : tool == Engine.TOOL_LASER ? LASER_COLORS[laserCol]
+                : tool == Engine.TOOL_SHAPE ? penColors[penSlot] : 0;
+        shelfB.set(!shelfOpen && adv, c, 0);
+        shelfB.setContentDescription(shelfOpen ? "Hide more tools" : "More tools");
+        if (pinB != null) {
+            pinB.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, shelfPinned ? R.color.accent : R.color.icon)));
+            pinB.setBackground(shelfPinned ? Ui.round(Ui.color(this, R.color.accent_container), Ui.dp(this, 20)) : null);
+        }
+    }
+
+    /** Puts the shelf beside the bar for the current dock (a row along the top / bottom, a column at the sides). */
+    private void placeShelf(boolean animate) {
+        if (advRow == null) return;
+        boolean vert = dockVertical();
+        boolean rebuild = capAdv == null || (vert != (capAdv instanceof ScrollView));
+        if (rebuild) {
+            if (capAdv != null) { capAdv.removeAllViews(); root.removeView(capAdv); }
+            if (advRow.getParent() != null) ((ViewGroup) advRow.getParent()).removeView(advRow);
+            if (vert) { ScrollView v = new ScrollView(this); v.setVerticalScrollBarEnabled(false); capAdv = v; }
+            else { android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this); hs.setHorizontalScrollBarEnabled(false); capAdv = hs; }
+            Ui.capsule(capAdv, this, 20);
+            capAdv.addView(advRow);
+            root.addView(capAdv, root.indexOfChild(capTools));
+        }
+        advRow.setOrientation(vert ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        advRow.setGravity(Gravity.CENTER);
+        int pad = Ui.dp(this, 6);
+        if (vert) advRow.setPadding(0, pad, 0, pad); else advRow.setPadding(pad, 0, pad, 0);
+        for (int i = 0; i < advRow.getChildCount(); i++) orient(advRow.getChildAt(i), vert);
+        int sh = Ui.dp(this, SHELF_DP), edge = Ui.dp(this, EDGE_DP), gap = Ui.dp(this, 10), tc = Ui.dp(this, TOOLCAP_DP);
+        FrameLayout.LayoutParams lp;
+        switch (dock) {
+            case DOCK_TOP:
+                lp = new FrameLayout.LayoutParams(-2, sh, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12) + tc + gap;
+                break;
+            case DOCK_LEFT:
+                lp = new FrameLayout.LayoutParams(sh, -2, Gravity.START | Gravity.CENTER_VERTICAL);
+                lp.leftMargin = edge + tc + gap;
+                break;
+            case DOCK_RIGHT:
+                lp = new FrameLayout.LayoutParams(sh, -2, Gravity.END | Gravity.CENTER_VERTICAL);
+                lp.rightMargin = edge + tc + gap;
+                break;
+            default:
+                lp = new FrameLayout.LayoutParams(-2, sh, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                lp.bottomMargin = Ui.dp(this, EDGE_DP + 4) + tc + gap;
+        }
+        // never wider (taller) than the window: it scrolls instead
+        if (vert) lp.topMargin = lp.bottomMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12);
+        else lp.leftMargin = lp.rightMargin = edge;
+        capAdv.setLayoutParams(lp);
+        float off = Ui.dp(this, 12) * (dock == DOCK_BOTTOM ? 1 : dock == DOCK_TOP ? -1 : 0);
+        float offX = Ui.dp(this, 12) * (dock == DOCK_LEFT ? -1 : dock == DOCK_RIGHT ? 1 : 0);
+        capAdv.animate().cancel();
+        if (shelfOpen) {
+            if (capAdv.getVisibility() != View.VISIBLE) {
+                capAdv.setVisibility(View.VISIBLE);
+                if (animate) { capAdv.setAlpha(0f); capAdv.setTranslationY(off); capAdv.setTranslationX(offX); }
+            }
+            if (animate) capAdv.animate().alpha(1f).translationY(0).translationX(0).setDuration(150).start();
+            else { capAdv.setAlpha(1f); capAdv.setTranslationY(0); capAdv.setTranslationX(0); }
+        } else if (animate && capAdv.getVisibility() == View.VISIBLE) {
+            capAdv.animate().alpha(0f).translationY(off).translationX(offX).setDuration(120)
+                    .withEndAction(() -> { if (!shelfOpen) capAdv.setVisibility(View.GONE); }).start();
+        } else capAdv.setVisibility(View.GONE);
+    }
+
+    /** Shelf space taken next to the bar, when it's open (dp). */
+    private int shelfDp() { return shelfOpen ? SHELF_DP + 10 : 0; }
+
+    /** "To text" on the shelf: converts the selection, or with nothing selected, the next thing lassoed. */
+    private void toTextFromShelf(View btn) {
+        View v = shelfAnchor(btn);
+        if (state != null && state.hasSelection) { engine.selInk(ink -> showConvert(v, ink)); return; }
+        pendingToText = v;
+        commitTextEdit();
+        tool = Engine.TOOL_LASSO;
+        applyTool();
+        toast("Circle the writing to turn into text");
     }
 
     // ---- the tool bar can sit on any edge: drag its grip there, or pick in Settings ---------------
@@ -1139,9 +1332,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private boolean dockVertical() { return dock == DOCK_LEFT || dock == DOCK_RIGHT; }
 
     /** How far the page may scroll past the floating bars at its top and bottom. */
-    private int insetTop() { return Ui.dp(this, EDGE_DP + CAP_DP + 8 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 : 0)); }
+    private int insetTop() { return Ui.dp(this, EDGE_DP + CAP_DP + 8 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 + shelfDp() : 0)); }
 
-    private int insetBottom() { return Ui.dp(this, EDGE_DP + 12 + (dock == DOCK_BOTTOM ? TOOLCAP_DP : 0)); }
+    private int insetBottom() { return Ui.dp(this, EDGE_DP + 12 + (dock == DOCK_BOTTOM ? TOOLCAP_DP + shelfDp() : 0)); }
 
     private boolean dragToolbar(View v, MotionEvent e) {
         switch (e.getActionMasked()) {
@@ -1257,13 +1450,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 lp.bottomMargin = Ui.dp(this, EDGE_DP + 4);
         }
         capTools.setLayoutParams(lp);
+        placeShelf(false);
+        styleShelf();
         placeZoomChip();
-        // toast and paste chip sit above the bar when it's at the bottom, else near the bottom edge
-        int above = Ui.dp(this, dock == DOCK_BOTTOM ? EDGE_DP + TOOLCAP_DP + 16 : EDGE_DP + 8);
-        if (pasteChip != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) pasteChip.getLayoutParams(); c.bottomMargin = above; pasteChip.setLayoutParams(c); }
-        if (toastView != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) toastView.getLayoutParams(); c.bottomMargin = above + Ui.dp(this, 2); toastView.setLayoutParams(c); }
+        placeChips();
         for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
         ui.post(this::fitCapsule);
+    }
+
+    /** Toast and paste chip sit above the bar (and an open shelf) when it's at the bottom, else near the bottom edge. */
+    private void placeChips() {
+        int above = Ui.dp(this, dock == DOCK_BOTTOM ? EDGE_DP + TOOLCAP_DP + 16 + shelfDp() : EDGE_DP + 8);
+        if (pasteChip != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) pasteChip.getLayoutParams(); c.bottomMargin = above; pasteChip.setLayoutParams(c); }
+        if (toastView != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) toastView.getLayoutParams(); c.bottomMargin = above + Ui.dp(this, 2); toastView.setLayoutParams(c); }
     }
 
     /** Lays a bar item out for a row (as built) or a column (width / height and margins swapped). */
@@ -1288,6 +1487,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             commitTextEdit();
             tool = t;
             applyTool();
+            if (advancedTool(t)) shelfUsed();
         });
         b.setOnLongClickListener(v -> {
             if (tool != t) { tool = t; applyTool(); }
@@ -1308,7 +1508,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void openToolPanel(View anchor) {
         switch (tool) {
-            case Engine.TOOL_PEN: showPenPanel(anchor, false); break;
+            case Engine.TOOL_PEN: case Engine.TOOL_SHAPE: showPenPanel(anchor, false); break;
             case Engine.TOOL_HL: showPenPanel(anchor, true); break;
             case Engine.TOOL_ERASER: showEraserPanel(anchor); break;
             case Engine.TOOL_TEXT: showTextPanel(anchor); break;
@@ -1348,6 +1548,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         laserB.set(tool == Engine.TOOL_LASER, LASER_COLORS[laserCol], 0);
         tapeB.set(tool == Engine.TOOL_TAPE, TAPE_COLORS[tapeCol], 0);
         textB.set(tool == Engine.TOOL_TEXT, 0, 0);
+        shapeB.set(tool == Engine.TOOL_SHAPE, penColors[penSlot], 0);
+        if (tool != Engine.TOOL_LASSO) pendingToText = null;
+        styleShelf();
         boolean hl = tool == Engine.TOOL_HL;
         int[] cols = slotColors();
         int sel = hl ? hlSlot : penSlot;
@@ -1371,7 +1574,6 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         appliedTool = tool;
         updatePaste();
         renderFavs();
-        updateMoreTools();
         SharedPreferences.Editor e = prefs.edit().putInt("tool", tool).putInt("penColor", penSlot).putInt("hlColor", hlSlot)
                 .putFloat("penW", penW).putFloat("hlW", hlW).putFloat("textPt", textPt).putString("textStyle", textStyleEnc).putInt("penType", penType)
                 .putFloat("eraserDp", eraserDp);
@@ -1392,10 +1594,20 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void showPenPanel(View anchor, boolean hl) {
-        Ui.Popover p = newPop(372).title(hl ? "Highlighter" : "Pen");
+        Ui.Popover p = newPop(372).title(hl ? "Highlighter" : tool == Engine.TOOL_SHAPE ? "Shapes · drawn strokes become clean shapes" : "Pen");
         Ui.StrokePreview prev = new Ui.StrokePreview(this);
-        Runnable refresh = () -> prev.set(hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType, curColor(), hl ? hlW : penW);
-        refresh.run();
+        java.util.ArrayList<Ui.SizeDot> dots = new java.util.ArrayList<>();
+        float[] pr = hl ? HL_PRESETS : PEN_PRESETS;
+        Runnable refresh = () -> {
+            int tl = hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType;
+            float cw = hl ? hlW : penW;
+            prev.set(tl, curColor(), cw);
+            prev.zoom(state != null ? state.z : 0);
+            for (int i = 0; i < dots.size(); i++) {
+                dots.get(i).ink(inkPx(tl, pr[i]));
+                dots.get(i).chosen(Math.abs(pr[i] - cw) < 0.05f);
+            }
+        };
         if (hl) {
             p.section("Tip");
             p.add(Ui.segmented(this, new String[]{"Round", "Flat"}, hlFlat ? 1 : 0, i -> { hlFlat = i == 1; saveOptions(); refresh.run(); }));
@@ -1412,30 +1624,39 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         p.add(prev);
         p.section("Thickness");
         float min = hl ? HL_MIN : PEN_MIN, max = hl ? HL_MAX : PEN_MAX;
-        SeekBar sb = Ui.slider(this, 100, Math.round(((hl ? hlW : penW) - min) / (max - min) * 100), v -> {
-            float w = min + (max - min) * v / 100f;
+        TextView wLabel = Ui.text(this, "", 12.5f, Ui.color(this, R.color.on_surface_variant), null);
+        // on an A4-wide page (1000 units = 210 mm), at normal writing pressure: the same width the dots show
+        Runnable label = () -> wLabel.setText(String.format(java.util.Locale.US, "%.1f mm",
+                new Stroke(hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType, 0, hl ? hlW : penW).radius(0.5f) * 2 * 0.21f));
+        SeekBar sb = Ui.slider(this, 100, wToSlider(hl ? hlW : penW, min, max), v -> {
+            float w = sliderToW(v, min, max);
             if (hl) hlW = w; else penW = w;
             applyTool();
             refresh.run();
+            label.run();
         });
         LinearLayout presets = new LinearLayout(this);
         presets.setGravity(Gravity.CENTER_VERTICAL);
-        float[] pr = hl ? HL_PRESETS : PEN_PRESETS;
         for (int i = 0; i < pr.length; i++) {
             final float w = pr[i];
             Ui.SizeDot d = new Ui.SizeDot(this);
-            d.set(i / 2f);
             d.tint(curColor());
             d.setOnClickListener(v -> {
                 if (hl) hlW = w; else penW = w;
-                sb.setProgress(Math.round((w - min) / (max - min) * 100));
+                sb.setProgress(wToSlider(w, min, max));
                 applyTool();
                 refresh.run();
+                label.run();
             });
+            dots.add(d);
             presets.addView(d);
         }
         presets.addView(sb, new LinearLayout.LayoutParams(0, -2, 1f));
+        label.run();
+        presets.addView(wLabel, new LinearLayout.LayoutParams(Ui.dp(this, 52), -2));
+        wLabel.setGravity(Gravity.END);
         p.add(presets);
+        refresh.run();
         if (hl) {
             p.section("Straighten on lift");
             p.add(Ui.segmented(this, new String[]{"Off", "Auto", "Always"}, hlStraight,
@@ -1556,67 +1777,29 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         toast(fingerDraw ? "Fingers write · use two fingers to scroll and zoom" : "Only the pen writes · fingers scroll");
     }
 
-    /** The current tool's button is folded into "More tools". */
-    private boolean hiddenToolActive() {
-        return (tool == Engine.TOOL_TAPE && tapeB.getVisibility() != View.VISIBLE)
-                || (tool == Engine.TOOL_LASER && laserB.getVisibility() != View.VISIBLE);
-    }
-
-    /** "More tools" shows the folded tool that's in use (as a coloured disc), else just ⋯. */
-    private void updateMoreTools() {
-        if (moreToolsB == null) return;
-        boolean tape = tool == Engine.TOOL_TAPE && tapeB.getVisibility() != View.VISIBLE;
-        boolean laser = tool == Engine.TOOL_LASER && laserB.getVisibility() != View.VISIBLE;
-        moreToolsB.setImageResource(tape ? R.drawable.ic_tape : laser ? R.drawable.ic_laser : R.drawable.ic_more);
-        moreToolsB.set(tape || laser, tape ? TAPE_COLORS[tapeCol] : laser ? LASER_COLORS[laserCol] : 0, 0);
-    }
-
-    /** The tools that didn't fit in the bar, as a short list. */
+    /** Favourite pens that didn't fit in a narrow bar. */
     private void showMoreTools(View anchor) {
         Ui.Popover p = newPop(300);
-        p.title("More tools");
-        if (favsFolded && !favs.isEmpty()) {
-            p.section("Favourite pens");
-            LinearLayout row = new LinearLayout(this);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            for (int[] f : favs) {
-                Ui.FavDot d = new Ui.FavDot(this, f[0] == Engine.TOOL_HL, f[2], Float.intBitsToFloat(f[3]));
-                d.setSel(favMatches(f));
-                d.setOnClickListener(v -> { pop.dismiss(); applyFav(f); });
-                row.addView(d);
-            }
-            android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this);
-            hs.setHorizontalScrollBarEnabled(false);
-            hs.addView(row);
-            p.add(hs);
-            p.section("Tools");
+        p.title("Favourite pens");
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        for (int[] f : favs) {
+            Ui.FavDot d = new Ui.FavDot(this, f[0] == Engine.TOOL_HL, f[2], Float.intBitsToFloat(f[3]));
+            d.setSel(favMatches(f));
+            d.setOnClickListener(v -> { pop.dismiss(); applyFav(f); });
+            row.addView(d);
         }
-        if (tapeB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_tape, "Tape",
-                tool == Engine.TOOL_TAPE ? "In use · tap for its options" : "Cover answers, tap to peel back", v -> {
-                    pop.dismiss();
-                    if (tool == Engine.TOOL_TAPE) { openToolPanel(anchor); return; }
-                    commitTextEdit(); tool = Engine.TOOL_TAPE; applyTool();
-                }));
-        if (laserB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_laser, "Laser pointer",
-                tool == Engine.TOOL_LASER ? "In use · tap for its options" : "Point things out · never saved", v -> {
-                    pop.dismiss();
-                    if (tool == Engine.TOOL_LASER) { openToolPanel(anchor); return; }
-                    commitTextEdit(); tool = Engine.TOOL_LASER; applyTool();
-                }));
-        if (imgB.getVisibility() != View.VISIBLE)
-            p.add(Ui.actionRow(this, R.drawable.ic_image, "Image or sticker", null, v -> { pop.dismiss(); showInsert(anchor); }));
-        if (rulerB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_ruler, "Ruler",
-                ruler.getVisibility() == View.VISIBLE ? "On · tap to put it away" : "Off · straight lines along its edge", v -> { pop.dismiss(); toggleRuler(); }));
-        if (fingerB.getVisibility() != View.VISIBLE) p.add(Ui.actionRow(this, R.drawable.ic_touch, "Write with finger",
-                fingerDraw ? "On · tap to turn off" : "Off · only the pen writes", v -> { pop.dismiss(); toggleFinger(); }));
+        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        hs.addView(row);
+        p.add(hs);
         p.show(anchor);
     }
 
     private void fitCapsule() {
         if (capTools == null || root.getWidth() == 0) return;
-        // dropped in this order until the bar fits; the tools from rulerB on stay reachable under "More tools"
-        View[] order = {favRow, favSep, sw[0], sw[1], sw[2], sw[3], rulerB, fingerB, imgB, laserB, tapeB};
-        java.util.List<View> folds = java.util.Arrays.asList(rulerB, fingerB, imgB, laserB, tapeB);
+        // dropped in this order until the bar fits (favourites stay reachable under their own disc); the shelf scrolls
+        View[] order = {favRow, favSep, sw[0], sw[1], sw[2], sw[3]};
         boolean vert = dockVertical();
         // a column must clear the top bars; a row must fit the width
         int avail = vert ? root.getHeight() - Ui.dp(this, 2 * (EDGE_DP + CAP_DP + 12)) : root.getWidth() - Ui.dp(this, 2 * EDGE_DP);
@@ -1629,10 +1812,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             if (vert) capTools.measure(tc, free); else capTools.measure(free, tc);
             if ((vert ? capTools.getMeasuredHeight() : capTools.getMeasuredWidth()) <= avail) break;
             if (v != null) v.setVisibility(View.GONE);
-            if (v == favRow && !favs.isEmpty()) favsFolded = true;
-            if (folds.contains(v) || (v == favRow && favsFolded)) moreToolsB.setVisibility(View.VISIBLE);
+            if (v == favRow && !favs.isEmpty()) { favsFolded = true; moreToolsB.setVisibility(View.VISIBLE); }
         }
-        updateMoreTools();
         // narrow window: bookmark + pages leave the top-right capsule (both stay in ⋯ / the page counter)
         boolean narrow = root.getWidth() < Ui.dp(this, 520);
         boolean canvas = state != null && state.canvas;
@@ -3057,6 +3238,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (r == null) {
             selBar.setVisibility(View.GONE);
             return;
+        }
+        if (pendingToText != null) {
+            View anchor = pendingToText;
+            pendingToText = null;
+            engine.selInk(ink -> { if (!ink.isEmpty()) showConvert(anchor, ink); });
         }
         selBar.setVisibility(View.VISIBLE);
         int availW = panes[focusPane].getWidth() - Ui.dp(this, 24), fitKey = availW * 2 + (editTextB.getVisibility() == View.VISIBLE ? 1 : 0);

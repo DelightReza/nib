@@ -416,7 +416,7 @@ final class Render {
                 b.recycle();
             }
         }
-        for (Notebook.Item it : p.items) if (it.type != Notebook.Item.TAPE) item(c, dir, it, dark(nb));
+        for (Notebook.Item it : p.items()) if (it.type != Notebook.Item.TAPE) item(c, dir, it, dark(nb));
         boolean dk = dark(nb);
         SegBuf tmp = new SegBuf();
         Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -424,7 +424,7 @@ final class Render {
         Paint hl = new Paint(ink);
         if (!forPdf) hl.setXfermode(new PorterDuffXfermode(dk ? PorterDuff.Mode.LIGHTEN : PorterDuff.Mode.DARKEN));
         for (int pass = 0; pass < 2; pass++) {
-            for (Stroke s : p.strokes) {
+            for (Stroke s : p.strokes()) {
                 boolean isHl = s.hl();
                 if ((pass == 0) != isHl) continue;
                 Paint pt = isHl ? hl : ink;
@@ -437,7 +437,7 @@ final class Render {
                 segs(c, tmp, pt);
             }
         }
-        for (Notebook.Item it : p.items) if (it.type == Notebook.Item.TAPE) tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f);
+        for (Notebook.Item it : p.items()) if (it.type == Notebook.Item.TAPE) tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f);
     }
 
     /** Draws emitted segments: round capsules, or for the chisel highlighter one filled outline (no overlaps darken). */
@@ -680,7 +680,7 @@ final class Render {
     /** Bounding box of everything on a page (stroke points padded by their width, plus items). */
     static RectF canvasBounds(Notebook.Page p) {
         RectF r = new RectF();
-        for (Stroke st : p.strokes) {
+        for (Stroke st : p.strokes()) {
             float pad = st.width * 2;
             for (int i = 0; i < st.n; i++) {
                 float x = st.p[4 * i], y = st.p[4 * i + 1];
@@ -688,7 +688,7 @@ final class Render {
                 else r.union(x - pad, y - pad, x + pad, y + pad);
             }
         }
-        for (Notebook.Item it : p.items) {
+        for (Notebook.Item it : p.items()) {
             if (r.isEmpty() && r.left == 0 && r.right == 0) r.set(it.x, it.y, it.x + it.w, it.y + it.h);
             else r.union(it.x, it.y, it.x + it.w, it.y + it.h);
         }

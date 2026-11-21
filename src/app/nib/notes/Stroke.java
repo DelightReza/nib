@@ -25,6 +25,18 @@ final class Stroke {
         this.width = width;
     }
 
+    /** A stroke that will get exactly `points` points (read from a file, copied): no spare room. */
+    Stroke(int tool, int color, float width, int points) {
+        this(tool, color, width);
+        p = new float[4 * Math.max(1, points)];
+    }
+
+    /** Drops the spare room left from growing while it was written (a finished stroke never grows again). */
+    Stroke trim() {
+        if (p.length > 4 * n + 4) p = java.util.Arrays.copyOf(p, 4 * Math.max(1, n));
+        return this;
+    }
+
     float radius(float pr) {
         if (isHl(tool)) return width * 0.5f;
         // Xiaomi Smart Pen: light writing ~0.15, normal ~0.5, firm ~0.65 (measured). Map that span
@@ -154,14 +166,14 @@ final class Stroke {
 
     /** Copy scaled by s around (px,py) then shifted by (tx,ty); width scales too. */
     Stroke transformed(float px, float py, float sc, float tx, float ty) {
-        Stroke o = new Stroke(tool, color, width * sc);
+        Stroke o = new Stroke(tool, color, width * sc, n);
         o.shape = shape;
         for (int i = 0; i < n; i++) o.add((x(i) - px) * sc + px + tx, (y(i) - py) * sc + py + ty, p[4 * i + 2]);
         return o;
     }
 
     Stroke withColor(int c) {
-        Stroke o = new Stroke(tool, c, width);
+        Stroke o = new Stroke(tool, c, width, n);
         o.shape = shape;
         for (int i = 0; i < n; i++) o.add(x(i), y(i), p[4 * i + 2]);
         return o;
@@ -185,14 +197,14 @@ final class Stroke {
             float qx = px - dx * h, qy = py - dy * h;
             boolean gone = qx * qx + qy * qy < er * er;
             if (gone) {
-                if (cur != null && cur.n > 0) out.add(cur);
+                if (cur != null && cur.n > 0) out.add(cur.trim());
                 cur = null;
             } else {
                 if (cur == null) cur = new Stroke(tool, color, width);
                 cur.add(x(i), y(i), p[4 * i + 2]);
             }
         }
-        if (cur != null && cur.n > 0) out.add(cur);
+        if (cur != null && cur.n > 0) out.add(cur.trim());
         return out;
     }
 

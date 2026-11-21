@@ -29,6 +29,8 @@ final class Notebook {
     static final int PAPER_WHITE = 0, PAPER_CREAM = 1, PAPER_DARK = 2;
     static final String[] PAPER_NAMES = {"White paper", "Cream paper", "Dark paper"};
     private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235, MAGIC6 = 0x4E494236, MAGIC7 = 0x4E494237;
+    // NIB8 (Nib 2.3): ink.bin is only an index; each page's ink and items are in pages/<id>.bin ("NIBP")
+    private static final int MAGIC8 = 0x4E494238, MAGIC_PAGE = 0x4E494250;
     // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths, NIB6 +text style, NIB7 = NIB6 with int-length strings.
     // NIB7 is written only when a string is too long for writeUTF (64 KB), so other notebooks stay readable by older Nib.
     static final int MARGIN_LEFT = 1, MARGIN_HEADER = 2, MARGIN_BORDER = 4;
@@ -156,6 +158,12 @@ final class Notebook {
         String key() { return type + ":" + System.identityHashCode(this); }
     }
 
+    /**
+     * One page. Its look (template, size, style, bookmark) lives in the notebook's index; its ink and items live in
+     * their own file, pages/<id>.bin, and are read only when something asks for them, so a notebook of hundreds of
+     * pages opens with just the index in memory, and pages far from the screen can be let go again (unload).
+     * A page is written back only when its content changed: savedS / savedI hold the very objects its file holds.
+     */
     static final class Page {
         int bg;
         float h = PH;
@@ -166,26 +174,128 @@ final class Notebook {
         float spacing = 1f, strength = 1f;
         int lineColor, margins;
 
+        int id;            // its file is pages/<id>.bin; 0 = not given one yet
+        File src;          // that file, once it holds this page (null: the page exists only in memory so far)
+        boolean broken;    // src couldn't be read: shown empty, and the file is kept aside before it's ever replaced
+        private ArrayList<Stroke> strokes = new ArrayList<>(); // null = not read yet (see ensure)
+        private ArrayList<Item> items = new ArrayList<>();
+        private Object[] savedS, savedI; // what src holds; null = nothing written yet
+
         void copyStyle(Page o) { spacing = o.spacing; strength = o.strength; lineColor = o.lineColor; margins = o.margins; }
 
         boolean sameStyle(Page o) {
             return spacing == o.spacing && strength == o.strength && lineColor == o.lineColor && margins == o.margins;
         }
-        ArrayList<Stroke> strokes = new ArrayList<>();
-        ArrayList<Item> items = new ArrayList<>();
 
         Page(int bg) { this.bg = bg; }
 
+        /** A page whose content is read from f when first needed. */
+        static Page onDisk(int bg, int id, File f) {
+            Page p = new Page(bg);
+            p.id = id;
+            p.src = f;
+            p.strokes = null;
+            p.items = null;
+            return p;
+        }
+
+        ArrayList<Stroke> strokes() { ensure(); return strokes; }
+
+        ArrayList<Item> items() { ensure(); return items; }
+
+        void setStrokes(ArrayList<Stroke> s) { ensure(); strokes = s; }
+
+        void setItems(ArrayList<Item> i) { ensure(); items = i; }
+
+        boolean loaded() { return strokes != null; }
+
+        private void ensure() {
+            if (strokes != null) return;
+            ArrayList<Stroke> st = new ArrayList<>();
+            ArrayList<Item> it = new ArrayList<>();
+            try {
+                readBody(src, st, it);
+            } catch (IOException | RuntimeException e) {
+                android.util.Log.e(Gl.TAG, "page " + id + " unreadable", e);
+                st.clear();
+                it.clear();
+                broken = true;
+            }
+            install(st, it);
+        }
+
+        /** Content read elsewhere (a background thread) for a page that's still unread. */
+        void install(ArrayList<Stroke> st, ArrayList<Item> it) {
+            strokes = st;
+            items = it;
+            savedS = st.toArray();
+            savedI = it.toArray();
+        }
+
+        /** Changed since its file was written (or never written). An unread page hasn't changed. */
+        boolean dirty() {
+            if (strokes == null) return false;
+            return savedS == null || !same(savedS, strokes) || !same(savedI, items);
+        }
+
+        private static boolean same(Object[] a, ArrayList<?> b) {
+            if (a.length != b.size()) return false;
+            for (int i = 0; i < a.length; i++) if (a[i] != b.get(i)) return false;
+            return true;
+        }
+
+        /** Gives back the memory of a page whose file is up to date (it's read again when needed). */
+        boolean unload() {
+            if (strokes == null || src == null || broken || dirty()) return false;
+            strokes = null;
+            items = null;
+            savedS = savedI = null;
+            return true;
+        }
+
+        /** Its file now holds exactly these objects (called after a save). */
+        void markSaved(Object[] s, Object[] i, File f) {
+            if (strokes == null) return;
+            savedS = s;
+            savedI = i;
+            src = f;
+            broken = false;
+        }
+
+        /** A new page with the same look and content (a duplicate): it gets its own file when saved. */
         Page copyShallow() {
             Page p = new Page(bg);
             p.h = h;
             p.pdf = pdf;
             p.mark = mark;
             p.copyStyle(this);
-            p.strokes = new ArrayList<>(strokes);
-            p.items = new ArrayList<>(items);
+            p.strokes = new ArrayList<>(strokes());
+            p.items = new ArrayList<>(items());
             return p;
         }
+
+        /** The same page for another thread (a save, an export): unread pages stay unread and read their file there. */
+        Page snapCopy() {
+            Page p = new Page(bg);
+            p.h = h;
+            p.pdf = pdf;
+            p.mark = mark;
+            p.copyStyle(this);
+            p.id = id;
+            p.src = src;
+            p.broken = broken;
+            p.origin = this;
+            if (strokes == null) { p.strokes = null; p.items = null; }
+            else {
+                p.strokes = new ArrayList<>(strokes);
+                p.items = new ArrayList<>(items);
+                p.savedS = savedS;
+                p.savedI = savedI;
+            }
+            return p;
+        }
+
+        Page origin; // snapCopy: the page it was copied from
     }
 
     ArrayList<Page> pages = new ArrayList<>();
@@ -194,6 +304,13 @@ final class Notebook {
     boolean favorite;
     boolean canvas; // infinite canvas: one unbounded page you can pan in every direction
     boolean loadFailed; // ink.bin couldn't be read in full (a copy of it was kept)
+    boolean legacy;     // read from a single-file notebook (NIB1–7): the first save converts it
+    int nextId = 1;     // next page file id
+    File dir;           // where it was read from (null for one made in memory)
+    private String thumbKey;
+    boolean thumbWanted = true;
+    /** Pages whose files the last write() wrote (snapshot copies; each knows its origin). */
+    final ArrayList<Page> written = new ArrayList<>();
     int paper = PAPER_WHITE;
     long created, modified;
 
@@ -201,6 +318,7 @@ final class Notebook {
 
     static Notebook load(File dir) {
         Notebook nb = new Notebook();
+        nb.dir = dir;
         Properties m = meta(dir);
         nb.title = m.getProperty("title", "Untitled");
         nb.folder = m.getProperty("folder", "");
@@ -211,60 +329,13 @@ final class Notebook {
         nb.created = Long.parseLong(m.getProperty("created", "0"));
         nb.modified = Long.parseLong(m.getProperty("modified", "0"));
         File f = new File(dir, "ink.bin");
+        if (!f.exists() && new File(dir, "ink.bin.old").exists()) f = new File(dir, "ink.bin.old"); // a conversion cut short
         if (f.exists()) {
             try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f), 1 << 16))) {
                 int magic = in.readInt();
-                if (magic < MAGIC1 || magic > MAGIC7) throw new IOException("bad magic");
-                boolean v2 = magic >= MAGIC2, v3 = magic >= MAGIC3, v4 = magic >= MAGIC4, v5 = magic >= MAGIC5, v6 = magic >= MAGIC6;
-                boolean v7 = magic >= MAGIC7;
-                int pages = in.readInt();
-                for (int i = 0; i < pages; i++) {
-                    Page p = new Page(in.readInt());
-                    if (v2) {
-                        p.h = in.readFloat();
-                        p.pdf = in.readInt();
-                    }
-                    int ns = in.readInt();
-                    for (int s = 0; s < ns; s++) {
-                        int tw = in.readInt();
-                        Stroke st = new Stroke(tw & 0xffff, in.readInt(), in.readFloat());
-                        st.shape = (tw >>> 16) & 0xff;
-                        int n = in.readInt();
-                        for (int k = 0; k < n; k++) st.add(in.readFloat(), in.readFloat(), in.readFloat());
-                        p.strokes.add(st);
-                    }
-                    if (v2) {
-                        int ni = in.readInt();
-                        for (int k = 0; k < ni; k++) {
-                            int type = in.readInt();
-                            float x = in.readFloat(), y = in.readFloat(), w = in.readFloat(), h = in.readFloat();
-                            String text = readStr(in, v7);
-                            float size = in.readFloat();
-                            int color = in.readInt();
-                            float[] pts = null;
-                            if (v5) {
-                                int np = in.readInt();
-                                if (np > 0) { pts = new float[np]; for (int q = 0; q < np; q++) pts[q] = in.readFloat(); }
-                            }
-                            if (type == Item.TAPE && pts == null) { // first tape build: an axis-aligned box
-                                boolean hz = w >= h;
-                                pts = hz ? new float[]{x, y + h / 2, x + w, y + h / 2} : new float[]{x + w / 2, y, x + w / 2, y + h};
-                                size = hz ? h : w;
-                            }
-                            String style = v6 && in.readBoolean() ? readStr(in, v7) : null;
-                            p.items.add(new Item(type, x, y, w, h, text, size, color, pts, style));
-                        }
-                    }
-                    if (v3 && in.readBoolean()) p.mark = readStr(in, v7);
-                    if (v4) {
-                        p.spacing = in.readFloat();
-                        p.lineColor = in.readInt();
-                        p.strength = in.readFloat();
-                        p.margins = in.readInt();
-                    }
-                    nb.pages.add(p);
-                }
-            } catch (IOException e) {
+                if (magic == MAGIC8) readIndex(nb, dir, in);
+                else readWhole(nb, in, magic);
+            } catch (IOException | RuntimeException e) {
                 // Keep the unreadable file: the next save would otherwise replace it with only the pages read so far.
                 android.util.Log.e(Gl.TAG, "load failed", e);
                 File keep = new File(dir, "ink.bin.unreadable-" + System.currentTimeMillis());
@@ -273,12 +344,167 @@ final class Notebook {
             }
         }
         if (nb.pages.isEmpty()) nb.pages.add(new Page(BG_DOTS));
+        for (Page p : nb.pages) nb.nextId = Math.max(nb.nextId, p.id + 1);
         return nb;
     }
 
-    /** Copy safe to write on another thread (strokes/items are immutable). */
-    Notebook snapshot() {
+    /** NIB8: the index. Each page's look plus the id of its file; the ink stays on disk until it's needed. */
+    private static void readIndex(Notebook nb, File dir, DataInputStream in) throws IOException {
+        int version = in.readInt();
+        if (version > 1) throw new IOException("index from a newer Nib (" + version + ")");
+        nb.nextId = in.readInt();
+        int pages = in.readInt();
+        File pd = new File(dir, "pages");
+        for (int i = 0; i < pages; i++) {
+            int id = in.readInt();
+            Page p = Page.onDisk(in.readInt(), id, new File(pd, id + ".bin"));
+            p.h = in.readFloat();
+            p.pdf = in.readInt();
+            if (in.readBoolean()) p.mark = readStr(in, true);
+            p.spacing = in.readFloat();
+            p.lineColor = in.readInt();
+            p.strength = in.readFloat();
+            p.margins = in.readInt();
+            nb.pages.add(p);
+        }
+    }
+
+    /** NIB1–7: everything in one file. Read in full; the first save turns it into the index + page files. */
+    private static void readWhole(Notebook nb, DataInputStream in, int magic) throws IOException {
+        if (magic < MAGIC1 || magic > MAGIC7) throw new IOException("bad magic");
+        nb.legacy = true;
+        boolean v2 = magic >= MAGIC2, v3 = magic >= MAGIC3, v4 = magic >= MAGIC4, v5 = magic >= MAGIC5, v6 = magic >= MAGIC6;
+        boolean v7 = magic >= MAGIC7;
+        int pages = in.readInt();
+        for (int i = 0; i < pages; i++) {
+            Page p = new Page(in.readInt());
+            if (v2) {
+                p.h = in.readFloat();
+                p.pdf = in.readInt();
+            }
+            readStrokes(in, p.strokes);
+            if (v2) readItems(in, p.items, v5, v6, v7);
+            if (v3 && in.readBoolean()) p.mark = readStr(in, v7);
+            if (v4) {
+                p.spacing = in.readFloat();
+                p.lineColor = in.readInt();
+                p.strength = in.readFloat();
+                p.margins = in.readInt();
+            }
+            nb.pages.add(p);
+        }
+    }
+
+    private static void readStrokes(DataInputStream in, ArrayList<Stroke> out) throws IOException {
+        int ns = in.readInt();
+        if (ns < 0 || ns > 10_000_000) throw new IOException("bad stroke count " + ns);
+        out.ensureCapacity(ns);
+        for (int s = 0; s < ns; s++) {
+            int tw = in.readInt();
+            int color = in.readInt();
+            float width = in.readFloat();
+            int n = in.readInt();
+            if (n < 0 || n > 50_000_000) throw new IOException("bad point count " + n);
+            Stroke st = new Stroke(tw & 0xffff, color, width, n); // exactly as big as it needs
+            st.shape = (tw >>> 16) & 0xff;
+            for (int k = 0; k < n; k++) st.add(in.readFloat(), in.readFloat(), in.readFloat());
+            out.add(st);
+        }
+    }
+
+    private static void readItems(DataInputStream in, ArrayList<Item> out, boolean v5, boolean v6, boolean v7) throws IOException {
+        int ni = in.readInt();
+        for (int k = 0; k < ni; k++) {
+            int type = in.readInt();
+            float x = in.readFloat(), y = in.readFloat(), w = in.readFloat(), h = in.readFloat();
+            String text = readStr(in, v7);
+            float size = in.readFloat();
+            int color = in.readInt();
+            float[] pts = null;
+            if (v5) {
+                int np = in.readInt();
+                if (np > 0) { pts = new float[np]; for (int q = 0; q < np; q++) pts[q] = in.readFloat(); }
+            }
+            if (type == Item.TAPE && pts == null) { // first tape build: an axis-aligned box
+                boolean hz = w >= h;
+                pts = hz ? new float[]{x, y + h / 2, x + w, y + h / 2} : new float[]{x + w / 2, y, x + w / 2, y + h};
+                size = hz ? h : w;
+            }
+            String style = v6 && in.readBoolean() ? readStr(in, v7) : null;
+            out.add(new Item(type, x, y, w, h, text, size, color, pts, style));
+        }
+    }
+
+    /** A page file: "NIBP", version, strokes, items (as in NIB7). */
+    static void readBody(File f, ArrayList<Stroke> st, ArrayList<Item> it) throws IOException {
+        if (f == null) throw new IOException("no page file");
+        try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(f), 1 << 16))) {
+            if (in.readInt() != MAGIC_PAGE) throw new IOException("not a page file");
+            if (in.readInt() > 1) throw new IOException("page from a newer Nib");
+            readStrokes(in, st);
+            readItems(in, it, true, true, true);
+        }
+    }
+
+    private static void writeBody(File f, ArrayList<Stroke> st, ArrayList<Item> it) throws IOException {
+        File tmp = new File(f.getPath() + ".tmp");
+        try (FileOutputStream fo = new FileOutputStream(tmp);
+             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(fo, 1 << 16))) {
+            out.writeInt(MAGIC_PAGE);
+            out.writeInt(1);
+            out.writeInt(st.size());
+            for (Stroke s : st) {
+                out.writeInt(s.tool | (s.shape << 16));
+                out.writeInt(s.color);
+                out.writeFloat(s.width);
+                out.writeInt(s.n);
+                for (int k = 0; k < s.n; k++) {
+                    out.writeFloat(s.p[4 * k]);
+                    out.writeFloat(s.p[4 * k + 1]);
+                    out.writeFloat(s.p[4 * k + 2]);
+                }
+            }
+            out.writeInt(it.size());
+            for (Item i : it) {
+                out.writeInt(i.type);
+                out.writeFloat(i.x);
+                out.writeFloat(i.y);
+                out.writeFloat(i.w);
+                out.writeFloat(i.h);
+                writeStr(out, i.text, true);
+                out.writeFloat(i.size);
+                out.writeInt(i.color);
+                out.writeInt(i.pts == null ? 0 : i.pts.length);
+                if (i.pts != null) for (float v : i.pts) out.writeFloat(v);
+                out.writeBoolean(i.style != null);
+                if (i.style != null) writeStr(out, i.style, true);
+            }
+            out.flush();
+            fo.getFD().sync(); // on disk before the index names it
+        }
+        if (!tmp.renameTo(f)) throw new IOException("rename failed: " + f);
+    }
+
+    /**
+     * Copy safe to write or read on another thread (strokes/items are immutable). Call on the thread that owns this
+     * notebook: it gives new pages their file ids. Pages not read yet stay unread in the copy.
+     */
+    Notebook snapshot() { return snapshot(false); }
+
+    /** Just the notebook's own settings, no pages (enough to draw a page copied with snapCopy). */
+    Notebook metaCopy() {
         Notebook n = new Notebook();
+        n.dir = dir;
+        n.title = title;
+        n.canvas = canvas;
+        n.paper = paper;
+        return n;
+    }
+
+    /** forSave: the copy is about to be written, so it also decides whether the thumbnail needs redrawing. */
+    Notebook snapshot(boolean forSave) {
+        Notebook n = new Notebook();
+        n.dir = dir;
         n.title = title;
         n.folder = folder;
         n.cover = cover;
@@ -287,60 +513,102 @@ final class Notebook {
         n.paper = paper;
         n.created = created;
         n.modified = System.currentTimeMillis();
-        for (Page p : pages) n.pages.add(p.copyShallow());
+        for (Page p : pages) {
+            if (p.id == 0) p.id = nextId++;
+            n.pages.add(p.snapCopy());
+        }
+        n.nextId = nextId;
+        n.legacy = legacy;
+        n.loadFailed = loadFailed;
+        // the notes screen's picture of page 1: only redrawn when page 1 or its look changed
+        Page first = pages.get(0);
+        String key = paper + "|" + first.bg + "|" + first.spacing + "|" + first.strength + "|" + first.lineColor + "|" + first.margins
+                + "|" + first.pdf + "|" + first.h + "|" + System.identityHashCode(first);
+        n.thumbWanted = first.dirty() || !key.equals(thumbKey);
+        if (forSave) thumbKey = key;
         return n;
     }
 
+    /**
+     * Saves: the files of pages that changed, then the index (page order, looks and file ids), meta and, when page 1
+     * changed, the thumbnail. Pages that weren't touched cost nothing, whatever the notebook's size.
+     */
     void write(File dir) throws IOException {
         dir.mkdirs();
+        File pd = new File(dir, "pages");
+        pd.mkdirs();
+        written.clear();
+        for (Page p : pages) {
+            if (p.id == 0) p.id = nextId++;
+            nextId = Math.max(nextId, p.id + 1);
+            File f = new File(pd, p.id + ".bin");
+            boolean need = p.loaded() && (p.dirty() || p.src == null || !p.src.equals(f) || !f.exists());
+            if (!need) continue;
+            if (p.broken && f.exists()) // never lose an unreadable page file: keep it beside the new one
+                Io.copy(new FileInputStream(f), new FileOutputStream(new File(dir, "page-" + p.id + ".unreadable-" + System.currentTimeMillis())));
+            ArrayList<Stroke> st = p.strokes();
+            ArrayList<Item> it = p.items();
+            writeBody(f, st, it);
+            p.markSaved(st.toArray(), it.toArray(), f);
+            written.add(p);
+        }
         File tmp = new File(dir, "ink.bin.tmp");
-        try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(tmp), 1 << 16))) {
-            boolean v7 = needsLongStrings();
-            out.writeInt(v7 ? MAGIC7 : MAGIC6);
+        try (FileOutputStream fo = new FileOutputStream(tmp);
+             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(fo, 1 << 16))) {
+            out.writeInt(MAGIC8);
+            out.writeInt(1);
+            out.writeInt(nextId);
             out.writeInt(pages.size());
             for (Page p : pages) {
+                out.writeInt(p.id);
                 out.writeInt(p.bg);
                 out.writeFloat(p.h);
                 out.writeInt(p.pdf);
-                out.writeInt(p.strokes.size());
-                for (Stroke s : p.strokes) {
-                    out.writeInt(s.tool | (s.shape << 16));
-                    out.writeInt(s.color);
-                    out.writeFloat(s.width);
-                    out.writeInt(s.n);
-                    for (int k = 0; k < s.n; k++) {
-                        out.writeFloat(s.p[4 * k]);
-                        out.writeFloat(s.p[4 * k + 1]);
-                        out.writeFloat(s.p[4 * k + 2]);
-                    }
-                }
-                out.writeInt(p.items.size());
-                for (Item it : p.items) {
-                    out.writeInt(it.type);
-                    out.writeFloat(it.x);
-                    out.writeFloat(it.y);
-                    out.writeFloat(it.w);
-                    out.writeFloat(it.h);
-                    writeStr(out, it.text, v7);
-                    out.writeFloat(it.size);
-                    out.writeInt(it.color);
-                    out.writeInt(it.pts == null ? 0 : it.pts.length);
-                    if (it.pts != null) for (float f : it.pts) out.writeFloat(f);
-                    out.writeBoolean(it.style != null);
-                    if (it.style != null) writeStr(out, it.style, v7);
-                }
                 out.writeBoolean(p.mark != null);
-                if (p.mark != null) writeStr(out, p.mark, v7);
+                if (p.mark != null) writeStr(out, p.mark, true);
                 out.writeFloat(p.spacing);
                 out.writeInt(p.lineColor);
                 out.writeFloat(p.strength);
                 out.writeInt(p.margins);
             }
+            out.flush();
+            fo.getFD().sync();
         }
-        if (!tmp.renameTo(new File(dir, "ink.bin"))) throw new IOException("rename failed");
+        File ink = new File(dir, "ink.bin");
+        if (legacy && ink.exists()) { // the old single-file notebook stays as a backup until the new one has loaded once
+            File old = new File(dir, "ink.bin.old");
+            if (!old.exists()) ink.renameTo(old);
+        }
+        if (!tmp.renameTo(ink)) throw new IOException("rename failed");
+        legacy = false;
         writeMetaFields(dir);
-        Render.writeThumb(this, dir, new File(dir, "thumb.png"));
+        File thumb = new File(dir, "thumb.png");
+        if (thumbWanted || !thumb.exists()) Render.writeThumb(this, dir, thumb);
     }
+
+    /** The page file names the index refers to (take on the owning thread, then tidy on any). */
+    java.util.Set<String> pageFiles() {
+        java.util.HashSet<String> keep = new java.util.HashSet<>();
+        for (Page p : pages) if (p.id != 0) keep.add(p.id + ".bin");
+        return keep;
+    }
+
+    /**
+     * Tidies a notebook folder when its editor opens: page files no page refers to (deleted pages, a save cut
+     * short) and leftovers. The old single-file copy goes once every page file of the new format is there.
+     */
+    static void tidy(File dir, java.util.Set<String> keep) {
+        File pd = new File(dir, "pages");
+        boolean all = true;
+        for (String n : keep) if (!new File(pd, n).exists()) { all = false; break; }
+        File[] fs = pd.listFiles();
+        if (fs != null) for (File f : fs) if (!keep.contains(f.getName())) f.delete();
+        new File(dir, "ink.bin.tmp").delete();
+        if (all) new File(dir, "ink.bin.old").delete();
+    }
+
+    /** Lets go of every page that is saved (an export or index pass over a whole notebook keeps one page at a time). */
+    void unloadAll() { for (Page p : pages) p.unload(); }
 
     // ---- strings: writeUTF holds at most 65535 bytes; a longer text box made every save fail ----------
 
@@ -355,14 +623,6 @@ final class Notebook {
     }
 
     private static boolean tooLong(String s) { return s != null && s.length() > 65535 / 3 && utfLength(s) > 65535; }
-
-    private boolean needsLongStrings() {
-        for (Page p : pages) {
-            if (tooLong(p.mark)) return true;
-            for (Item it : p.items) if (tooLong(it.text) || tooLong(it.style)) return true;
-        }
-        return false;
-    }
 
     private static void writeStr(DataOutputStream out, String s, boolean v7) throws IOException {
         if (!v7) { out.writeUTF(s); return; }

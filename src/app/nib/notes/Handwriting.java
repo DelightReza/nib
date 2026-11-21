@@ -138,11 +138,21 @@ final class Handwriting {
             boolean changed = oldPages == null || oldPages.length() != nb.pages.size();
             for (int i = 0; i < nb.pages.size(); i++) {
                 Notebook.Page p = nb.pages.get(i);
-                String h = hash(p);
                 JSONObject prev = oldPages != null && i < oldPages.length() ? oldPages.optJSONObject(i) : null;
-                if (prev != null && h.equals(prev.optString("h"))) { pages.put(prev); continue; }
-                changed = true;
-                pages.put(new JSONObject().put("h", h).put("t", recognizePage(p)));
+                // a page file that hasn't changed since it was read (same name, time and size) is skipped unread
+                String sig = p.src != null && p.src.exists() ? "f" + p.src.getName() + ":" + p.src.lastModified() + ":" + p.src.length() : null;
+                if (prev != null && sig != null && sig.equals(prev.optString("s"))) { pages.put(prev); continue; }
+                String h = hash(p);
+                if (prev != null && h.equals(prev.optString("h"))) { // same ink (e.g. first look at a converted notebook)
+                    if (sig != null) { prev.put("s", sig); changed = true; }
+                    pages.put(prev);
+                } else {
+                    changed = true;
+                    JSONObject o = new JSONObject().put("h", h).put("t", recognizePage(p));
+                    if (sig != null) o.put("s", sig);
+                    pages.put(o);
+                }
+                p.unload(); // one page in memory at a time
             }
             if (!changed) { touch(dir); return false; }
             File f = new File(dir, "search.json");
@@ -158,12 +168,12 @@ final class Handwriting {
     private static void touch(File dir) { new File(dir, "search.json").setLastModified(System.currentTimeMillis()); }
 
     private static String hash(Notebook.Page p) {
-        long h = p.strokes.size() * 31L + p.items.size();
-        for (Stroke s : p.strokes) {
+        long h = p.strokes().size() * 31L + p.items().size();
+        for (Stroke s : p.strokes()) {
             h = h * 1_000_003L + s.n;
             if (s.n > 0) h = h * 31 + Float.floatToIntBits(s.x(0)) + 7L * Float.floatToIntBits(s.y(s.n - 1));
         }
-        for (Notebook.Item it : p.items) h = h * 31 + (it.text == null ? 0 : it.text.hashCode());
+        for (Notebook.Item it : p.items()) h = h * 31 + (it.text == null ? 0 : it.text.hashCode());
         return Long.toHexString(h);
     }
 
@@ -336,8 +346,8 @@ final class Handwriting {
     /** Text of one page: typed text boxes, then each line of handwriting, top to bottom. */
     private static String recognizePage(Notebook.Page p) {
         StringBuilder sb = new StringBuilder();
-        for (Notebook.Item it : p.items) if (it.type == Notebook.Item.TEXT && it.text != null) sb.append(it.text).append('\n');
-        for (List<Stroke> line : lines(p.strokes)) {
+        for (Notebook.Item it : p.items()) if (it.type == Notebook.Item.TEXT && it.text != null) sb.append(it.text).append('\n');
+        for (List<Stroke> line : lines(p.strokes())) {
             Ink.Builder ib = Ink.builder();
             long tms = 0;
             for (Stroke s : line) { // in the order you wrote them, with plausible pen timing

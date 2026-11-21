@@ -42,6 +42,8 @@ import java.util.concurrent.TimeUnit;
 final class Engine implements Choreographer.FrameCallback {
     static final float PW = Notebook.PW, GAP = 0f; // continuous pages: each one starts where the last ends
     static final int TOOL_PEN = 0, TOOL_HL = 1, TOOL_ERASER = 2, TOOL_LASSO = 3, TOOL_TEXT = 4, TOOL_LASER = 5, TOOL_TAPE = 6;
+    /** Writes like the pen, but each stroke becomes a clean shape when the pen lifts (or sooner if it pauses). */
+    static final int TOOL_SHAPE = 7;
     static final float[] TEXT_SIZES = {20f, 28f, 42f};
 
     static final class State {
@@ -237,6 +239,11 @@ final class Engine implements Choreographer.FrameCallback {
             if (ft != 0) Log.w(Gl.TAG, "front buffer test mode " + ft);
             book = Notebook.load(dir);
             if (book.loadFailed) toast("Part of this notebook couldn't be read · the original file was kept, nothing is lost yet");
+            if (!book.legacy && !book.loadFailed) { // remove page files no page refers to (on the io thread, before any save)
+                final java.util.Set<String> keep = book.pageFiles();
+                io.execute(() -> Notebook.tidy(dir, keep));
+            }
+            if (book.legacy) { dirtyDoc = true; h.postDelayed(saveR, 1500); } // an older notebook: switch it to page files once
             gl.clipX0 = book.canvas ? -1e9f : 0f;
             gl.clipX1 = book.canvas ? 1e9f : PW;
             ensureTrailingPage();
@@ -278,12 +285,12 @@ final class Engine implements Choreographer.FrameCallback {
             Notebook.Page p = book.pages.get(currentPage());
             Object[] before = pageState(p);
             boolean any = false;
-            for (int i = p.items.size() - 1; i >= 0; i--) {
-                Notebook.Item it = p.items.get(i);
+            for (int i = p.items().size() - 1; i >= 0; i--) {
+                Notebook.Item it = p.items().get(i);
                 if (it.type != Notebook.Item.TAPE) continue;
                 any = true;
-                if (op == 2) p.items.remove(i);
-                else p.items.set(i, it.withRevealed(op == 1));
+                if (op == 2) p.items().remove(i);
+                else p.items().set(i, it.withRevealed(op == 1));
             }
             if (!any) { toast("No tape on this page"); return; }
             if (op == 2) push(new PageEdit(p, before, pageState(p)));
@@ -447,8 +454,8 @@ final class Engine implements Choreographer.FrameCallback {
                 case "duplicate": { // its own copies of the ink: edits on one page never touch the other
                     Notebook.Page d = book.pages.get(i).copyShallow();
                     ArrayList<Stroke> own = new ArrayList<>();
-                    for (Stroke s : d.strokes) own.add(s.shifted(0, 0));
-                    d.strokes = own;
+                    for (Stroke s : d.strokes()) own.add(s.shifted(0, 0));
+                    d.setStrokes(own);
                     book.pages.add(i + 1, d);
                     break;
                 }
@@ -466,10 +473,10 @@ final class Engine implements Choreographer.FrameCallback {
                     return;
                 case "clear": {
                     Notebook.Page p = book.pages.get(i);
-                    if (p.strokes.isEmpty() && p.items.isEmpty()) return;
+                    if (p.strokes().isEmpty() && p.items().isEmpty()) return;
                     Object[] b4 = pageState(p);
-                    p.strokes = new ArrayList<>();
-                    p.items = new ArrayList<>();
+                    p.setStrokes(new ArrayList<>());
+                    p.setItems(new ArrayList<>());
                     push(new PageEdit(p, b4, pageState(p)));
                     edited();
                     toast("Page cleared · two-finger tap to undo");
@@ -492,8 +499,8 @@ final class Engine implements Choreographer.FrameCallback {
     void pageThumb(int i, int widthPx, java.util.function.Consumer<Bitmap> cb) {
         h.post(() -> {
             if (book == null || i >= book.pages.size()) return;
-            final Notebook.Page p = book.pages.get(i).copyShallow();
-            final Notebook nb = book.snapshot();
+            final Notebook.Page p = book.pages.get(i).snapCopy(); // an unread page is read on the worker
+            final Notebook nb = book.metaCopy();
             worker.execute(() -> {
                 Bitmap b = Render.pageBitmap(nb, dir, p, p.pdf >= 0 ? pdf() : null, widthPx);
                 main.post(() -> cb.accept(b));
@@ -519,7 +526,7 @@ final class Engine implements Choreographer.FrameCallback {
             if (!wholePage && !hasSel()) return;
             final int pg = wholePage ? currentPage() : selPage;
             Notebook.Page p = book.pages.get(pg);
-            final ArrayList<Stroke> src = new ArrayList<>(wholePage ? p.strokes : selStrokes);
+            final ArrayList<Stroke> src = new ArrayList<>(wholePage ? p.strokes() : selStrokes);
             if (src.isEmpty()) { main.post(() -> done.accept("Nothing to beautify on this page")); return; }
             final Beautify.Paper paper = paperOf(p);
             worker.execute(() -> {
@@ -531,12 +538,12 @@ final class Engine implements Choreographer.FrameCallback {
                     IdentityHashMap<Stroke, Stroke> map = new IdentityHashMap<>();
                     for (int i = 0; i < src.size(); i++) map.put(src.get(i), out.get(i));
                     int found = 0;
-                    for (Stroke s : cur.strokes) if (map.containsKey(s)) found++;
+                    for (Stroke s : cur.strokes()) if (map.containsKey(s)) found++;
                     if (found != src.size()) { main.post(() -> done.accept("The page changed, try again")); return; }
                     Object[] before = pageState(cur);
-                    ArrayList<Stroke> next = new ArrayList<>(cur.strokes.size());
-                    for (Stroke s : cur.strokes) { Stroke r = map.get(s); next.add(r != null ? r : s); }
-                    cur.strokes = next;
+                    ArrayList<Stroke> next = new ArrayList<>(cur.strokes().size());
+                    for (Stroke s : cur.strokes()) { Stroke r = map.get(s); next.add(r != null ? r : s); }
+                    cur.setStrokes(next);
                     push(new PageEdit(cur, before, pageState(cur)));
                     if (!wholePage && selPage == pg) {
                         ArrayList<Stroke> ns = new ArrayList<>();
@@ -582,7 +589,7 @@ final class Engine implements Choreographer.FrameCallback {
         autoPending.clear();
         int lang = Handwriting.convertLang(app);
         Notebook.Item prev = autoLastPage == pg && autoLast != null && book != null && pg < book.pages.size()
-                && book.pages.get(pg).items.contains(autoLast) ? autoLast : null;
+                && book.pages.get(pg).items().contains(autoLast) ? autoLast : null;
         // strokes added onto the last converted words (a matra, a dot, the top line drawn last): read that ink again with them
         if (prev != null && !autoLastInk.isEmpty()) {
             float l = Float.MAX_VALUE, t = Float.MAX_VALUE, rr = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
@@ -605,11 +612,11 @@ final class Engine implements Choreographer.FrameCallback {
     private void applyAutoRedo(int pg, ArrayList<Stroke> added, ArrayList<Stroke> all, Notebook.Item target, Handwriting.Converted r) {
         if (book == null || pg >= book.pages.size()) return;
         Notebook.Page p = book.pages.get(pg);
-        if (!p.items.contains(target) || r.error != null || r.text.trim().isEmpty()) return;
+        if (!p.items().contains(target) || r.error != null || r.text.trim().isEmpty()) return;
         IdentityHashMap<Stroke, Boolean> gone = new IdentityHashMap<>();
         for (Stroke s : added) gone.put(s, Boolean.TRUE);
         int found = 0;
-        for (Stroke s : p.strokes) if (gone.containsKey(s)) found++;
+        for (Stroke s : p.strokes()) if (gone.containsKey(s)) found++;
         if (found != added.size()) return;
         String text = r.text.trim().replace('\n', ' ');
         float maxW = canvas() ? Math.max(400, target.w + 300) : Math.max(120, PW - target.x - 20);
@@ -619,10 +626,10 @@ final class Engine implements Choreographer.FrameCallback {
         float bw = Math.max(40, Math.min(maxW, w + 6));
         sl = Render.textLayout(text, target.size, target.color, bw, true, target.style);
         Object[] before = pageState(p);
-        p.strokes.removeIf(gone::containsKey);
-        p.items.remove(target);
+        p.strokes().removeIf(gone::containsKey);
+        p.items().remove(target);
         Notebook.Item it = new Notebook.Item(Notebook.Item.TEXT, target.x, target.y, bw, sl.getHeight(), text, target.size, target.color, Notebook.Item.handWithInk(all), target.style);
-        p.items.add(it);
+        p.items().add(it);
         autoLast = it;
         autoLastInk = all;
         push(new PageEdit(p, before, pageState(p)));
@@ -640,7 +647,7 @@ final class Engine implements Choreographer.FrameCallback {
         IdentityHashMap<Stroke, Boolean> gone = new IdentityHashMap<>();
         for (Stroke s : ink) gone.put(s, Boolean.TRUE);
         int found = 0;
-        for (Stroke s : p.strokes) if (gone.containsKey(s)) found++;
+        for (Stroke s : p.strokes()) if (gone.containsKey(s)) found++;
         if (found != ink.size()) return; // erased or moved meanwhile: leave it
         float l = Float.MAX_VALUE, t = Float.MAX_VALUE, rr = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
         java.util.HashMap<Integer, Integer> colours = new java.util.HashMap<>();
@@ -652,7 +659,7 @@ final class Engine implements Choreographer.FrameCallback {
         float x = l, y = t;
         int read = r.lang >= 0 ? r.lang : lang;
         boolean rtl = read >= 0 && Handwriting.LANG_SCRIPT[read] == Beautify.ARABIC;
-        Notebook.Item prev = autoLastPage == pg && autoLast != null && p.items.contains(autoLast) ? autoLast : null;
+        Notebook.Item prev = autoLastPage == pg && autoLast != null && p.items().contains(autoLast) ? autoLast : null;
         if (prev != null) {
             float cy = (t + b) / 2, near = 3.5f * prev.size;
             boolean sameLine = cy > prev.y - prev.size * 0.3f && cy < prev.y + prev.h + prev.size * 0.3f;
@@ -672,12 +679,12 @@ final class Engine implements Choreographer.FrameCallback {
         float bw = Math.max(40, Math.min(maxW, w + 6));
         sl = Render.textLayout(text, size, colour, bw, true);
         Object[] before = pageState(p);
-        p.strokes.removeIf(gone::containsKey);
-        if (prev != null) p.items.remove(prev);
+        p.strokes().removeIf(gone::containsKey);
+        if (prev != null) p.items().remove(prev);
         ArrayList<Stroke> boxInk = new ArrayList<>(prev != null ? autoLastInk : new ArrayList<>());
         boxInk.addAll(ink);
         Notebook.Item it = new Notebook.Item(Notebook.Item.TEXT, x, y, bw, sl.getHeight(), text, size, colour, Notebook.Item.handWithInk(boxInk));
-        p.items.add(it);
+        p.items().add(it);
         autoLastInk = boxInk;
         autoLast = it;
         autoLastPage = pg;
@@ -694,15 +701,15 @@ final class Engine implements Choreographer.FrameCallback {
             editing = null;
             if (book == null || e.item == null || e.page >= book.pages.size()) return;
             Notebook.Page p = book.pages.get(e.page);
-            if (!p.items.contains(e.item)) return;
+            if (!p.items().contains(e.item)) return;
             java.util.List<Stroke> ink = e.item.ink();
             if (ink.isEmpty()) return;
             float l = Float.MAX_VALUE, t = Float.MAX_VALUE;
             for (Stroke s : ink) { l = Math.min(l, s.l); t = Math.min(t, s.t); }
             float dx = e.item.x - l, dy = e.item.y - t; // the box may have been moved since
             Object[] before = pageState(p);
-            p.items.remove(e.item);
-            for (Stroke s : ink) p.strokes.add(s.shifted(dx, dy));
+            p.items().remove(e.item);
+            for (Stroke s : ink) p.strokes().add(s.shifted(dx, dy));
             push(new PageEdit(p, before, pageState(p)));
             if (autoLast == e.item) { autoLast = null; autoLastInk = new ArrayList<>(); }
             dropTextTextures();
@@ -717,7 +724,7 @@ final class Engine implements Choreographer.FrameCallback {
         float x = ox + sx / z, y = oy + sy / z;
         int pg = pageAt(y);
         if (pg < 0 || pg >= book.pages.size()) return false;
-        for (Notebook.Item it : book.pages.get(pg).items) if (it.type == Notebook.Item.TEXT && it.contains(x, y - tops[pg], 4)) return true;
+        for (Notebook.Item it : book.pages.get(pg).items()) if (it.type == Notebook.Item.TEXT && it.contains(x, y - tops[pg], 4)) return true;
         return false;
     }
 
@@ -798,8 +805,8 @@ final class Engine implements Choreographer.FrameCallback {
             ArrayList<Notebook.Item> ni = new ArrayList<>();
             for (Stroke s : selStrokes) ns.add(s.shifted(24, 24));
             for (Notebook.Item it : selItems) ni.add(it.moved(0, 0, 1, 24, 24));
-            p.strokes.addAll(ns);
-            p.items.addAll(ni);
+            p.strokes().addAll(ns);
+            p.items().addAll(ni);
             push(new PageEdit(p, before, pageState(p)));
             select(selPage, ns, ni);
             edited();
@@ -845,8 +852,8 @@ final class Engine implements Choreographer.FrameCallback {
             ArrayList<Notebook.Item> ni = new ArrayList<>();
             for (Stroke s : clipStrokes) ns.add(s.shifted(dx, dy));
             for (Notebook.Item it : clipItems) ni.add(it.moved(0, 0, 1, dx, dy));
-            p.strokes.addAll(ns);
-            p.items.addAll(ni);
+            p.strokes().addAll(ns);
+            p.items().addAll(ni);
             push(new PageEdit(p, before, pageState(p)));
             if (tool != TOOL_LASSO) {
                 tool = TOOL_LASSO;
@@ -866,7 +873,7 @@ final class Engine implements Choreographer.FrameCallback {
             editing = null;
             Notebook.Page p = book.pages.get(e.page);
             Object[] before = pageState(p);
-            if (e.item != null) p.items.remove(e.item);
+            if (e.item != null) p.items().remove(e.item);
             String t = text.replaceAll("\\s+$", "");
             if (!t.isEmpty()) {
                 boolean hand = e.item != null && e.item.hand(); // editing converted text keeps its handwriting face
@@ -875,7 +882,7 @@ final class Engine implements Choreographer.FrameCallback {
                 for (int i = 0; i < sl.getLineCount(); i++) w = Math.max(w, sl.getLineWidth(i));
                 boolean aligned = Fonts.Style.parse(e.style).align != Fonts.Style.LEFT; // centred / right text keeps the box it's aligned in
                 float bw = e.item != null || aligned ? e.width : Math.max(40, Math.min(e.width, w + 6));
-                p.items.add(new Notebook.Item(Notebook.Item.TEXT, e.docX, e.docY, bw, sl.getHeight(), t, e.size, e.color, hand ? e.item.pts : null, e.style)); // keeps its handwriting
+                p.items().add(new Notebook.Item(Notebook.Item.TEXT, e.docX, e.docY, bw, sl.getHeight(), t, e.size, e.color, hand ? e.item.pts : null, e.style)); // keeps its handwriting
             }
             if (!Arrays.deepEquals(before, pageState(p))) {
                 push(new PageEdit(p, before, pageState(p)));
@@ -895,12 +902,12 @@ final class Engine implements Choreographer.FrameCallback {
         h.post(() -> {
             if (book == null || page >= book.pages.size()) return;
             Notebook.Page p = book.pages.get(page);
-            for (int i = p.items.size() - 1; i >= 0; i--) {
-                Notebook.Item it = p.items.get(i);
+            for (int i = p.items().size() - 1; i >= 0; i--) {
+                Notebook.Item it = p.items().get(i);
                 if (it.type != Notebook.Item.TEXT || Math.abs(it.x - x) > 0.5f || Math.abs(it.y - y) > 0.5f) continue;
                 Object[] before = pageState(p);
                 StaticLayout sl = Render.textLayout(it.text, it.size, it.color, it.w, it.hand(), style);
-                p.items.set(i, new Notebook.Item(it.type, it.x, it.y, it.w, sl.getHeight(), it.text, it.size, it.color, it.pts, style));
+                p.items().set(i, new Notebook.Item(it.type, it.x, it.y, it.w, sl.getHeight(), it.text, it.size, it.color, it.pts, style));
                 push(new PageEdit(p, before, pageState(p)));
                 edited();
                 return;
@@ -922,7 +929,7 @@ final class Engine implements Choreographer.FrameCallback {
             float cy = canvas() ? oy + H / (2 * z) : Math.max(hh / 2, Math.min(p.h - hh / 2, oy + H / (2 * z) - tops[pg]));
             Object[] before = pageState(p);
             Notebook.Item it = new Notebook.Item(Notebook.Item.IMAGE, cx - w / 2, cy - hh / 2, w, hh, name, 0, 0);
-            p.items.add(it);
+            p.items().add(it);
             push(new PageEdit(p, before, pageState(p)));
             tool = TOOL_LASSO;
             main.post(() -> listener.onTool(TOOL_LASSO));
@@ -1481,7 +1488,7 @@ final class Engine implements Choreographer.FrameCallback {
         if (len < tapeThick * 0.8f) { endTapeFrame(); return; } // too short to be a strip
         Notebook.Page p = book.pages.get(tapePage);
         Object[] before = pageState(p);
-        p.items.add(Notebook.Item.tape(pts, tapeThick, tapePattern, tapeColor));
+        p.items().add(Notebook.Item.tape(pts, tapeThick, tapePattern, tapeColor));
         push(new PageEdit(p, before, pageState(p)));
         if (tapePage == book.pages.size() - 1) ensureTrailingPage();
         docChanged();
@@ -1537,7 +1544,7 @@ final class Engine implements Choreographer.FrameCallback {
         float pad = dp(3) / z;
         int p0 = Math.max(0, pageAt(y) - 1), p1 = Math.min(book.pages.size() - 1, pageAt(y) + 1);
         for (int pi = p1; pi >= p0; pi--) {
-            ArrayList<Notebook.Item> items = book.pages.get(pi).items;
+            ArrayList<Notebook.Item> items = book.pages.get(pi).items();
             for (int i = items.size() - 1; i >= 0; i--) {
                 Notebook.Item it = items.get(i);
                 if (it.type == Notebook.Item.TAPE && it.contains(x, y - tops[pi], pad)) return new int[]{pi, i};
@@ -1550,7 +1557,7 @@ final class Engine implements Choreographer.FrameCallback {
     private boolean toggleTapeAt(float x, float y, boolean onlyCovered) {
         int[] hit = tapeAt(x, y);
         if (hit == null) return false;
-        ArrayList<Notebook.Item> items = book.pages.get(hit[0]).items;
+        ArrayList<Notebook.Item> items = book.pages.get(hit[0]).items();
         Notebook.Item it = items.get(hit[1]);
         if (onlyCovered && it.revealed()) return false;
         items.set(hit[1], it.withRevealed(!it.revealed()));
@@ -1597,7 +1604,7 @@ final class Engine implements Choreographer.FrameCallback {
                 if (t == null) t = tex("pdf:" + idx + ":1800", () -> pdfPage(idx, 1800));
                 if (t != null) gl.tex(t.id, 0, tops[i], PW, p.h, 1);
             }
-            for (Notebook.Item it : p.items) {
+            for (Notebook.Item it : p.items()) {
                 if (it == editing || it.type == Notebook.Item.TAPE || (i == selPage && selItems.contains(it))) continue;
                 drawItem(it, tops[i]);
             }
@@ -1628,7 +1635,7 @@ final class Engine implements Choreographer.FrameCallback {
         buildAhead();
         // tape goes over the ink it hides
         for (int i = first; i <= last; i++)
-            for (Notebook.Item it : book.pages.get(i).items)
+            for (Notebook.Item it : book.pages.get(i).items())
                 if (it.type == Notebook.Item.TAPE && !(i == selPage && selItems.contains(it))) drawItem(it, tops[i]);
         if (hasSel()) {
             // selection buffers are page-local; the transform adds the page top
@@ -1970,11 +1977,12 @@ final class Engine implements Choreographer.FrameCallback {
             Map.Entry<Notebook.Page, PageInk> e = it.next();
             if (!keep.contains(e.getKey())) { e.getValue().free(); it.remove(); }
         }
+        unloadFar(first, last);
         if (selPage >= 0 && selPage < n && !sel.isEmpty()) // in page order, like they were drawn on the page
-            for (Stroke s : book.pages.get(selPage).strokes) if (sel.containsKey(s)) s.emitAll(0, s.hl() ? gl.selHl : gl.selPen);
+            for (Stroke s : book.pages.get(selPage).strokes()) if (sel.containsKey(s)) s.emitAll(0, s.hl() ? gl.selHl : gl.selPen);
         if (gest == G_ERASE) // what a partial erase would leave of the strokes it touched
             for (int i = first; i <= last; i++)
-                for (Stroke s : book.pages.get(i).strokes) {
+                for (Stroke s : book.pages.get(i).strokes()) {
                     ArrayList<Stroke> ps = pieces.get(s);
                     if (ps != null) for (Stroke q : ps) q.emitAll(tops[i], q.hl() ? gl.hl : gl.pen);
                 }
@@ -1993,7 +2001,7 @@ final class Engine implements Choreographer.FrameCallback {
         PageInk pk = inks.get(p);
         boolean fresh = pk == null;
         if (fresh) { pk = new PageInk(); inks.put(p, pk); work[0]++; }
-        ArrayList<Stroke> list = p.strokes;
+        ArrayList<Stroke> list = p.strokes();
         if (!fresh && !patchPage(pk, i, list, sel)) fresh = true;
         if (!fresh && pk.gone > 4096 && pk.gone * 2 > pk.total()) fresh = true; // mostly holes: compact
         if (fresh) {
@@ -2039,21 +2047,53 @@ final class Engine implements Choreographer.FrameCallback {
         return true;
     }
 
-    /** Hands the pages near the view that have no ink yet to inkAhead. */
+    /**
+     * Pages this far from the view (beyond the kept ones) give back their strokes once they're saved; they're read
+     * from their file again when the view comes near. Memory then follows what's on screen, not the notebook's size.
+     */
+    private static final int RESIDENT = 4;
+
+    private void unloadFar(int first, int last) {
+        if (gest == G_ERASE || live != null) return;
+        int lo = first - RESIDENT, hi = last + RESIDENT, n = book.pages.size(), freed = 0;
+        for (int i = 0; i < n; i++) {
+            if (i >= lo && i <= hi) continue;
+            if (i == selPage || i == autoLastPage || i == livePage) continue;
+            Notebook.Page p = book.pages.get(i);
+            if (p.loaded() && p.unload()) freed++;
+        }
+        if (freed > 0) Log.i(Gl.TAG, "let go of " + freed + " pages far from the view");
+    }
+
+    /** Hands the pages near the view that have no ink yet to inkAhead (reading their file there if not read yet). */
     private void buildAhead() {
         for (int i = keepFirst(), last = keepLast(); i <= last; i++) {
             Notebook.Page p = book.pages.get(i);
-            if (inks.containsKey(p) || p.strokes.isEmpty() || !inkPending.add(p)) continue;
-            final ArrayList<Stroke> list = new ArrayList<>(p.strokes); // strokes never change; the list may
+            if (inks.containsKey(p) || (p.loaded() && p.strokes().isEmpty()) || !inkPending.add(p)) continue;
+            final boolean read = !p.loaded();
+            final File src = p.src;
+            final ArrayList<Stroke> list = read ? new ArrayList<>() : new ArrayList<>(p.strokes()); // strokes never change; the list may
+            final ArrayList<Notebook.Item> items = new ArrayList<>();
             try {
                 inkAhead.execute(() -> {
+                    boolean ok = true;
+                    if (read) {
+                        try { Notebook.readBody(src, list, items); }
+                        catch (Exception e) { ok = false; } // read on the ink thread instead (and marked broken there)
+                    }
                     PageInk pk = new PageInk();
-                    for (Stroke s : list) pk.add(s, LOOK_INK, 0);
+                    if (ok) for (Stroke s : list) pk.add(s, LOOK_INK, 0);
+                    final boolean good = ok;
                     h.post(() -> {
                         inkPending.remove(p);
-                        if (book == null || gl == null || !gl.hasSurface() || inks.containsKey(p)) return; // hidden tab: keep nothing
+                        if (book == null || !good) { pk.free(); return; }
+                        if (read) {
+                            if (p.loaded() || p.src != src) { pk.free(); return; } // read meanwhile: these are other objects
+                            p.install(list, items);
+                        }
+                        if (gl == null || !gl.hasSurface() || inks.containsKey(p)) { pk.free(); return; } // hidden tab: keep nothing
                         int at = book.pages.indexOf(p);
-                        if (at < keepFirst() || at > keepLast()) return; // scrolled away meanwhile
+                        if (at < keepFirst() || at > keepLast()) { pk.free(); return; } // scrolled away meanwhile
                         inks.put(p, pk);
                         needRebuild = true; // the next sync checks it against the page as it is by then
                     });
@@ -2316,7 +2356,8 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void armSnap() {
         h.removeCallbacks(snapR);
-        if (shapeSnap && !snapped) h.postDelayed(snapR, 480);
+        if (tool == TOOL_SHAPE && !snapped) h.postDelayed(snapR, 250); // shapes tool: a short pause is enough
+        else if (shapeSnap && !snapped) h.postDelayed(snapR, 480);
     }
 
     /** Pen held still mid-stroke: replace the stroke with a clean shape if it looks like one. */
@@ -2460,6 +2501,8 @@ final class Engine implements Choreographer.FrameCallback {
     private void inkCommit(MotionEvent ev) {
         h.removeCallbacks(snapR);
         h.removeCallbacks(holdEraseR);
+        // shapes tool: the stroke becomes its clean shape on lift (a scribble that's no shape stays as drawn)
+        if (tool == TOOL_SHAPE && !snapped && rulerEdge == 0 && live != null && live.n > 3) { movedFromStart = true; trySnap(); }
         if (rulerEdge != 0 && live.n > 0) {
             final float len = (float) Math.hypot(live.x(live.n - 1) - live.x(0), live.y(live.n - 1) - live.y(0));
             main.post(() -> listener.onRulerLength(len, true));
@@ -2498,8 +2541,9 @@ final class Engine implements Choreographer.FrameCallback {
             requestFrame();
         }
         Object[] before = pageState(p);
-        p.strokes.add(live);
-        for (Notebook.Item it : p.items) // ink written over covering tape goes under it
+        live.trim();
+        p.strokes().add(live);
+        for (Notebook.Item it : p.items()) // ink written over covering tape goes under it
             if (it.type == Notebook.Item.TAPE && !it.revealed() && RectF.intersects(new RectF(it.x, it.y, it.x + it.w, it.y + it.h), new RectF(live.l, live.t, live.r, live.b))) {
                 needCache = true;
                 requestFrame();
@@ -2731,13 +2775,13 @@ final class Engine implements Choreographer.FrameCallback {
             if (previewed && a == MotionEvent.ACTION_UP) { // the pen lifted: now the greyed ink really goes
                 for (Notebook.Page pg : eraseBefore.keySet()) {
                     ArrayList<Stroke> keep = new ArrayList<>();
-                    for (Stroke st : pg.strokes) {
+                    for (Stroke st : pg.strokes()) {
                         if (doomed.contains(st)) continue;
                         ArrayList<Stroke> ps = pieces.get(st);
                         if (ps != null) keep.addAll(ps); else keep.add(st);
                     }
-                    pg.strokes = keep;
-                    pg.items.removeIf(doomedItems::contains);
+                    pg.setStrokes(keep);
+                    pg.items().removeIf(doomedItems::contains);
                 }
             } else if (previewed) eraseBefore.clear(); // cancelled: nothing was changed
             doomed.clear();
@@ -2765,12 +2809,13 @@ final class Engine implements Choreographer.FrameCallback {
     private void eraseAlong(float sx0, float sy0, float sx1, float sy1) {
         float x0 = ox + sx0 / z, y0 = oy + sy0 / z, x1 = ox + sx1 / z, y1 = oy + sy1 / z;
         float er = dp(eraserDp) / z;
-        int p0 = pageAt(Math.min(y0, y1) - er), p1 = pageAt(Math.max(y0, y1) + er);
+        int[] pr = inkPages(Math.min(y0, y1) - er, Math.max(y0, y1) + er);
+        int p0 = pr[0], p1 = pr[1];
         boolean any = false;
         for (int pi = p0; pi <= p1; pi++) {
             float top = tops[pi];
             Notebook.Page page = book.pages.get(pi);
-            ArrayList<Stroke> list = page.strokes;
+            ArrayList<Stroke> list = page.strokes();
             for (int i = list.size() - 1; i >= 0; i--) {
                 Stroke s = list.get(i);
                 if (erasePreview) {
@@ -2810,8 +2855,8 @@ final class Engine implements Choreographer.FrameCallback {
         for (int pi = p0; pi <= p1; pi++) { // tape comes off whole
             float top = tops[pi];
             Notebook.Page page = book.pages.get(pi);
-            for (int i = page.items.size() - 1; i >= 0; i--) {
-                Notebook.Item it = page.items.get(i);
+            for (int i = page.items().size() - 1; i >= 0; i--) {
+                Notebook.Item it = page.items().get(i);
                 if (it.type != Notebook.Item.TAPE) continue;
                 float len = (float) Math.hypot(x1 - x0, y1 - y0);
                 int steps = Math.max(1, (int) Math.ceil(len / Math.max(1f, er / 2)));
@@ -2820,7 +2865,7 @@ final class Engine implements Choreographer.FrameCallback {
                     if (it.contains(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t - top, er * 0.6f)) {
                         if (erasePreview && doomedItems.contains(it)) break;
                         if (!eraseBefore.containsKey(page)) eraseBefore.put(page, pageState(page));
-                        if (erasePreview) doomedItems.add(it); else page.items.remove(i);
+                        if (erasePreview) doomedItems.add(it); else page.items().remove(i);
                         any = true;
                         needCache = true;
                         break;
@@ -2850,12 +2895,110 @@ final class Engine implements Choreographer.FrameCallback {
         }
     }
 
+    // ink that runs across a page edge ---------------------------------------------------------
+    //
+    // A stroke belongs to the page it was started on, in that page's coordinates, but it can run on over the edge
+    // into the next (or previous) page. Hit tests therefore look at the neighbours too, with coordinates made
+    // relative to each page's own top.
+
+    /** Furthest any stroke of page i reaches below its top (units), and above it (negative = above). */
+    private float inkBottom(int i) {
+        float b = -Float.MAX_VALUE;
+        for (Stroke s : book.pages.get(i).strokes()) if (s.b > b) b = s.b;
+        return b;
+    }
+
+    private float inkTop(int i) {
+        float t = Float.MAX_VALUE;
+        for (Stroke s : book.pages.get(i).strokes()) if (s.t < t) t = s.t;
+        return t;
+    }
+
+    /** Pages whose ink can reach doc y range [y0, y1]: the pages there plus neighbours whose strokes spill over. */
+    private int[] inkPages(float y0, float y1) {
+        int p0 = pageAt(y0), p1 = pageAt(y1), a = p0, b = p1;
+        for (int j = p0 - 1; j >= Math.max(0, p0 - 3); j--) if (tops[j] + inkBottom(j) >= y0) a = j;
+        for (int j = p1 + 1; j <= Math.min(tops.length - 1, p1 + 3); j++) if (tops[j] + inkTop(j) <= y1) b = j;
+        return new int[]{a, b};
+    }
+
+    /**
+     * Strokes of other pages picked by a lasso on page `to` move into that page (same place on screen), so one
+     * selection can hold them. The move only becomes an undo step together with whatever is then done to the
+     * selection; if the selection is dropped untouched, the strokes go back where they were.
+     */
+    private Act rehome;
+    private ArrayList<Notebook.Page> rehomePages;
+    private ArrayList<Object[]> rehomeAfter;
+
+    private ArrayList<Stroke> adopt(int to, java.util.LinkedHashMap<Integer, ArrayList<Stroke>> from) {
+        ArrayList<Stroke> out = new ArrayList<>();
+        if (from.isEmpty()) return out;
+        Notebook.Page dst = book.pages.get(to);
+        ArrayList<PageEdit> edits = new ArrayList<>();
+        Object[] dstBefore = pageState(dst);
+        for (Map.Entry<Integer, ArrayList<Stroke>> e : from.entrySet()) {
+            Notebook.Page src = book.pages.get(e.getKey());
+            Object[] before = pageState(src);
+            IdentityHashMap<Stroke, Boolean> take = new IdentityHashMap<>();
+            for (Stroke st : e.getValue()) take.put(st, Boolean.TRUE);
+            ArrayList<Stroke> keep = new ArrayList<>(src.strokes().size());
+            for (Stroke st : src.strokes()) if (!take.containsKey(st)) keep.add(st);
+            src.setStrokes(keep);
+            float dy = tops[e.getKey()] - tops[to];
+            for (Stroke st : e.getValue()) { Stroke m = st.shifted(0, dy); dst.strokes().add(m); out.add(m); }
+            edits.add(new PageEdit(src, before, pageState(src)));
+        }
+        edits.add(new PageEdit(dst, dstBefore, pageState(dst)));
+        rehome = new Multi(edits);
+        rehomePages = new ArrayList<>();
+        rehomeAfter = new ArrayList<>();
+        for (PageEdit pe : edits) { rehomePages.add(pe.p); rehomeAfter.add(pe.after); }
+        needRebuild = true;
+        return out;
+    }
+
+    /** The selection was dropped with nothing done to it: put adopted strokes back (if their pages are unchanged). */
+    private void undoRehome() {
+        if (rehome == null) return;
+        Act r = rehome;
+        rehome = null;
+        for (int i = 0; i < rehomePages.size(); i++) {
+            Notebook.Page pg = rehomePages.get(i);
+            @SuppressWarnings("unchecked") ArrayList<Stroke> after = (ArrayList<Stroke>) rehomeAfter.get(i)[0];
+            if (!sameRefs(pg.strokes(), after) || !book.pages.contains(pg)) { pushPlain(r); return; } // changed since: keep it, undoable
+        }
+        r.undo(book);
+        needRebuild = true;
+        docChanged();
+    }
+
+    private static boolean sameRefs(ArrayList<?> a, ArrayList<?> b) {
+        if (a.size() != b.size()) return false;
+        for (int i = 0; i < a.size(); i++) if (a.get(i) != b.get(i)) return false;
+        return true;
+    }
+
+    /** Does the stroke lie (partly) in the loop? A part of it is enough: a few points, or a fifth of a short one. */
+    private static boolean lassoed(Stroke s, float[] xs, float[] ys, int m) {
+        if (s.r < min(xs, m) || s.l > max(xs, m) || s.b < min(ys, m) || s.t > max(ys, m)) return false;
+        int in = 0;
+        for (int i = 0; i < s.n; i++)
+            if (Geo.inside(s.x(i), s.y(i), xs, ys, m) && (++in >= 4 || in >= 0.2f * s.n)) return true;
+        return false;
+    }
+
+    private static float min(float[] a, int n) { float v = Float.MAX_VALUE; for (int i = 0; i < n; i++) v = Math.min(v, a[i]); return v; }
+
+    private static float max(float[] a, int n) { float v = -Float.MAX_VALUE; for (int i = 0; i < n; i++) v = Math.max(v, a[i]); return v; }
+
     // lasso + selection ---------------------------------------------------------------------
 
     private boolean hasSel() { return selPage >= 0 && (!selStrokes.isEmpty() || !selItems.isEmpty()); }
 
     private void lassoBegin(MotionEvent ev) {
         ln = 0;
+        lassoDash = 0;
         lassoPage = pageAt(oy + ev.getY() / z);
         predCur.setEmpty();
         predPrev.setEmpty();
@@ -2882,11 +3025,25 @@ final class Engine implements Choreographer.FrameCallback {
         }
     }
 
+    private int lassoDash; // gl.pred segments of the loop itself; after them comes the closing line
+
     private void lassoEvent(MotionEvent ev, int a) {
         if (a == MotionEvent.ACTION_MOVE || a == MotionEvent.ACTION_UP) {
+            gl.pred.truncate(lassoDash);
             int hs = ev.getHistorySize();
             for (int i = 0; i < hs; i++) lassoAdd(ev.getHistoricalX(i), ev.getHistoricalY(i));
             lassoAdd(ev.getX(), ev.getY());
+            lassoDash = gl.pred.count;
+            // a faint line back to the start shows how an open loop will be closed (it stays inside the loop's box)
+            if (ln >= 3) {
+                float w = dp(0.9f) / z, x0 = lx[ln - 1], y0 = ly[ln - 1], x1 = lx[0], y1 = ly[0];
+                float len = (float) Math.hypot(x1 - x0, y1 - y0), step = dp(5) / z;
+                int k = (int) (len / step);
+                for (int i = 0; i < k; i += 2) {
+                    float t0 = i / (float) k, t1 = Math.min(1f, (i + 1) / (float) k);
+                    gl.pred.put(x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0, x0 + (x1 - x0) * t1, y0 + (y1 - y0) * t1, w, w, 0x993d5afe);
+                }
+            }
             patchOverlay(null);
         }
         if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
@@ -2907,28 +3064,56 @@ final class Engine implements Choreographer.FrameCallback {
             Notebook.Page p = book.pages.get(lassoPage);
             ArrayList<Stroke> ss = new ArrayList<>();
             ArrayList<Notebook.Item> si = new ArrayList<>();
+            java.util.LinkedHashMap<Integer, ArrayList<Stroke>> other = new java.util.LinkedHashMap<>();
             if (ln >= 3) {
-                for (Stroke s : p.strokes) if (s.insideFraction(xs, ys, ln) >= 0.5f) ss.add(s);
-                for (Notebook.Item it : p.items) if (Geo.inside(it.x + it.w / 2, it.y + it.h / 2, xs, ys, ln)) si.add(it);
+                // the loop is closed with a straight line from where the pen lifted back to where it started
+                for (Stroke s : p.strokes()) if (lassoed(s, xs, ys, ln)) ss.add(s);
+                for (Notebook.Item it : p.items()) if (Geo.inside(it.x + it.w / 2, it.y + it.h / 2, xs, ys, ln)) si.add(it);
+                // strokes started on a neighbouring page that run into this one
+                int[] pr = inkPages(min(ly, ln), max(ly, ln));
+                for (int j = pr[0]; j <= pr[1]; j++) {
+                    if (j == lassoPage) continue;
+                    float dy = tops[j] - top;
+                    float[] ysj = new float[ln];
+                    for (int i = 0; i < ln; i++) ysj[i] = ys[i] - dy;
+                    for (Stroke s : book.pages.get(j).strokes())
+                        if (lassoed(s, xs, ysj, ln)) other.computeIfAbsent(j, k -> new ArrayList<>()).add(s);
+                }
             }
             // a tap (or tiny lasso) selects what's under it: a picture, text box or tape, else a stroke (a shape gets its handles)
             if (ss.isEmpty() && si.isEmpty()) {
                 float cx = xs[0], cy = ys[0];
-                for (int i = p.items.size() - 1; i >= 0; i--) {
-                    Notebook.Item it = p.items.get(i);
+                for (int i = p.items().size() - 1; i >= 0; i--) {
+                    Notebook.Item it = p.items().get(i);
                     if (it.contains(cx, cy, 0)) {
                         si.add(it);
                         break;
                     }
                 }
-                if (si.isEmpty()) {
+                if (si.isEmpty() && other.isEmpty()) {
                     float reach = dp(10) / z;
-                    for (int i = p.strokes.size() - 1; i >= 0; i--) {
-                        Stroke s = p.strokes.get(i);
+                    for (int i = p.strokes().size() - 1; i >= 0; i--) {
+                        Stroke s = p.strokes().get(i);
                         if (s.hit(cx, cy, cx, cy, reach)) { ss.add(s); break; }
+                    }
+                    if (ss.isEmpty()) { // a stroke from a neighbouring page under the tap
+                        int[] pr = inkPages(cy + top - reach, cy + top + reach);
+                        for (int j = pr[0]; j <= pr[1] && other.isEmpty(); j++) {
+                            if (j == lassoPage) continue;
+                            ArrayList<Stroke> list = book.pages.get(j).strokes();
+                            float ly0 = cy + top - tops[j];
+                            for (int i = list.size() - 1; i >= 0; i--)
+                                if (list.get(i).hit(cx, ly0, cx, ly0, reach)) {
+                                    ArrayList<Stroke> one = new ArrayList<>();
+                                    one.add(list.get(i));
+                                    other.put(j, one);
+                                    break;
+                                }
+                        }
                     }
                 }
             }
+            if (!other.isEmpty()) ss.addAll(adopt(lassoPage, other));
             if (!ss.isEmpty() || !si.isEmpty()) select(lassoPage, ss, si);
         }
     }
@@ -2960,6 +3145,7 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private void clearSelection() {
+        undoRehome();
         if (selPage < 0) return;
         selPage = -1;
         selStrokes = new ArrayList<>();
@@ -3079,7 +3265,7 @@ final class Engine implements Choreographer.FrameCallback {
         Stroke ns = new Stroke(o.tool, o.color, o.width);
         ns.shape = o.shape;
         for (int i = 0; i + 1 < pts.length; i += 2) ns.add(pts[i], pts[i + 1], pr);
-        book.pages.get(selPage).strokes.set(shapeIdx, ns);
+        book.pages.get(selPage).strokes().set(shapeIdx, ns);
         selStrokes = new ArrayList<>();
         selStrokes.add(ns);
         selBounds.set(bounds(selStrokes, selItems));
@@ -3115,7 +3301,7 @@ final class Engine implements Choreographer.FrameCallback {
             shapeOrig = selStrokes.get(0);
             Notebook.Page p = book.pages.get(selPage);
             shapeBefore = pageState(p);
-            shapeIdx = p.strokes.indexOf(shapeOrig);
+            shapeIdx = p.strokes().indexOf(shapeOrig);
             if (shapeIdx < 0) shapeHandle = -1;
         }
         spx = selScale ? selBounds.left : 0;
@@ -3133,12 +3319,12 @@ final class Engine implements Choreographer.FrameCallback {
             } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
                 gest = G_NONE;
                 penNear = SystemClock.uptimeMillis();
-                Stroke now = p.strokes.get(shapeIdx);
+                Stroke now = p.strokes().get(shapeIdx);
                 if (a == MotionEvent.ACTION_UP && now != shapeOrig) {
                     push(new PageEdit(p, shapeBefore, pageState(p)));
                     edited();
                 } else if (now != shapeOrig) { // cancelled: put it back
-                    p.strokes.set(shapeIdx, shapeOrig);
+                    p.strokes().set(shapeIdx, shapeOrig);
                     selStrokes = new ArrayList<>();
                     selStrokes.add(shapeOrig);
                     selBounds.set(bounds(selStrokes, selItems));
@@ -3192,11 +3378,11 @@ final class Engine implements Choreographer.FrameCallback {
         for (Stroke s : selStrokes) old.put(s, Boolean.TRUE);
         for (Notebook.Item it : selItems) old.put(it, Boolean.TRUE);
         int si = -1; // keep z-order: replacements go where the first replaced stroke was
-        for (int i = 0; i < p.strokes.size(); i++) if (old.containsKey(p.strokes.get(i))) { si = i; break; }
-        p.strokes.removeIf(old::containsKey);
-        p.items.removeIf(old::containsKey);
-        p.strokes.addAll(si < 0 ? p.strokes.size() : Math.min(si, p.strokes.size()), ns);
-        p.items.addAll(ni);
+        for (int i = 0; i < p.strokes().size(); i++) if (old.containsKey(p.strokes().get(i))) { si = i; break; }
+        p.strokes().removeIf(old::containsKey);
+        p.items().removeIf(old::containsKey);
+        p.strokes().addAll(si < 0 ? p.strokes().size() : Math.min(si, p.strokes().size()), ns);
+        p.items().addAll(ni);
         push(new PageEdit(p, before, pageState(p)));
         int pg = selPage;
         if (keepSelected && (!ns.isEmpty() || !ni.isEmpty())) select(pg, ns, ni);
@@ -3214,8 +3400,8 @@ final class Engine implements Choreographer.FrameCallback {
         float py = y - tops[pg];
         TextEdit e = new TextEdit();
         e.page = pg;
-        for (int i = p.items.size() - 1; i >= 0; i--) {
-            Notebook.Item it = p.items.get(i);
+        for (int i = p.items().size() - 1; i >= 0; i--) {
+            Notebook.Item it = p.items().get(i);
             if (it.type == Notebook.Item.TEXT && x >= it.x - 6 && x <= it.x + it.w + 6 && py >= it.y - 6 && py <= it.y + it.h + 6) {
                 e.item = it;
                 break;
@@ -3416,7 +3602,7 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private static Object[] pageState(Notebook.Page p) {
-        return new Object[]{new ArrayList<>(p.strokes), new ArrayList<>(p.items)};
+        return new Object[]{new ArrayList<>(p.strokes()), new ArrayList<>(p.items())};
     }
 
     /** Before/after snapshot of one page's strokes and items. */
@@ -3426,8 +3612,8 @@ final class Engine implements Choreographer.FrameCallback {
         PageEdit(Notebook.Page p, Object[] before, Object[] after) { this.p = p; this.before = before; this.after = after; }
         @SuppressWarnings("unchecked")
         private void set(Object[] s) {
-            p.strokes = new ArrayList<>((ArrayList<Stroke>) s[0]);
-            p.items = new ArrayList<>((ArrayList<Notebook.Item>) s[1]);
+            p.setStrokes(new ArrayList<>((ArrayList<Stroke>) s[0]));
+            p.setItems(new ArrayList<>((ArrayList<Notebook.Item>) s[1]));
         }
         void undo(Notebook b) { set(before); }
         void redo(Notebook b) { set(after); }
@@ -3469,6 +3655,17 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private void push(Act a) {
+        if (rehome != null) {
+            ArrayList<Act> both = new ArrayList<>();
+            both.add(rehome);
+            both.add(a);
+            rehome = null;
+            a = new MultiAct(both);
+        }
+        pushPlain(a);
+    }
+
+    private void pushPlain(Act a) {
         undo.push(a);
         if (undo.size() > 500) undo.removeLast();
         redo.clear();
@@ -3513,7 +3710,7 @@ final class Engine implements Choreographer.FrameCallback {
     private boolean ensureTrailingPage() {
         if (book == null || book.canvas || book.pages.isEmpty()) return false;
         Notebook.Page last = book.pages.get(book.pages.size() - 1);
-        if (last.pdf >= 0 || (last.strokes.isEmpty() && last.items.isEmpty())) return false;
+        if (last.pdf >= 0 || (last.strokes().isEmpty() && last.items().isEmpty())) return false;
         Notebook.Page np = new Notebook.Page(last.bg);
         np.copyStyle(last); // the next page looks like this one
         book.pages.add(np);
@@ -3568,10 +3765,25 @@ final class Engine implements Choreographer.FrameCallback {
     private void save() {
         if (book == null || !dirtyDoc) return;
         dirtyDoc = false;
-        final Notebook snap = book.snapshot();
+        final Notebook snap = book.snapshot(true);
+        final Notebook owner = book;
         io.execute(() -> {
             try {
+                long t0 = System.nanoTime();
                 snap.write(dir);
+                final ArrayList<Notebook.Page> done = new ArrayList<>(snap.written);
+                if (!done.isEmpty() || snap.pages.size() > 50)
+                    Log.i(Gl.TAG, String.format(Locale.US, "saved %d of %d pages in %d ms", done.size(), snap.pages.size(), (System.nanoTime() - t0) / 1_000_000));
+                // the originals now match their files (unless they changed meanwhile: then they're still dirty)
+                h.post(() -> {
+                    if (book != owner) return;
+                    owner.legacy = false; // converted: it's page files now
+                    for (Notebook.Page c : done) {
+                        Notebook.Page o = c.origin;
+                        if (o == null) continue;
+                        if (o.id == c.id) o.markSaved(c.strokes().toArray(), c.items().toArray(), c.src);
+                    }
+                });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "save failed", e);
                 toast("Couldn't save · will try again (is storage full?)");

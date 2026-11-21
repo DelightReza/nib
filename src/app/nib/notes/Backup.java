@@ -86,7 +86,7 @@ final class Backup {
         File[] kids = d.listFiles();
         if (kids == null) return;
         for (File k : kids) {
-            if (k.getName().endsWith(".tmp")) continue;
+            if (k.getName().endsWith(".tmp") || k.getName().equals("ink.bin.old")) continue; // .old: pre-2.3 copy, the pages hold it all
             if (k.isDirectory()) {
                 addDir(zip, k, prefix + k.getName() + "/");
                 continue;
