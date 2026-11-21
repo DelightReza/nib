@@ -29,30 +29,34 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
 - Stress test: `tools/stress/make_notebook.py OUT PAGES [STROKES]` writes an old-format notebook (300 pages ≈ 100 MB).
   On the Pad 6: cold open 451 ms / 18 MB heap, ~33 MB scrolling all pages, saves 16–20 ms (2.2.2: 192 MB, full rewrite).
 
-## Next: tool bar follow-ups
-- **Move tools between basic and advanced:** released in 2.4.0. Long-press a tool: its panel ends
-  with "Move to the tool bar / Move to more tools"; buttons without a panel (image, ruler, finger, beautify, to
-  text) get a small menu with just that. Each side keeps a fixed order (`TOOL_IDS`); pref `toolBasic` lists the
-  bar's. Not done: reordering within a side.
-- **Glass look.** The layout is decided (option A, mockups at https://claude.ai/artifact/5kibc8S318u4LFz9uFQcQ3);
-  the earlier "Liquid Glass" styling idea (https://claude.ai/artifact/QiaT3nVZUmrzR4DRC6Wpd8) is still open if wanted.
+## Watch
+- **Split-view pane stopped showing ink** (2026-11-21 ~13:50, infinite canvas in one pane): strokes were saved but not
+  shown until a finger touch; the other pane kept working. Android's log had rolled over, so the trigger is unknown.
+  2.4.1 re-checks front-buffer mode at every pen-down and queues the buffer on lift. If it happens again, read
+  `files/diag.log` around the time (front buffer ON/off/lost, surfaces, the pane in use).
 
-## Done in 2.4.0
-- Move tools between bar and shelf (above).
-- **Resize a shape keeping its shape:** a selected shape (not a line) shows a light dashed box with square corner
-  handles; dragging one scales the shape from the opposite corner, same proportions, same line width.
-- **Paper tape:** looks Flat (as before) / Masking (default) / Washi / Kraft: torn ends, paper fibres, kraft specks,
-  washi sheen, soft shadow; still fully covering. Stored as "look~pattern" in the tape's pattern string (flat tape
-  keeps the bare pattern, so older Nib reads it as plain tape). New tape colour Cream.
-- **Exports:** ink that runs over a page edge is drawn on the next page too (PDF, PNG, page overview).
-- Taps and the eraser find strokes by their lines, not just their points (scaled shapes have far-apart points).
-- Tabs compare a notebook folder's real path (the same folder opened as /data/data/… and /data/user/0/… made two tabs).
+## Next
+- **Reorder tools** within the bar or the shelf (today each side keeps the fixed `TOOL_IDS` order).
+- **Glass look** (optional): the layout is decided (option A, https://claude.ai/artifact/5kibc8S318u4LFz9uFQcQ3); the
+  earlier "Liquid Glass" styling idea (https://claude.ai/artifact/QiaT3nVZUmrzR4DRC6Wpd8) is still open if wanted.
 
 ## Backlog
 - **Finger writing with a resting palm** (Pad 6): blocked in the touch chip firmware, not the app. Research and the
   only remaining route (patched firmware loaded as the driver's debug firmware) in `~/nib-research/pad6-touch/NOTES.md`.
   Undecided. The touch-chip palm-rest experiment is in `git stash` (2026-11-16).
-- Reordering tools within the bar or the shelf.
+
+## How some things work (2.3–2.4)
+- **Tool bar:** basic bar + advanced shelf (`capTools` / `capAdv`). Long-press a tool (or tap it again) for its panel,
+  which ends with "Move to the tool bar / Move to more tools"; buttons without a panel get a small move menu. Pref
+  `toolBasic` lists the bar's tools (default `pen,hl,eraser,lasso`); prefs `shelfOpen`, `shelfPin`.
+- **Shapes:** `Engine.TOOL_SHAPE` snaps each stroke on lift. A selected shape has its own handles plus a dashed box
+  whose square corners scale it proportionally (`allHandlesLocal`, `shapeBox`).
+- **Tape looks:** stored as `look~pattern` in the tape's pattern text (`Render.TAPE_LOOKS`: flat, masking, washi,
+  kraft); flat tape keeps the bare pattern so older Nib reads it. Patterns are drawn only over the strip.
+- **Overflowing ink:** a stroke belongs to the page it started on; erase, lasso and taps check neighbouring pages
+  (`Engine.inkPages`), a lasso moves such strokes into its page (`adopt`, undone if the selection is dropped
+  untouched), and exports draw the neighbours' overflow (`Render.page` with prev / next).
+- **Async textures** (tape, images, text) set `kickDisplay`, so the next present queues the front buffer.
 
 ## Decided / rejected
 - **Never override HyperOS's Smartpen refresh rule** (`ro.vendor.display.smartpen_vrr_fps`): turning it off broke the
@@ -73,3 +77,10 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
 - Install every build straight away (owner's standing request) and reopen with
   `am start -n app.nib.notes/.LibraryActivity --ez reopen true`.
 - The x86_64 emulator can't run Nib (arm64-only libs); test on the tablet.
+- Test notebooks: make one with `tools/stress/make_notebook.py` (or a hand-written NIB6 file), push it into
+  `files/notebooks/` with root (chown to the app's uid, restorecon), open it with
+  `su -c 'am start -n app.nib.notes/.EditorActivity --es dir /data/user/0/app.nib.notes/files/notebooks/<dir>'`
+  (always the `/data/user/0` path), and afterwards delete it and take it out of the `tabs` / `tabCur` / `tabSplit`
+  prefs. Never use the owner's notebooks for tests.
+- Nib's own log: `adb shell "su -c 'cat /data/data/app.nib.notes/files/diag.log'"` (logcat's main buffer only keeps
+  minutes on this tablet).
