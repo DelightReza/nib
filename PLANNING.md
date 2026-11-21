@@ -1,6 +1,6 @@
 # Nib: where we left off (2026-11-21)
 
-Latest release: **v2.4.1** (tag v2.4.1, commit 653237d, versionCode 31). Release notes: `docs/announcements/v2.4.1.md`.
+Latest release: **v2.5.0** (tag v2.5.0, commit 9e48578, versionCode 34). Release notes: `docs/announcements/v2.5.0.md`.
 versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a release. Release builds use the key in
 `~/.nib-release` (`NIB_KEYSTORE` / `NIB_KS_PASS` / `NIB_KEY_ALIAS=nib`); the Magisk zip comes from
 `tools/build-magisk-module.sh` (always build it fresh, never reuse an old zip).
@@ -18,6 +18,8 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
 - **2.4.1:** tape patterns drawn only over the strip (dots took ~0.5 s), front-buffer re-check at pen-down + queue on
   lift (split-view pane stopped showing ink, 2026-11-21 13:50, cause unconfirmed), Diag log (files/diag.log, read with
   `adb shell "su -c 'cat /data/data/app.nib.notes/files/diag.log'"`), New notebook in the tab + and split pickers.
+- **2.5.0:** layers (whole notebook; eraser/lasso on the active layer only); fix for 2.4.1's black patches while erasing
+  (it swapped front-buffer surfaces; never do that); shelf closes on any tool pick or pen-down.
 
 ## How notebooks are stored (NIB8, since 2.3.0)
 - `ink.bin` is an index: page order, each page's look (template, height, PDF page, bookmark, style) and file id.
@@ -56,7 +58,12 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
 - **Overflowing ink:** a stroke belongs to the page it started on; erase, lasso and taps check neighbouring pages
   (`Engine.inkPages`), a lasso moves such strokes into its page (`adopt`, undone if the selection is dropped
   untouched), and exports draw the neighbours' overflow (`Render.page` with prev / next).
-- **Async textures** (tape, images, text) set `kickDisplay`, so the next present queues the front buffer.
+- **Front-buffer surfaces are only ever flushed, never swapped:** on the Pad 6 an eglSwapBuffers on a single-buffer
+  surface flips to a stale buffer (2.4.1: black patches while erasing). `kickDisplay` / `showFront` are no-ops now.
+- **Layers:** `Notebook.layers` (bottom to top) + `activeLayer`, stored after the pages in the index; a stroke's layer is
+  the top byte of its tool word, items' layers a block after a page file's items. Pages draw in `inDrawOrder`;
+  hidden strokes get `LOOK_HIDDEN`. Delete / merge are undoable (`LayersEdit` + page edits); visibility, order,
+  rename and the active layer are saved but not undo steps.
 
 ## Decided / rejected
 - **Never override HyperOS's Smartpen refresh rule** (`ro.vendor.display.smartpen_vrr_fps`): turning it off broke the
