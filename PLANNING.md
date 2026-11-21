@@ -1,6 +1,6 @@
 # Nib: where we left off (2026-11-21)
 
-Latest release: **v2.3.0** (tag v2.3.0, commit 32b0839, versionCode 26). Release notes: `docs/announcements/v2.3.0.md`.
+Latest release: **v2.4.0** (tag v2.4.0, commit 8f6e832, versionCode 28). Release notes: `docs/announcements/v2.4.0.md`.
 versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a release. Release builds use the key in
 `~/.nib-release` (`NIB_KEYSTORE` / `NIB_KS_PASS` / `NIB_KEY_ALIAS=nib`); the Magisk zip comes from
 `tools/build-magisk-module.sh` (always build it fresh, never reuse an old zip).
@@ -13,6 +13,8 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
 - **2.3.0:** big notebooks stay light (NIB8, see below), basic + advanced tool bar (option A), Shapes tool,
   true-size thickness dots + log slider, partial lasso + closing line, erase/select strokes across a page edge,
   slim split grip, zoom chip over the zoomed pane.
+- **2.4.0:** move tools between bar and shelf, proportional shape resize, paper tape looks, overflow ink in exports,
+  segment hit tests, tabs by real path.
 
 ## How notebooks are stored (NIB8, since 2.3.0)
 - `ink.bin` is an index: page order, each page's look (template, height, PDF page, bookmark, style) and file id.
@@ -25,14 +27,14 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
   On the Pad 6: cold open 451 ms / 18 MB heap, ~33 MB scrolling all pages, saves 16–20 ms (2.2.2: 192 MB, full rewrite).
 
 ## Next: tool bar follow-ups
-- **Move tools between basic and advanced:** built after 2.3.0 (not released yet). Long-press a tool: its panel ends
+- **Move tools between basic and advanced:** released in 2.4.0. Long-press a tool: its panel ends
   with "Move to the tool bar / Move to more tools"; buttons without a panel (image, ruler, finger, beautify, to
   text) get a small menu with just that. Each side keeps a fixed order (`TOOL_IDS`); pref `toolBasic` lists the
   bar's. Not done: reordering within a side.
 - **Glass look.** The layout is decided (option A, mockups at https://claude.ai/artifact/5kibc8S318u4LFz9uFQcQ3);
   the earlier "Liquid Glass" styling idea (https://claude.ai/artifact/QiaT3nVZUmrzR4DRC6Wpd8) is still open if wanted.
 
-## Built after 2.3.0 (not released yet)
+## Done in 2.4.0
 - Move tools between bar and shelf (above).
 - **Resize a shape keeping its shape:** a selected shape (not a line) shows a light dashed box with square corner
   handles; dragging one scales the shape from the opposite corner, same proportions, same line width.
