@@ -1,6 +1,6 @@
 # Nib: where we left off (2026-11-21)
 
-Latest release: **v2.4.0** (tag v2.4.0, commit 8f6e832, versionCode 28). Release notes: `docs/announcements/v2.4.0.md`.
+Latest release: **v2.4.1** (tag v2.4.1, commit 653237d, versionCode 31). Release notes: `docs/announcements/v2.4.1.md`.
 versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a release. Release builds use the key in
 `~/.nib-release` (`NIB_KEYSTORE` / `NIB_KS_PASS` / `NIB_KEY_ALIAS=nib`); the Magisk zip comes from
 `tools/build-magisk-module.sh` (always build it fresh, never reuse an old zip).
@@ -15,6 +15,9 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
   slim split grip, zoom chip over the zoomed pane.
 - **2.4.0:** move tools between bar and shelf, proportional shape resize, paper tape looks, overflow ink in exports,
   segment hit tests, tabs by real path.
+- **2.4.1:** tape patterns drawn only over the strip (dots took ~0.5 s), front-buffer re-check at pen-down + queue on
+  lift (split-view pane stopped showing ink, 2026-11-21 13:50, cause unconfirmed), Diag log (files/diag.log, read with
+  `adb shell "su -c 'cat /data/data/app.nib.notes/files/diag.log'"`), New notebook in the tab + and split pickers.
 
 ## How notebooks are stored (NIB8, since 2.3.0)
 - `ink.bin` is an index: page order, each page's look (template, height, PDF page, bookmark, style) and file id.
