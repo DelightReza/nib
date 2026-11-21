@@ -42,9 +42,11 @@ final class Exporter {
                 PdfDocument.Page pg = doc.startPage(info);
                 Canvas cv = pg.getCanvas();
                 cv.scale(k, k);
-                Render.page(cv, nb, dir, p, src, 1600, true);
+                Notebook.Page prev = i > 0 ? nb.pages.get(i - 1) : null, next = i + 1 < nb.pages.size() ? nb.pages.get(i + 1) : null;
+                Render.page(cv, nb, dir, p, prev, next, src, 1600, true); // with ink running over from the neighbours
                 doc.finishPage(pg);
-                p.unload(); // a long notebook is exported a page at a time, not all in memory at once
+                if (prev != null) prev.unload(); // a long notebook is exported a few pages at a time, not all in memory
+                if (page >= 0) { p.unload(); if (next != null) next.unload(); }
             }
             try (FileOutputStream o = new FileOutputStream(out)) {
                 doc.writeTo(o);
@@ -60,7 +62,8 @@ final class Exporter {
         File out = new File(exportDir(c), safeName(nb.title) + " p" + (page + 1) + ".png");
         Render.Pdf src = nb.pages.get(page).pdf >= 0 ? Render.Pdf.open(dir) : null;
         try {
-            Bitmap b = Render.pageBitmap(nb, dir, nb.pages.get(page), src, 2000);
+            Bitmap b = Render.pageBitmap(nb, dir, nb.pages.get(page), page > 0 ? nb.pages.get(page - 1) : null,
+                    page + 1 < nb.pages.size() ? nb.pages.get(page + 1) : null, src, 2000);
             try (FileOutputStream o = new FileOutputStream(out)) {
                 b.compress(Bitmap.CompressFormat.PNG, 100, o);
             }

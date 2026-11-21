@@ -25,23 +25,29 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
   On the Pad 6: cold open 451 ms / 18 MB heap, ~33 MB scrolling all pages, saves 16–20 ms (2.2.2: 192 MB, full rewrite).
 
 ## Next: tool bar follow-ups
-- **Move tools between basic and advanced.** The mockup promised "long-press a tool to move it"; not built yet
-  (long-press still opens the tool's panel). Needs a place for it: e.g. an "Edit tool bar" entry in Settings or
-  in the shelf, with drag between the two rows; save the layout in prefs.
+- **Move tools between basic and advanced:** built after 2.3.0 (not released yet). Long-press a tool: its panel ends
+  with "Move to the tool bar / Move to more tools"; buttons without a panel (image, ruler, finger, beautify, to
+  text) get a small menu with just that. Each side keeps a fixed order (`TOOL_IDS`); pref `toolBasic` lists the
+  bar's. Not done: reordering within a side.
 - **Glass look.** The layout is decided (option A, mockups at https://claude.ai/artifact/5kibc8S318u4LFz9uFQcQ3);
   the earlier "Liquid Glass" styling idea (https://claude.ai/artifact/QiaT3nVZUmrzR4DRC6Wpd8) is still open if wanted.
 
+## Built after 2.3.0 (not released yet)
+- Move tools between bar and shelf (above).
+- **Resize a shape keeping its shape:** a selected shape (not a line) shows a light dashed box with square corner
+  handles; dragging one scales the shape from the opposite corner, same proportions, same line width.
+- **Paper tape:** looks Flat (as before) / Masking (default) / Washi / Kraft: torn ends, paper fibres, kraft specks,
+  washi sheen, soft shadow; still fully covering. Stored as "look~pattern" in the tape's pattern string (flat tape
+  keeps the bare pattern, so older Nib reads it as plain tape). New tape colour Cream.
+- **Exports:** ink that runs over a page edge is drawn on the next page too (PDF, PNG, page overview).
+- Taps and the eraser find strokes by their lines, not just their points (scaled shapes have far-apart points).
+- Tabs compare a notebook folder's real path (the same folder opened as /data/data/… and /data/user/0/… made two tabs).
+
 ## Backlog
-- **Resize a shape keeping its shape** (owner, 2026-11-14): a light bounding box with corner handles that scales a
-  snapped shape proportionally (maybe a rotate handle), next to the existing vertex handles. Line widths stay.
-- **Tape that looks like real tape:** masking (default), washi and kraft looks; torn ends, fibre texture, soft shadow.
-- **Strokes across a page edge in exports:** each page is clipped on export, so the part of a stroke that runs onto
-  the next page is cut off in PDFs. Fix: draw neighbours' overflow when exporting a page (or split on commit).
-- **"Date/time moved off the page, undo/redo in their place"** (feedback from Ffaru1111): unclear. Best guess: new
-  notebooks are named by date/time, which fills the tab. Ask them for a screenshot.
 - **Finger writing with a resting palm** (Pad 6): blocked in the touch chip firmware, not the app. Research and the
   only remaining route (patched firmware loaded as the driver's debug firmware) in `~/nib-research/pad6-touch/NOTES.md`.
   Undecided. The touch-chip palm-rest experiment is in `git stash` (2026-11-16).
+- Reordering tools within the bar or the shelf.
 
 ## Decided / rejected
 - **Never override HyperOS's Smartpen refresh rule** (`ro.vendor.display.smartpen_vrr_fps`): turning it off broke the
@@ -54,6 +60,7 @@ versionCode = git commit count; bump `VERSION_NAME` in `build-apk.sh` for a rele
   undo removed (fired by accident).
 - Subfolders are created only by long-pressing a folder → "Add subfolder".
 - The thickness dot was removed from the tool bar (tap the active tool for its panel).
+- Notebook names stay as they are (the "date/time off the top bar" feedback: it's just the default title; owner, 2026-11-21).
 
 ## Testing notes
 - Tablet: adb serial `fc4476d`, rooted (Magisk); `adb shell "su -c '...'"` reaches app files. It locks with the owner's

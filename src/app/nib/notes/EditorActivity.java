@@ -101,10 +101,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private static final String[] LASER_COLOR_NAMES = {"Red", "Green", "Blue", "Purple", "Orange", "Pink"};
     private int laserCol, laserMode, laserSizeIdx = 1, laserTrail, laserInkWait;
     private boolean laserHover;
-    private static final int[] TAPE_COLORS = {0xff9ecbf2, 0xffa8e6c8, 0xfff5dc7a, 0xfff7b89a, 0xfff3a6c8, 0xffc5b3f0, 0xffc9ccd3, 0xffd9b98c};
-    private static final String[] TAPE_COLOR_NAMES = {"Sky", "Mint", "Butter", "Peach", "Pink", "Lavender", "Grey", "Kraft"};
+    private static final int[] TAPE_COLORS = {0xff9ecbf2, 0xffa8e6c8, 0xfff5dc7a, 0xfff7b89a, 0xfff3a6c8, 0xffc5b3f0, 0xffc9ccd3, 0xffd9b98c, 0xffeee3c8};
+    private static final String[] TAPE_COLOR_NAMES = {"Sky", "Mint", "Butter", "Peach", "Pink", "Lavender", "Grey", "Kraft", "Cream"};
     private static final float[] TAPE_THICK = {28f, 42f, 64f};
-    private int tapeCol, tapePat = 1, tapeThickIdx = 1;
+    private int tapeCol, tapePat = 1, tapeThickIdx = 1, tapeLook = 1; // look: Render.TAPE_LOOKS, masking by default
     private boolean tapeFree;
 
     // Zen layout: no bars; three floating capsules that fade while the pen is writing.
@@ -172,6 +172,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         laserCol = prefs.getInt("laserCol", 0);
         tapeCol = Math.min(TAPE_COLORS.length - 1, prefs.getInt("tapeCol", 0));
         tapePat = prefs.getInt("tapePat", 1);
+        tapeLook = prefs.getInt("tapeLook", 1);
         tapeThickIdx = prefs.getInt("tapeThick", 1);
         tapeFree = prefs.getBoolean("tapeFree", false);
         laserMode = prefs.getInt("laserMode", Engine.LASER_TRAIL_MODE);
@@ -236,9 +237,16 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         pushTape();
     }
 
+    /** The tape's pattern string: "look~pattern" for the paper looks, just the pattern for flat tape (as before 2.3.1). */
+    private String tapePatternStr() {
+        String pat = Notebook.Item.TAPE_PATTERNS[tapePat];
+        return tapeLook == 0 ? pat : Render.TAPE_LOOKS[tapeLook] + "~" + pat;
+    }
+
     private void pushTape() {
-        engine.setTape(TAPE_COLORS[tapeCol], Notebook.Item.TAPE_PATTERNS[tapePat], TAPE_THICK[tapeThickIdx], tapeFree);
-        prefs.edit().putInt("tapeCol", tapeCol).putInt("tapePat", tapePat).putInt("tapeThick", tapeThickIdx).putBoolean("tapeFree", tapeFree).apply();
+        engine.setTape(TAPE_COLORS[tapeCol], tapePatternStr(), TAPE_THICK[tapeThickIdx], tapeFree);
+        prefs.edit().putInt("tapeCol", tapeCol).putInt("tapePat", tapePat).putInt("tapeThick", tapeThickIdx).putBoolean("tapeFree", tapeFree)
+                .putInt("tapeLook", tapeLook).apply();
     }
 
     private void showTapePanel(View anchor) {
@@ -246,12 +254,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         p.add(Ui.text(this, "Draw over answers to cover them. Tap tape to peel it back, tap again to cover. Erase or lasso it like ink.",
                 12.5f, Ui.color(this, R.color.on_surface_variant), null));
         Ui.TapePreview prev = new Ui.TapePreview(this);
-        Runnable refresh = () -> prev.set(TAPE_COLORS[tapeCol], Notebook.Item.TAPE_PATTERNS[tapePat], TAPE_THICK[tapeThickIdx], tapeFree);
+        Runnable refresh = () -> prev.set(TAPE_COLORS[tapeCol], tapePatternStr(), TAPE_THICK[tapeThickIdx], tapeFree);
         refresh.run();
         LinearLayout.LayoutParams pl = fullW(64);
         pl.topMargin = Ui.dp(this, 12);
         prev.setLayoutParams(pl);
         p.add(prev);
+        p.section("Look");
+        p.add(Ui.segmented(this, new String[]{"Flat", "Masking", "Washi", "Kraft"}, tapeLook, i -> { tapeLook = i; pushTape(); refresh.run(); }));
         p.section("Shape");
         p.add(Ui.segmented(this, new String[]{"Straight", "Freeform"}, tapeFree ? 1 : 0, i -> { tapeFree = i == 1; pushTape(); refresh.run(); }));
         p.section("Pattern");
@@ -285,6 +295,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         acts.addView(Ui.actionRow(this, R.drawable.ic_search, "Reveal all", "Peels back every tape on this page", v -> { pop.dismiss(); engine.tapeAll(1); }));
         acts.addView(Ui.actionRow(this, R.drawable.ic_trash, "Remove all tape", "Takes the tape off this page (undo brings it back)", v -> { pop.dismiss(); engine.tapeAll(2); }));
         p.add(acts);
+        addMoveRow(p);
         p.show(anchor);
     }
 
@@ -355,6 +366,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 laserHover, on -> { laserHover = on; pushLaser(); });
         hov.setLayoutParams(hl);
         p.add(hov);
+        addMoveRow(p);
         p.show(anchor);
     }
 
@@ -407,7 +419,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         @Override public void onToast(String s) { if (on()) toast(s); }
         @Override public void onTool(int t) { if (on()) EditorActivity.this.onTool(t); }
         @Override public void onRulerLength(float u, boolean done) { if (on()) EditorActivity.this.onRulerLength(u, done); }
-        @Override public void onHandles(float[] hs, boolean line) { sel.setHandles(hs, line); }
+        @Override public void onHandles(float[] hs, boolean line, int box) { sel.setHandles(hs, line, box); }
         @Override public void onHaptic() { root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); }
         @Override public void onZoom(int pct) { if (on()) showZoomChip(pct, state != null && state.zoomLocked); }
     }
@@ -558,8 +570,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private Doc cur;                         // the notebook the tools act on
     private int focusPane;
 
+    /** The same folder can be named two ways (/data/data/… and /data/user/0/…): compare where it really is. */
+    private static String realPath(File f) {
+        try { return f.getCanonicalPath(); } catch (java.io.IOException e) { return f.getAbsolutePath(); }
+    }
+
     private Doc findDoc(File dir) {
-        for (Doc d : docs) if (d.dir.getPath().equals(dir.getPath())) return d;
+        String want = realPath(dir);
+        for (Doc d : docs) if (realPath(d.dir).equals(want)) return d;
         return null;
     }
 
@@ -581,7 +599,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             org.json.JSONArray a = new org.json.JSONArray(prefs.getString("tabs", "[]"));
             for (int i = 0; i < a.length() && docs.size() < 12; i++) {
                 File f = new File(a.getString(i));
-                if (new File(f, "ink.bin").exists() && !f.getPath().equals(want.getPath())) docs.add(new Doc(f, -1, true));
+                if (new File(f, "ink.bin").exists() && !realPath(f).equals(realPath(want)) && findDoc(f) == null) docs.add(new Doc(f, -1, true));
             }
         } catch (Exception ignored) { }
         Doc w = openDoc(want, page);
@@ -1123,22 +1141,22 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         advRow.addView(img);
         imgB = img;
         rulerB = new Ui.ToolDisc(this, R.drawable.ic_ruler, "Ruler", false);
-        rulerB.setOnClickListener(v -> { toggleRuler(); shelfUsed(); });
+        rulerB.setOnClickListener(v -> { toggleRuler(); if (inShelf(v)) shelfUsed(); });
         rulerB.setTooltipText("Ruler");
         advRow.addView(rulerB);
         fingerB = new Ui.ToolDisc(this, R.drawable.ic_touch, "Write with finger", false);
         fingerB.setTooltipText("Write with finger");
-        fingerB.setOnClickListener(v -> { toggleFinger(); shelfUsed(); });
+        fingerB.setOnClickListener(v -> { toggleFinger(); if (inShelf(v)) shelfUsed(); });
         fingerB.set(fingerDraw, 0, 0);
         advRow.addView(fingerB);
-        advRow.addView(Ui.divider(this));
         Ui.IconButton beaut = icon(R.drawable.ic_sparkle, "Beautify · the selection, or the whole page");
-        beaut.setOnClickListener(v -> { beautify(state == null || !state.hasSelection); shelfUsed(); });
+        beaut.setOnClickListener(v -> { beautify(state == null || !state.hasSelection); if (inShelf(v)) shelfUsed(); });
         advRow.addView(beaut);
         Ui.IconButton toText = icon(R.drawable.ic_to_text, "Handwriting to text");
         toText.setOnClickListener(this::toTextFromShelf);
         advRow.addView(toText);
-        advRow.addView(Ui.divider(this));
+        advDiv1 = Ui.divider(this);
+        advDiv2 = Ui.divider(this);
         pinB = icon(R.drawable.ic_pin, "Keep these tools open");
         pinB.setOnClickListener(v -> {
             shelfPinned = !shelfPinned;
@@ -1146,7 +1164,6 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             styleShelf();
             toast(shelfPinned ? "These tools stay open" : "These tools close after you pick one");
         });
-        advRow.addView(pinB);
         shelfOpen = prefs.getBoolean("shelfOpen", false);
         shelfPinned = prefs.getBoolean("shelfPin", false);
         // narrow screens (phones): favourites that don't fit fold into this disc (fitCapsule decides)
@@ -1182,7 +1199,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         // opens / closes the shelf; while it's closed and one of its tools is in use, it shows that tool
         shelfB = new Ui.ToolDisc(this, R.drawable.ic_chevron, "More tools", false);
         shelfB.setOnClickListener(v -> setShelfOpen(!shelfOpen));
-        shelfB.setOnLongClickListener(v -> { if (advancedTool(tool)) openToolPanel(v); else setShelfOpen(!shelfOpen); return true; });
+        shelfB.setOnLongClickListener(v -> { if (toolInShelf(tool)) openToolPanel(v); else setShelfOpen(!shelfOpen); return true; });
         capTools.addView(shelfB);
         grip = new Ui.IconButton(this, R.drawable.ic_grip, "Move tool bar: drag to any edge");
         grip.setTooltipText("Drag to move the tool bar");
@@ -1190,6 +1207,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         grip.setOnTouchListener(this::dragToolbar);
         capTools.addView(grip);
         root.addView(capTools, new FrameLayout.LayoutParams(-2, Ui.dp(this, TOOLCAP_DP), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+        View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, fingerB, beaut, toText};
+        System.arraycopy(tv, 0, toolViews, 0, tv.length);
+        for (View v : new View[]{imgB, rulerB, fingerB, beaut, toText}) v.setOnLongClickListener(this::showMoveMenu);
+        applyToolLayout();
     }
 
     // ---- the advanced shelf: a second capsule beside the bar (above it at the bottom) ------------------
@@ -1208,8 +1229,17 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         return v;
     }
 
-    private static boolean advancedTool(int t) {
-        return t == Engine.TOOL_TEXT || t == Engine.TOOL_SHAPE || t == Engine.TOOL_TAPE || t == Engine.TOOL_LASER;
+    private static int toolIcon(int t) {
+        switch (t) {
+            case Engine.TOOL_PEN: return R.drawable.ic_pen;
+            case Engine.TOOL_HL: return R.drawable.ic_highlighter;
+            case Engine.TOOL_ERASER: return R.drawable.ic_eraser;
+            case Engine.TOOL_LASSO: return R.drawable.ic_lasso;
+            case Engine.TOOL_TEXT: return R.drawable.ic_text;
+            case Engine.TOOL_SHAPE: return R.drawable.ic_shapes;
+            case Engine.TOOL_TAPE: return R.drawable.ic_tape;
+            default: return R.drawable.ic_laser;
+        }
     }
 
     /** Something on the shelf was used: unless it's pinned open, it gets out of the way. */
@@ -1217,6 +1247,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     /** Closes the shelf (unless pinned) and gives the view a popover should point at: v, or the bar's shelf disc. */
     private View shelfAnchor(View v) {
+        if (!inShelf(v)) return v; // it lives in the bar
         shelfUsed();
         return shelfOpen ? v : shelfB;
     }
@@ -1233,15 +1264,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void styleShelf() {
         if (shelfB == null) return;
-        boolean adv = advancedTool(tool);
-        int icon = !shelfOpen && adv ? (tool == Engine.TOOL_TEXT ? R.drawable.ic_text : tool == Engine.TOOL_SHAPE ? R.drawable.ic_shapes
-                : tool == Engine.TOOL_TAPE ? R.drawable.ic_tape : R.drawable.ic_laser) : R.drawable.ic_chevron;
+        boolean adv = toolInShelf(tool);
+        int icon = !shelfOpen && adv ? toolIcon(tool) : R.drawable.ic_chevron;
         shelfB.setImageResource(icon);
         // the chevron points toward the shelf when closed, away from it when open
         float toward = dock == DOCK_BOTTOM ? -90 : dock == DOCK_TOP ? 90 : dock == DOCK_LEFT ? 0 : 180;
         shelfB.setRotation(icon == R.drawable.ic_chevron ? (shelfOpen ? toward + 180 : toward) : 0);
         int c = tool == Engine.TOOL_TAPE ? TAPE_COLORS[tapeCol] : tool == Engine.TOOL_LASER ? LASER_COLORS[laserCol]
-                : tool == Engine.TOOL_SHAPE ? penColors[penSlot] : 0;
+                : tool == Engine.TOOL_SHAPE || tool == Engine.TOOL_PEN ? penColors[penSlot] : tool == Engine.TOOL_HL ? hlColors[hlSlot] : 0;
         shelfB.set(!shelfOpen && adv, c, 0);
         shelfB.setContentDescription(shelfOpen ? "Hide more tools" : "More tools");
         if (pinB != null) {
@@ -1310,6 +1340,109 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     /** Shelf space taken next to the bar, when it's open (dp). */
     private int shelfDp() { return shelfOpen ? SHELF_DP + 10 : 0; }
+
+    // ---- which tools sit in the bar and which on the shelf: the owner's choice (long-press a tool → Move …) -------
+
+    /** Every movable button in one fixed order; each side shows its own in this order. */
+    private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "finger", "beautify", "totext"};
+    private static final String[] TOOL_NAMES = {"Pen", "Highlighter", "Eraser", "Lasso", "Text", "Shapes", "Tape", "Laser pointer", "Image or sticker",
+            "Ruler", "Write with finger", "Beautify", "Handwriting to text"};
+    private static final String BASIC_DEFAULT = "pen,hl,eraser,lasso";
+    private final View[] toolViews = new View[TOOL_IDS.length];
+    private final java.util.HashSet<String> basicIds = new java.util.HashSet<>();
+    private View advDiv1, advDiv2;
+    private View moveRowFor; // the panel being opened is that button's: it gets a Move row
+
+    private View toolView(int t) {
+        switch (t) {
+            case Engine.TOOL_PEN: return penB;
+            case Engine.TOOL_HL: return hlB;
+            case Engine.TOOL_ERASER: return eraserB;
+            case Engine.TOOL_LASSO: return lassoB;
+            case Engine.TOOL_TEXT: return textB;
+            case Engine.TOOL_SHAPE: return shapeB;
+            case Engine.TOOL_TAPE: return tapeB;
+            case Engine.TOOL_LASER: return laserB;
+        }
+        return null;
+    }
+
+    private int toolIndex(View v) {
+        for (int i = 0; i < toolViews.length; i++) if (toolViews[i] == v) return i;
+        return -1;
+    }
+
+    private boolean inShelf(View v) { return v != null && v.getParent() == advRow; }
+
+    private boolean toolInShelf(int t) { return inShelf(toolView(t)); }
+
+    /** Puts every movable button on its side (bar or shelf), in the fixed order, and saves nothing. */
+    private void applyToolLayout() {
+        basicIds.clear();
+        for (String id : prefs.getString("toolBasic", BASIC_DEFAULT).split(",")) if (!id.isEmpty()) basicIds.add(id);
+        for (View v : toolViews) if (v.getParent() != null) ((ViewGroup) v.getParent()).removeView(v);
+        for (View v : new View[]{advDiv1, advDiv2, pinB}) if (v.getParent() != null) ((ViewGroup) v.getParent()).removeView(v);
+        int at = 0;
+        boolean anyTool = false, anyAction = false;
+        for (int i = 0; i < TOOL_IDS.length; i++) {
+            View v = toolViews[i];
+            if (basicIds.contains(TOOL_IDS[i])) { capTools.addView(v, at++); continue; }
+            boolean action = TOOL_IDS[i].equals("beautify") || TOOL_IDS[i].equals("totext");
+            if (action && anyTool && !anyAction) advRow.addView(advDiv1); // tools, then actions on the selection / page
+            advRow.addView(v);
+            if (action) anyAction = true; else anyTool = true;
+        }
+        advRow.addView(advDiv2);
+        advRow.addView(pinB);
+        boolean vert = dockVertical();
+        for (View v : toolViews) orient(v, vert);
+        for (View v : new View[]{advDiv1, advDiv2, pinB}) orient(v, vert);
+        // nothing left on the shelf: no button to open it
+        boolean shelfEmpty = basicIds.size() >= TOOL_IDS.length;
+        shelfB.setVisibility(shelfEmpty ? View.GONE : View.VISIBLE);
+        if (shelfEmpty && shelfOpen) setShelfOpen(false);
+    }
+
+    /** Moves a button to the other side and remembers it. */
+    private void moveTool(View v) {
+        int i = toolIndex(v);
+        if (i < 0) return;
+        boolean toBar = inShelf(v);
+        if (toBar) basicIds.add(TOOL_IDS[i]); else basicIds.remove(TOOL_IDS[i]);
+        StringBuilder b = new StringBuilder();
+        for (String id : TOOL_IDS) if (basicIds.contains(id)) b.append(b.length() > 0 ? "," : "").append(id);
+        prefs.edit().putString("toolBasic", b.toString()).apply();
+        applyToolLayout();
+        styleShelf();
+        ui.post(this::fitCapsule);
+        placeShelf(false);
+        toast(TOOL_NAMES[i] + (toBar ? " is in the tool bar now" : " moved to more tools · tap the arrow to reach it"));
+    }
+
+    /** The "Move to …" row at the end of a tool's panel (when the panel was opened from that tool). */
+    private void addMoveRow(Ui.Popover p) {
+        View v = moveRowFor;
+        moveRowFor = null;
+        if (v == null || toolIndex(v) < 0 || v.getParent() == null) return;
+        boolean shelf = inShelf(v);
+        View row = Ui.actionRow(this, R.drawable.ic_swap, shelf ? "Move to the tool bar" : "Move to more tools",
+                shelf ? "Always on screen" : "One tap away, behind the arrow", x -> { pop.dismiss(); moveTool(v); });
+        LinearLayout.LayoutParams lp = fullW(-1);
+        lp.topMargin = Ui.dp(this, 8);
+        row.setLayoutParams(lp);
+        p.add(row);
+    }
+
+    /** Long-press on a button without options (image, ruler, finger writing, beautify, to text): where it lives. */
+    private boolean showMoveMenu(View v) {
+        int i = toolIndex(v);
+        if (i < 0) return false;
+        Ui.Popover p = newPop(300).title(TOOL_NAMES[i]);
+        moveRowFor = v;
+        addMoveRow(p);
+        p.show(v);
+        return true;
+    }
 
     /** "To text" on the shelf: converts the selection, or with nothing selected, the next thing lassoed. */
     private void toTextFromShelf(View btn) {
@@ -1487,7 +1620,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             commitTextEdit();
             tool = t;
             applyTool();
-            if (advancedTool(t)) shelfUsed();
+            if (inShelf(b)) shelfUsed();
         });
         b.setOnLongClickListener(v -> {
             if (tool != t) { tool = t; applyTool(); }
@@ -1507,6 +1640,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void openToolPanel(View anchor) {
+        moveRowFor = toolView(tool);
         switch (tool) {
             case Engine.TOOL_PEN: case Engine.TOOL_SHAPE: showPenPanel(anchor, false); break;
             case Engine.TOOL_HL: showPenPanel(anchor, true); break;
@@ -1674,6 +1808,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 v -> { pop.dismiss(); addFav(); });
         fav.setLayoutParams(fl);
         p.add(fav);
+        addMoveRow(p);
         p.show(anchor);
     }
 
@@ -1688,7 +1823,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         list.setOrientation(LinearLayout.VERTICAL);
         int shownN = 0;
         for (Notebook.Entry e : all) {
-            if (e.dir.getPath().equals(engine.dir.getPath())) continue;
+            if (realPath(e.dir).equals(realPath(engine.dir))) continue;
             boolean isTab = findDoc(e.dir) != null;
             String meta = (e.canvas ? "Canvas" : e.pages + (e.pages == 1 ? " page" : " pages")) + (isTab ? " · open in a tab" : "");
             View row = Ui.actionRow(this, e.canvas ? R.drawable.ic_maximize : R.drawable.ic_book, e.title, meta,
@@ -2016,6 +2151,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 v -> { pop.dismiss(); engine.clearPage(); });
         clear.setLayoutParams(sp);
         p.add(clear);
+        addMoveRow(p);
         p.show(anchor);
     }
 
@@ -2039,6 +2175,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 Ui.color(this, R.color.on_surface_variant), null);
         hint.setPadding(0, Ui.dp(this, 12), 0, 0);
         p.add(hint);
+        addMoveRow(p);
         p.show(anchor);
     }
 
@@ -3009,13 +3146,35 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         float[] handles; // a lone shape's stretch handles (view px)
         boolean line;
         void set(RectF nr) { r = nr; if (nr == null) handles = null; invalidate(); }
-        void setHandles(float[] h, boolean ln) { handles = h; line = ln; invalidate(); }
+        int box = -1; // handles from here on are the scaling box's corners
+        void setHandles(float[] h, boolean ln, int bx) { handles = h; line = ln; box = bx; invalidate(); }
         @Override protected void onDraw(Canvas c) {
             if (r == null) return;
             float d = getResources().getDisplayMetrics().density;
             int acc = Ui.color(getContext(), R.color.accent);
-            if (handles != null) { // a shape: knobs on its own corners / ends, nothing else in the way
-                for (int i = 0; i + 1 < handles.length; i += 2) {
+            if (handles != null) { // a shape: knobs on its own corners / ends, plus a light box whose corners scale it
+                if (box >= 0 && box + 7 < handles.length) {
+                    RectF bx = new RectF(handles[box], handles[box + 1], handles[box + 4], handles[box + 5]);
+                    p.setStyle(Paint.Style.STROKE);
+                    p.setStrokeWidth(1.2f * d);
+                    p.setColor((acc & 0x00ffffff) | 0x99000000);
+                    p.setPathEffect(new DashPathEffect(new float[]{5 * d, 4 * d}, 0));
+                    c.drawRect(bx, p);
+                    p.setPathEffect(null);
+                    float hs = 6.5f * d;
+                    for (int i = box; i + 1 < handles.length; i += 2) {
+                        RectF q = new RectF(handles[i] - hs, handles[i + 1] - hs, handles[i] + hs, handles[i + 1] + hs);
+                        p.setStyle(Paint.Style.FILL);
+                        p.setColor(0xffffffff);
+                        c.drawRoundRect(q, 2.5f * d, 2.5f * d, p);
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(2f * d);
+                        p.setColor(acc);
+                        c.drawRoundRect(q, 2.5f * d, 2.5f * d, p);
+                    }
+                }
+                int own = box >= 0 ? box : handles.length;
+                for (int i = 0; i + 1 < own; i += 2) {
                     float rad = 9 * d;
                     p.setStyle(Paint.Style.FILL);
                     p.setColor(0xffffffff);
@@ -3182,6 +3341,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         p.add(bh);
         p.add(Ui.segmented(this, new String[]{"1", "2", "3", "4", "5"}, prefs.getInt("beautify", 3) - 1, i -> prefs.edit().putInt("beautify", i + 1).apply()));
         p.add(Ui.actionRow(this, R.drawable.ic_sparkle, "Beautify this page", "Straighter lines, even size and spacing", v -> { pop.dismiss(); beautify(true); }));
+        addMoveRow(p);
         p.show(anchor);
     }
 

@@ -83,7 +83,8 @@ final class Engine implements Choreographer.FrameCallback {
         default void onRulerLength(float units, boolean done) {}
         default void onHaptic() {}
         /** Stretch handles of a lone selected shape, in view px (null = none); line: just its two ends. */
-        default void onHandles(float[] screen, boolean line) {}
+        /** A lone shape's handles (screen px); from index box on (if >= 0) they are its scaling box's corners. */
+        default void onHandles(float[] screen, boolean line, int box) {}
         /** Zoom (% of fit-width) while pinching; a few times a second at most. */
         default void onZoom(int pct) {}
     }
@@ -500,9 +501,11 @@ final class Engine implements Choreographer.FrameCallback {
         h.post(() -> {
             if (book == null || i >= book.pages.size()) return;
             final Notebook.Page p = book.pages.get(i).snapCopy(); // an unread page is read on the worker
+            final Notebook.Page prev = i > 0 ? book.pages.get(i - 1).snapCopy() : null;
+            final Notebook.Page next = i + 1 < book.pages.size() ? book.pages.get(i + 1).snapCopy() : null;
             final Notebook nb = book.metaCopy();
             worker.execute(() -> {
-                Bitmap b = Render.pageBitmap(nb, dir, p, p.pdf >= 0 ? pdf() : null, widthPx);
+                Bitmap b = Render.pageBitmap(nb, dir, p, prev, next, p.pdf >= 0 ? pdf() : null, widthPx);
                 main.post(() -> cb.accept(b));
             });
         });
@@ -3153,7 +3156,7 @@ final class Engine implements Choreographer.FrameCallback {
         needRebuild = true;
         wantFront = true;
         requestFrame();
-        main.post(() -> { listener.onSelection(null); listener.onHandles(null, false); });
+        main.post(() -> { listener.onSelection(null); listener.onHandles(null, false, -1); });
         notifyState();
     }
 
@@ -3170,7 +3173,9 @@ final class Engine implements Choreographer.FrameCallback {
         final RectF r = selScreen();
         final float[] hs = shapeMode() ? handlesScreen() : null;
         final boolean line = hs != null && selStrokes.get(0).shape == Stroke.LINE;
-        main.post(() -> { listener.onSelection(r); listener.onHandles(hs, line); });
+        final int box = hs != null && !line ? handlesLocal().length : -1; // where the box corners start in hs
+        if (box >= 0) r.inset(-boxPad() * z - dp(8), -boxPad() * z - dp(8)); // the selection bar clears the scaling box
+        main.post(() -> { listener.onSelection(r); listener.onHandles(hs, line, box); });
     }
 
     // ---- shape handles: a lone snapped shape can be stretched any time -------------------------
@@ -3217,9 +3222,33 @@ final class Engine implements Choreographer.FrameCallback {
         return new float[]{cx, b.top, b.right, cy, cx, b.bottom, b.left, cy};
     }
 
+    /** Padding (units) between a shape and its scaling box: keeps the box corners off the shape's own handles. */
+    private float boxPad() { return dp(20) / z; }
+
+    /**
+     * The shape's own handles, then (not for a line) the four corners of a box around it: top-left, top-right,
+     * bottom-right, bottom-left. Dragging a box corner scales the whole shape, keeping its proportions.
+     */
+    private float[] allHandlesLocal() {
+        float[] h = handlesLocal();
+        Stroke s = selStrokes.get(0);
+        if (s.shape == Stroke.LINE) return h;
+        RectF b = ptsBox(s);
+        float pad = boxPad();
+        float[] o = Arrays.copyOf(h, h.length + 8);
+        int k = h.length;
+        o[k] = b.left - pad; o[k + 1] = b.top - pad;
+        o[k + 2] = b.right + pad; o[k + 3] = b.top - pad;
+        o[k + 4] = b.right + pad; o[k + 5] = b.bottom + pad;
+        o[k + 6] = b.left - pad; o[k + 7] = b.bottom + pad;
+        return o;
+    }
+
+    private int shapeBox = -1; // box corner being dragged (0..3), or -1
+
     /** The same handles in screen px, following a selection that is being moved. */
     private float[] handlesScreen() {
-        float[] h = handlesLocal();
+        float[] h = allHandlesLocal();
         float top = tops[selPage];
         for (int i = 0; i + 1 < h.length; i += 2) {
             h[i] = (((h[i] - spx) * ss + spx + stx) - ox) * z;
@@ -3233,7 +3262,20 @@ final class Engine implements Choreographer.FrameCallback {
         Stroke o = shapeOrig;
         float pr = o.n > 0 ? o.p[2] : 0.5f;
         float[] pts;
-        if (o.shape == Stroke.LINE) {
+        if (shapeBox >= 0) { // a box corner: the whole shape scales from the opposite corner, same proportions
+            RectF b = ptsBox(o);
+            float pad = boxPad();
+            boolean left = shapeBox == 0 || shapeBox == 3, top = shapeBox < 2;
+            float gx = left ? b.left - pad : b.right + pad, gy = top ? b.top - pad : b.bottom + pad;      // the grabbed corner
+            float apx = left ? b.right + pad : b.left - pad, apy = top ? b.bottom + pad : b.top - pad;   // the opposite one
+            float ax = left ? b.right : b.left, ay = top ? b.bottom : b.top;                             // the shape's own corner there
+            float vx = gx - apx, vy = gy - apy;
+            float k = ((px - apx) * vx + (py - apy) * vy) / Math.max(1e-4f, vx * vx + vy * vy); // along the diagonal
+            float len = Math.max(b.width(), b.height()), lp = len + 2 * pad;
+            float sc = Math.max(0.05f, Math.min(20f, (k * lp - 2 * pad) / Math.max(0.5f, len)));
+            pts = new float[2 * o.n];
+            for (int i = 0; i < o.n; i++) { pts[2 * i] = ax + (o.x(i) - ax) * sc; pts[2 * i + 1] = ay + (o.y(i) - ay) * sc; }
+        } else if (o.shape == Stroke.LINE) {
             boolean startMoves = shapeHandle == 0;
             float fx = startMoves ? o.x(o.n - 1) : o.x(0), fy = startMoves ? o.y(o.n - 1) : o.y(0);
             float dx = px - fx, dy = py - fy, len = (float) Math.hypot(dx, dy);
@@ -3297,7 +3339,10 @@ final class Engine implements Choreographer.FrameCallback {
     private void selBegin(MotionEvent ev) {
         sDownX = ev.getX();
         sDownY = ev.getY();
+        shapeBox = -1;
         if (shapeHandle >= 0) {
+            int own = handlesLocal().length / 2; // handles after the shape's own are the box corners
+            if (shapeHandle >= own) shapeBox = shapeHandle - own;
             shapeOrig = selStrokes.get(0);
             Notebook.Page p = book.pages.get(selPage);
             shapeBefore = pageState(p);

@@ -205,6 +205,7 @@ final class Stroke {
             }
         }
         if (cur != null && cur.n > 0) out.add(cur.trim());
+        if (out.size() == 1 && out.get(0).n == n) return null; // passed between two points without taking any: untouched
         return out;
     }
 
@@ -216,17 +217,43 @@ final class Stroke {
         return in / (float) n;
     }
 
-    /** Does any point come within er of the segment (ax,ay)-(bx,by)? Page-local coords. */
+    /**
+     * Does the ink come within er of the segment (ax,ay)-(bx,by)? Page-local coords. Measured to the lines between
+     * the points, not just the points: a scaled-up shape has its points far apart, and a tap between two of them
+     * must still find it.
+     */
     boolean hit(float ax, float ay, float bx, float by, float er) {
         if (Math.max(ax, bx) + er < l || Math.min(ax, bx) - er > r
                 || Math.max(ay, by) + er < t || Math.min(ay, by) - er > b) return false;
-        float dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-        for (int i = 0; i < n; i++) {
-            float px = x(i) - ax, py = y(i) - ay;
-            float h = len2 > 1e-6f ? Math.max(0f, Math.min(1f, (px * dx + py * dy) / len2)) : 0f;
-            float qx = px - dx * h, qy = py - dy * h, rr = er + rad(i);
-            if (qx * qx + qy * qy < rr * rr) return true;
+        if (n == 1) {
+            float rr = er + rad(0);
+            return ptSeg2(x(0), y(0), ax, ay, bx, by) < rr * rr;
+        }
+        for (int i = 0; i + 1 < n; i++) {
+            float rr = er + Math.max(rad(i), rad(i + 1));
+            if (segDist2(x(i), y(i), x(i + 1), y(i + 1), ax, ay, bx, by) < rr * rr) return true;
         }
         return false;
+    }
+
+    /** Squared distance from point (px,py) to segment (ax,ay)-(bx,by). */
+    static float ptSeg2(float px, float py, float ax, float ay, float bx, float by) {
+        float dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+        float h = len2 > 1e-9f ? Math.max(0f, Math.min(1f, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0f;
+        float qx = px - ax - dx * h, qy = py - ay - dy * h;
+        return qx * qx + qy * qy;
+    }
+
+    /** Squared distance between segments p0-p1 and q0-q1 (0 when they cross). */
+    static float segDist2(float p0x, float p0y, float p1x, float p1y, float q0x, float q0y, float q1x, float q1y) {
+        float d1 = cross(q0x, q0y, q1x, q1y, p0x, p0y), d2 = cross(q0x, q0y, q1x, q1y, p1x, p1y);
+        float d3 = cross(p0x, p0y, p1x, p1y, q0x, q0y), d4 = cross(p0x, p0y, p1x, p1y, q1x, q1y);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+        return Math.min(Math.min(ptSeg2(p0x, p0y, q0x, q0y, q1x, q1y), ptSeg2(p1x, p1y, q0x, q0y, q1x, q1y)),
+                Math.min(ptSeg2(q0x, q0y, p0x, p0y, p1x, p1y), ptSeg2(q1x, q1y, p0x, p0y, p1x, p1y)));
+    }
+
+    private static float cross(float ax, float ay, float bx, float by, float cx, float cy) {
+        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
     }
 }

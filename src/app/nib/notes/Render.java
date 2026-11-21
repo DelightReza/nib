@@ -392,12 +392,20 @@ final class Render {
 
     /** Draws a page in page units onto c. forPdf avoids blend modes PdfDocument can't express. */
     static void page(Canvas c, Notebook nb, File dir, Notebook.Page p, Pdf pdf, int pdfPx, boolean forPdf) {
-        int saved = c.save();
-        c.clipRect(0, 0, Notebook.PW, p.h); // ink past the page edge isn't shown (same as the editor)
-        try { pageInner(c, nb, dir, p, pdf, pdfPx, forPdf); } finally { c.restoreToCount(saved); }
+        page(c, nb, dir, p, null, null, pdf, pdfPx, forPdf);
     }
 
-    private static void pageInner(Canvas c, Notebook nb, File dir, Notebook.Page p, Pdf pdf, int pdfPx, boolean forPdf) {
+    /**
+     * Page p; prev / next are the pages above and below it (or null). Ink written on a neighbour that runs over onto
+     * this page is drawn here too, as the editor shows it (pages sit edge to edge there).
+     */
+    static void page(Canvas c, Notebook nb, File dir, Notebook.Page p, Notebook.Page prev, Notebook.Page next, Pdf pdf, int pdfPx, boolean forPdf) {
+        int saved = c.save();
+        c.clipRect(0, 0, Notebook.PW, p.h); // ink past the page edge isn't shown (same as the editor)
+        try { pageInner(c, nb, dir, p, nb.canvas ? null : prev, nb.canvas ? null : next, pdf, pdfPx, forPdf); } finally { c.restoreToCount(saved); }
+    }
+
+    private static void pageInner(Canvas c, Notebook nb, File dir, Notebook.Page p, Notebook.Page prev, Notebook.Page next, Pdf pdf, int pdfPx, boolean forPdf) {
         paper(c, nb, p);
         if (nb.canvas) {
             // infinite canvas: fit whatever was drawn (anywhere, even at negative coordinates) onto the page
@@ -423,8 +431,16 @@ final class Render {
         ink.setStrokeCap(Paint.Cap.ROUND);
         Paint hl = new Paint(ink);
         if (!forPdf) hl.setXfermode(new PorterDuffXfermode(dk ? PorterDuff.Mode.LIGHTEN : PorterDuff.Mode.DARKEN));
+        // this page's strokes, then the parts of the neighbours' strokes that run onto it (shifted into its coordinates)
+        java.util.ArrayList<Stroke> all = new java.util.ArrayList<>(p.strokes());
+        java.util.ArrayList<Float> dys = new java.util.ArrayList<>();
+        for (int i = 0; i < all.size(); i++) dys.add(0f);
+        if (prev != null) for (Stroke s : prev.strokes()) if (s.b > prev.h) { all.add(s); dys.add(-prev.h); }
+        if (next != null) for (Stroke s : next.strokes()) if (s.t < 0) { all.add(s); dys.add(p.h); }
         for (int pass = 0; pass < 2; pass++) {
-            for (Stroke s : p.strokes()) {
+            for (int si = 0; si < all.size(); si++) {
+                Stroke s = all.get(si);
+                float dy = dys.get(si);
                 boolean isHl = s.hl();
                 if ((pass == 0) != isHl) continue;
                 Paint pt = isHl ? hl : ink;
@@ -433,7 +449,7 @@ final class Render {
                 else if (isHl && dk) col = scale(col, 0.6f);
                 pt.setColor(col);
                 tmp.clear();
-                s.emitAll(0, tmp);
+                s.emitAll(dy, tmp);
                 segs(c, tmp, pt);
             }
         }
@@ -487,16 +503,69 @@ final class Render {
         if (it.pts != null) tape(c, it.pts, it.size, it.color, it.pattern(), alpha);
     }
 
+    /**
+     * Tape looks: "flat" (a solid colour, zigzag ends: Nib ≤ 2.3) and the paper tapes "masking", "washi" and "kraft"
+     * (torn ends, fibres, a soft shadow). Stored in front of the pattern as "look~pattern" ("masking~stripes"); a
+     * pattern without a look is flat, so older notebooks and older Nib read each other's tape.
+     */
+    static final String[] TAPE_LOOKS = {"flat", "masking", "washi", "kraft"};
+
+    static String tapeLook(String pattern) {
+        int i = pattern.indexOf('~');
+        return i > 0 ? pattern.substring(0, i) : "flat";
+    }
+
+    static String tapePattern(String pattern) {
+        int i = pattern.indexOf('~');
+        return i > 0 ? pattern.substring(i + 1) : pattern;
+    }
+
+    /** Same tape, same fibres and tears every time it's drawn: seeded by where it starts. */
+    private static int tapeSeed(float[] pts) {
+        return Float.floatToIntBits(pts[0]) * 31 + Float.floatToIntBits(pts[1]) * 17 + pts.length;
+    }
+
+    /** Small deterministic random numbers (0..1). */
+    private static final class Rnd {
+        private long st;
+        Rnd(long seed) { st = seed * 0x9E3779B97F4A7C15L + 1; }
+        float next() { st = st * 6364136223846793005L + 1442695040888963407L; return ((st >>> 40) & 0xffffff) / (float) 0x1000000; }
+    }
+
+    private static int mix(int a, int b, float t) {
+        int r = Math.round(((a >> 16) & 0xff) * (1 - t) + ((b >> 16) & 0xff) * t);
+        int g = Math.round(((a >> 8) & 0xff) * (1 - t) + ((b >> 8) & 0xff) * t);
+        int bl = Math.round((a & 0xff) * (1 - t) + (b & 0xff) * t);
+        return 0xff000000 | (r << 16) | (g << 8) | bl;
+    }
+
     static void tape(Canvas c, float[] pts, float thick, int color, String pattern, float alpha) {
-        android.graphics.Path outline = tapeOutline(pts, thick);
+        String look = tapeLook(pattern);
+        pattern = tapePattern(pattern);
+        boolean paper = !look.equals("flat");
+        int seed = tapeSeed(pts);
+        android.graphics.Path outline = tapeOutline(pts, thick, paper ? look : null, seed);
         if (outline == null) return;
         int a = Math.round(alpha * 255);
+        if (paper && alpha >= 1f) { // a soft shadow under the strip (a few faint offset copies: no blur, so PDFs get it)
+            Paint sh = new Paint(Paint.ANTI_ALIAS_FLAG);
+            sh.setColor(0xff000000);
+            sh.setAlpha(14);
+            for (int i = 1; i <= 3; i++) {
+                int sv = c.save();
+                c.translate(thick * 0.006f * i, thick * 0.014f * i);
+                c.drawPath(outline, sh);
+                c.restoreToCount(sv);
+            }
+        }
+        int fill = look.equals("kraft") ? mix(color, 0xffb5895b, 0.72f) : look.equals("masking") ? mix(color, 0xffe8dcc0, 0.25f) : color;
         Paint f = new Paint(Paint.ANTI_ALIAS_FLAG);
-        f.setColor(color | 0xff000000);
-        f.setAlpha(Math.round(a * 0.97f));
+        f.setColor(fill | 0xff000000);
+        f.setAlpha(paper ? a : Math.round(a * 0.97f));
         c.drawPath(outline, f);
         int saved = c.save();
         c.clipPath(outline);
+        if (paper) tapeFibres(c, pts, thick, look, seed, a);
         // pattern in white, anchored where the tape starts and laid along its opening direction, so stripes that are
         // already down never move while the tape is drawn longer (or bends)
         int n = pts.length / 2;
@@ -515,7 +584,7 @@ final class Render {
         c.rotate(ang, sx, sy);
         Paint pt = new Paint(Paint.ANTI_ALIAS_FLAG);
         pt.setColor(0xffffffff);
-        pt.setAlpha(Math.round(a * 0.32f));
+        pt.setAlpha(Math.round(a * (look.equals("washi") ? 0.5f : look.equals("kraft") ? 0.22f : 0.32f)));
         pt.setStrokeWidth(Math.max(1.2f, thick * 0.08f));
         float step = Math.max(8f, thick / 3.2f);
         int kn = (int) Math.ceil(half / step); // marks sit at whole steps from the start point
@@ -550,13 +619,65 @@ final class Render {
         edge.setStrokeJoin(Paint.Join.ROUND);
         edge.setStrokeWidth(Math.max(0.8f, thick * 0.025f));
         edge.setColor(0xff000000);
-        edge.setAlpha(Math.round(a * (alpha < 1f ? 0.9f : 0.12f)));
+        edge.setAlpha(Math.round(a * (alpha < 1f ? 0.9f : paper ? 0.07f : 0.12f)));
         if (alpha < 1f) edge.setPathEffect(new android.graphics.DashPathEffect(new float[]{6, 5}, 0));
         c.drawPath(outline, edge);
     }
 
-    /** The strip's shape: the centre line stroked thick wide (round bends), with both ends torn in a zigzag. */
-    static android.graphics.Path tapeOutline(float[] pts, float thick) {
+    /**
+     * Paper fibres along the strip, laid segment by segment from its start (so a tape being drawn longer keeps the
+     * fibres it has): short thin streaks, light and dark, and on washi a faint sheen down the middle.
+     */
+    private static void tapeFibres(Canvas c, float[] pts, float thick, String look, int seed, int a) {
+        boolean kraft = look.equals("kraft"), washi = look.equals("washi");
+        Paint fp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        fp.setStrokeCap(Paint.Cap.ROUND);
+        float density = kraft ? 30f : washi ? 60f : 36f; // square units of tape per fibre
+        int n = pts.length / 2;
+        for (int sgi = 0; sgi + 1 < n; sgi++) {
+            float x0 = pts[2 * sgi], y0 = pts[2 * sgi + 1], x1 = pts[2 * sgi + 2], y1 = pts[2 * sgi + 3];
+            float dx = x1 - x0, dy = y1 - y0, len = (float) Math.hypot(dx, dy);
+            if (len < 1e-3f) continue;
+            dx /= len; dy /= len;
+            float nx = -dy, ny = dx;
+            Rnd r = new Rnd(seed * 1000003L + sgi);
+            int count = Math.max(1, Math.round(len * thick / density));
+            for (int i = 0; i < count; i++) {
+                float u = r.next() * len, v = (r.next() - 0.5f) * thick;
+                float fl = (kraft ? 2f : 3f) + r.next() * (kraft ? 7f : washi ? 8f : 9f);
+                float ang = (r.next() - 0.5f) * (washi ? 0.5f : 0.25f);
+                float cx = x0 + dx * u + nx * v, cy = y0 + dy * u + ny * v;
+                float ex = dx * (float) Math.cos(ang) - dy * (float) Math.sin(ang), ey = dy * (float) Math.cos(ang) + dx * (float) Math.sin(ang);
+                boolean dark = r.next() < (kraft ? 0.6f : washi ? 0.25f : 0.45f);
+                fp.setColor(dark ? 0xff000000 : 0xffffffff);
+                fp.setAlpha(Math.round(a * (dark ? (kraft ? 0.08f : 0.05f) : (washi ? 0.16f : 0.12f)) * (0.5f + r.next())));
+                fp.setStrokeWidth((washi ? 0.25f : 0.35f) + r.next() * (kraft ? 0.5f : 0.4f));
+                c.drawLine(cx - ex * fl / 2, cy - ey * fl / 2, cx + ex * fl / 2, cy + ey * fl / 2, fp);
+                if (kraft && r.next() < 0.5f) { // recycled-paper specks
+                    fp.setColor(0xff000000);
+                    fp.setAlpha(Math.round(a * 0.12f));
+                    c.drawCircle(x0 + dx * r.next() * len + nx * (r.next() - 0.5f) * thick, y0 + dy * r.next() * len + ny * (r.next() - 0.5f) * thick,
+                            0.3f + r.next() * 0.5f, fp);
+                }
+            }
+            if (washi) { // a soft sheen a little above the middle
+                Paint sheen = new Paint(Paint.ANTI_ALIAS_FLAG);
+                sheen.setColor(0xffffffff);
+                sheen.setAlpha(Math.round(a * 0.10f));
+                sheen.setStrokeWidth(thick * 0.18f);
+                sheen.setStrokeCap(Paint.Cap.BUTT);
+                c.drawLine(x0 - nx * thick * 0.18f, y0 - ny * thick * 0.18f, x1 - nx * thick * 0.18f, y1 - ny * thick * 0.18f, sheen);
+            }
+        }
+    }
+
+    static android.graphics.Path tapeOutline(float[] pts, float thick) { return tapeOutline(pts, thick, null, 0); }
+
+    /**
+     * The strip's shape: the centre line stroked thick wide (round bends), with both ends cut: a zigzag for flat
+     * tape (look null), or torn paper (uneven teeth, slightly slanted) for the paper looks.
+     */
+    static android.graphics.Path tapeOutline(float[] pts, float thick, String look, int seed) {
         int n = pts.length / 2;
         if (n < 2) return null;
         android.graphics.Path line = new android.graphics.Path();
@@ -593,15 +714,35 @@ final class Render {
             if (len < 1e-3f) continue;
             dx /= len; dy /= len; // outward
             float nx = -dy, ny = dx;
-            int teeth = Math.max(3, Math.round(thick / 9f));
-            float tooth = thick / teeth, depth = Math.min(len * 0.6f, Math.max(2.5f, thick * 0.07f)), hw = thick / 2 + 1.5f;
+            float hw = thick / 2 + 1.5f;
             android.graphics.Path cut = new android.graphics.Path();
-            cut.moveTo(ex + nx * hw + dx * 4, ey + ny * hw + dy * 4);
-            cut.lineTo(ex - nx * hw + dx * 4, ey - ny * hw + dy * 4);
-            for (int i = 0; i <= teeth * 2; i++) {
-                float v = -hw + Math.min(2 * hw, i * (2 * hw) / (teeth * 2));
-                float u = (i % 2 == 1) ? -depth : 0;
-                cut.lineTo(ex + nx * v + dx * u, ey + ny * v + dy * u);
+            if (look == null) {
+                int teeth = Math.max(3, Math.round(thick / 9f));
+                float depth = Math.min(len * 0.6f, Math.max(2.5f, thick * 0.07f));
+                cut.moveTo(ex + nx * hw + dx * 4, ey + ny * hw + dy * 4);
+                cut.lineTo(ex - nx * hw + dx * 4, ey - ny * hw + dy * 4);
+                for (int i = 0; i <= teeth * 2; i++) {
+                    float v = -hw + Math.min(2 * hw, i * (2 * hw) / (teeth * 2));
+                    float u = (i % 2 == 1) ? -depth : 0;
+                    cut.lineTo(ex + nx * v + dx * u, ey + ny * v + dy * u);
+                }
+            } else { // torn by hand: many uneven little teeth, the whole tear a little slanted
+                Rnd r = new Rnd(seed * 7919L + end);
+                boolean washi = look.equals("washi"), kraft = look.equals("kraft");
+                int steps = Math.max(6, Math.round(thick / (washi ? 1.6f : kraft ? 3.2f : 2.4f)));
+                float depth = Math.min(len * 0.6f, Math.max(1.5f, thick * (washi ? 0.05f : kraft ? 0.12f : 0.10f)));
+                float slant = (r.next() - 0.5f) * thick * 0.12f;
+                float back = depth + Math.abs(slant) + 4;
+                cut.moveTo(ex + nx * hw + dx * back, ey + ny * hw + dy * back);
+                cut.lineTo(ex - nx * hw + dx * back, ey - ny * hw + dy * back);
+                float prevU = 0;
+                for (int i = 0; i <= steps; i++) {
+                    float t = i / (float) steps, v = -hw + t * 2 * hw;
+                    float uu = -depth * r.next() + slant * (t - 0.5f) * 2;
+                    float u = prevU * 0.35f + uu * 0.65f; // a little smoothing: fibres, not a saw
+                    prevU = u;
+                    cut.lineTo(ex + nx * v + dx * u, ey + ny * v + dy * u);
+                }
             }
             cut.close();
             solid.op(cut, android.graphics.Path.Op.DIFFERENCE);
@@ -697,11 +838,15 @@ final class Render {
 
     /** A page rendered to a bitmap widthPx wide. */
     static Bitmap pageBitmap(Notebook nb, File dir, Notebook.Page p, Pdf pdf, int widthPx) {
+        return pageBitmap(nb, dir, p, null, null, pdf, widthPx);
+    }
+
+    static Bitmap pageBitmap(Notebook nb, File dir, Notebook.Page p, Notebook.Page prev, Notebook.Page next, Pdf pdf, int widthPx) {
         float s = widthPx / Notebook.PW;
         Bitmap bm = Bitmap.createBitmap(widthPx, Math.max(1, Math.round(p.h * s)), Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(bm);
         c.scale(s, s);
-        page(c, nb, dir, p, pdf, widthPx, false);
+        page(c, nb, dir, p, prev, next, pdf, widthPx, false);
         return bm;
     }
 
