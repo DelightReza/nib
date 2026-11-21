@@ -142,6 +142,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         Theme.applyTo(this);
         String dirPath = getIntent().getStringExtra("dir");
         if (dirPath == null) { finish(); return; }
+        if (!new File(dirPath, "ink.bin").exists() && !new File(dirPath, "ink.bin.old").exists()) {
+            // a notebook that's gone (deleted, moved to the trash): don't show an empty one that writing would bring back
+            Diag.init(this);
+            Diag.warn("asked to open a missing notebook: " + dirPath);
+            android.widget.Toast.makeText(this, "That notebook isn't there any more", android.widget.Toast.LENGTH_SHORT).show();
+            finish();
+            return;
+        }
         prefs = getSharedPreferences("nib", MODE_PRIVATE);
         tool = prefs.getInt("tool", Engine.TOOL_PEN);
         if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_TEXT || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) tool = Engine.TOOL_PEN;
@@ -648,6 +656,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void focusPaneIdx(int p) {
         if (shown[p] == null) return;
+        if (p != focusPane) Diag.log("pane " + p + " in use: " + shown[p].dir.getName());
         focusPane = p;
         activate(shown[p]);
     }
@@ -1819,6 +1828,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         java.util.List<Notebook.Entry> all = Notebook.list(this);
         all.sort((a, b2) -> Long.compare(b2.modified, a.modified));
         Ui.Popover p = newPop(380).title(title);
+        p.add(Ui.actionRow(this, R.drawable.ic_plus, "New notebook", "Pick its paper and cover, or make an infinite canvas",
+                v -> { pop.dismiss(); newNotebook(then); }));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         int shownN = 0;
@@ -1837,6 +1848,41 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         p.add(sv);
         sv.setLayoutParams(new LinearLayout.LayoutParams(-1, Math.min(Ui.dp(this, 64) * Math.max(1, shownN), getResources().getDisplayMetrics().heightPixels / 2)));
         p.show(anchor);
+    }
+
+    /**
+     * New notebook from a tab's + or the split view menu: the same New notebook sheet as the notes screen (name,
+     * notebook or canvas, page style, paper, cover), made in the current notebook's folder and opened where asked.
+     */
+    private void newNotebook(java.util.function.Consumer<Doc> then) {
+        String title = new java.text.SimpleDateFormat("MMM d, h:mm a", java.util.Locale.getDefault()).format(new java.util.Date());
+        Notebook.Page proto = new Notebook.Page(Notebook.BG_DOTS);
+        int paper = Ui.dark(this) ? Notebook.PAPER_DARK : Notebook.PAPER_WHITE;
+        try {
+            String def = prefs.getString("defStyle", null);
+            if (def != null) {
+                org.json.JSONObject o = new org.json.JSONObject(def);
+                proto = lookOf(o);
+                paper = o.optInt("p", paper);
+            }
+        } catch (org.json.JSONException ignored) { }
+        org.json.JSONArray mine;
+        try { mine = new org.json.JSONArray(prefs.getString("myTpl", "[]")); } catch (org.json.JSONException e) { mine = new org.json.JSONArray(); }
+        final String folder = engine != null ? Notebook.meta(engine.dir).getProperty("folder", "") : "";
+        NewNotebookSheet.show(this, title, proto, paper, mine, null,
+                o -> prefs.edit().putString("defStyle", o.toString()).apply(),
+                (t, canvas, look, pp, cover) -> {
+                    try {
+                        File dir = Notebook.create(this, t, look, folder, canvas, pp);
+                        if (cover != null) {
+                            Notebook.setCover(dir, cover);
+                            prefs.edit().putString("view:" + dir.getName(), "0,0,1,0,0").apply(); // opens at page 1, ready to write
+                        }
+                        then.accept(openDoc(dir, -1));
+                    } catch (Exception ex) {
+                        toast("Couldn't create the notebook");
+                    }
+                });
     }
 
     /** Narrow windows (split screen): drop the least-needed controls until the tool capsule fits. */

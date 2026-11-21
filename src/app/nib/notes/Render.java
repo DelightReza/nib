@@ -575,39 +575,44 @@ final class Render {
             if (Math.hypot(dx, dy) >= thick || i == n - 1) { ang = (float) Math.toDegrees(Math.atan2(dy, dx)); break; }
         }
         if (Float.isNaN(ang)) ang = 0;
-        RectF bb = new RectF();
-        outline.computeBounds(bb, true);
-        float half = 0; // far enough from the start to cover the whole strip, in any rotation
-        for (float[] q : new float[][]{{bb.left, bb.top}, {bb.right, bb.top}, {bb.left, bb.bottom}, {bb.right, bb.bottom}})
-            half = Math.max(half, (float) Math.hypot(q[0] - sx, q[1] - sy));
-        half += thick;
+        // the strip's extent in the pattern's frame (rotated to the opening direction, origin at the start), so marks
+        // are drawn only over the strip, not over a square as wide as the tape is long
+        android.graphics.Matrix unrot = new android.graphics.Matrix();
+        unrot.setRotate(-ang, sx, sy);
+        android.graphics.Path rp = new android.graphics.Path(outline);
+        rp.transform(unrot);
+        RectF rb = new RectF();
+        rp.computeBounds(rb, true);
+        float step = Math.max(8f, thick / 3.2f);
+        float x0 = rb.left - sx - step, x1 = rb.right - sx + step, y0 = rb.top - sy - step, y1 = rb.bottom - sy + step;
+        int k0 = (int) Math.floor(x0 / step), k1 = (int) Math.ceil(x1 / step);
+        int j0 = (int) Math.floor(y0 / step), j1 = (int) Math.ceil(y1 / step);
         c.rotate(ang, sx, sy);
         Paint pt = new Paint(Paint.ANTI_ALIAS_FLAG);
         pt.setColor(0xffffffff);
         pt.setAlpha(Math.round(a * (look.equals("washi") ? 0.5f : look.equals("kraft") ? 0.22f : 0.32f)));
         pt.setStrokeWidth(Math.max(1.2f, thick * 0.08f));
-        float step = Math.max(8f, thick / 3.2f);
-        int kn = (int) Math.ceil(half / step); // marks sit at whole steps from the start point
+        // marks sit at whole steps from the start point, so the ones already down never move as the tape grows
         switch (pattern) {
-            case "stripes":
-                for (int k = -kn; k <= kn; k++) {
+            case "stripes": { // slanted lines through (start + k·step, start's height)
+                float slope = 0.7f, reach = Math.max(Math.abs(y0), Math.abs(y1)) * slope;
+                int ks0 = (int) Math.floor((x0 - reach) / step), ks1 = (int) Math.ceil((x1 + reach) / step);
+                for (int k = ks0; k <= ks1; k++) {
                     float d = k * step;
-                    c.drawLine(sx + d, sy + half, sx + d + 2 * half * 0.7f, sy - half, pt);
+                    c.drawLine(sx + d - y1 * slope, sy + y1, sx + d - y0 * slope, sy + y0, pt);
                 }
                 break;
+            }
             case "grid":
                 pt.setStrokeWidth(Math.max(0.8f, thick * 0.035f));
                 pt.setAlpha(Math.round(a * 0.4f));
-                for (int k = -kn; k <= kn; k++) {
-                    float d = k * step + step / 2;
-                    c.drawLine(sx + d, sy - half, sx + d, sy + half, pt);
-                    c.drawLine(sx - half, sy + d, sx + half, sy + d, pt);
-                }
+                for (int k = k0; k <= k1; k++) c.drawLine(sx + k * step + step / 2, sy + y0, sx + k * step + step / 2, sy + y1, pt);
+                for (int j = j0; j <= j1; j++) c.drawLine(sx + x0, sy + j * step + step / 2, sx + x1, sy + j * step + step / 2, pt);
                 break;
             case "dots":
                 pt.setAlpha(Math.round(a * 0.45f));
-                for (int j = -kn; j <= kn; j++)
-                    for (int k = -kn; k <= kn; k++)
+                for (int j = j0; j <= j1; j++)
+                    for (int k = k0; k <= k1; k++)
                         c.drawCircle(sx + k * step + (Math.abs(j) % 2) * step / 2 + step / 4, sy + j * step + step / 2, Math.max(1.2f, thick * 0.05f), pt);
                 break;
             default:

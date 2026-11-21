@@ -92,7 +92,7 @@ final class NewNotebookSheet {
         TextView pdf = Ui.text(a, "Or import a PDF to write on…", 13.5f, Ui.color(a, R.color.accent), Ui.medium());
         pdf.setPadding(0, Ui.dp(a, 10), 0, Ui.dp(a, 2));
         pdf.setOnClickListener(v -> { d.dismiss(); importPdf.run(); });
-        box.addView(pdf);
+        if (importPdf != null) box.addView(pdf); // opened from a notebook's tab / split menu: no PDF import there
 
         // page style: every template, then your own
         ArrayList<Choice> choices = new ArrayList<>();

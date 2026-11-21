@@ -218,6 +218,8 @@ final class Engine implements Choreographer.FrameCallback {
 
     Engine(Context c, File dir, Listener l) {
         app = c.getApplicationContext();
+        Diag.init(app);
+        Diag.log("open " + dir.getName());
         density = c.getResources().getDisplayMetrics().density;
         listener = l;
         this.dir = dir;
@@ -945,6 +947,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     void surfaceChanged(Surface s, int w, int hh) {
         h.post(() -> {
+            Diag.log(dir.getName() + ": surface " + w + "x" + hh);
             boolean sizeChanged = w != W || hh != H;
             float cx = ox + W / (2 * z), cy = oy + H / (2 * z);
             gl.setSurface(s, w, hh);
@@ -977,6 +980,7 @@ final class Engine implements Choreographer.FrameCallback {
     void surfaceDestroyed() {
         CountDownLatch done = new CountDownLatch(1);
         h.post(() -> {
+            Diag.log(dir.getName() + ": surface gone");
             if (gl != null) {
                 if (gl.hasSurface()) dropGpu(); // a hidden tab or the app in the background keeps no ink or textures
                 gl.dropSurface();
@@ -1392,13 +1396,21 @@ final class Engine implements Choreographer.FrameCallback {
         if (draftBusy || gest != G_TAPE) return;
         final float[] pts = draftPts();
         if (pts.length < 4) return;
+        int key = java.util.Arrays.hashCode(pts) * 31 + draftGen;
+        if (key == draftKey && draftTex != 0) return; // the pen hasn't moved since the last preview
+        draftKey = key;
         final Notebook.Item it = Notebook.Item.tape(pts, tapeThick, tapePattern, tapeColor);
         final int covered = tapeFree ? tn : 2, gen = draftGen;
         final float k = Math.min(z, 2048f / Math.max(1f, Math.max(it.w, it.h)));
         draftBusy = true;
+        final long queued = System.nanoTime();
         worker.execute(() -> {
             Bitmap b = null;
+            long t0 = System.nanoTime();
             try { b = Render.tapeBitmap(it, k); } catch (Exception e) { Log.w(Gl.TAG, "tape draft", e); }
+            long took = (System.nanoTime() - t0) / 1_000_000;
+            if (b != null && took >= 30) Log.w(Gl.TAG, String.format(Locale.US, "slow tape preview %dx%d: waited %d ms, drawn in %d ms", b.getWidth(), b.getHeight(),
+                    (t0 - queued) / 1_000_000, took));
             final Bitmap bm = b;
             h.post(() -> {
                 draftBusy = false;
@@ -1414,6 +1426,19 @@ final class Engine implements Choreographer.FrameCallback {
             });
         });
     }
+
+    /** A just-laid tape's preview texture, shown for it until its own texture is ready (no blank moment). */
+    private int handoffTex;
+    private final RectF handoffBox = new RectF();
+    private Notebook.Item handoffItem;
+
+    private void dropHandoff() {
+        if (handoffTex != 0 && gl != null) gl.deleteTex(handoffTex);
+        handoffTex = 0;
+        handoffItem = null;
+    }
+
+    private int draftKey; // the points (and gesture) the current preview was drawn for
 
     private void dropDraftTexture() {
         draftGen++;
@@ -1491,8 +1516,17 @@ final class Engine implements Choreographer.FrameCallback {
         if (len < tapeThick * 0.8f) { endTapeFrame(); return; } // too short to be a strip
         Notebook.Page p = book.pages.get(tapePage);
         Object[] before = pageState(p);
-        p.items().add(Notebook.Item.tape(pts, tapeThick, tapePattern, tapeColor));
+        Notebook.Item made = Notebook.Item.tape(pts, tapeThick, tapePattern, tapeColor);
+        p.items().add(made);
         push(new PageEdit(p, before, pageState(p)));
+        // the finished tape's own texture is drawn on the worker: until it's there, show the preview in its place
+        if (draftTex != 0) {
+            dropHandoff();
+            handoffTex = draftTex;
+            draftTex = 0;
+            handoffBox.set(draftBox);
+            handoffItem = made;
+        }
         if (tapePage == book.pages.size() - 1) ensureTrailingPage();
         docChanged();
         notifyState();
@@ -1664,6 +1698,10 @@ final class Engine implements Choreographer.FrameCallback {
                 if (o != null) { t = o; break; }
             }
             float al = doomedItems.contains(it) ? 0.28f : it.revealed() ? Render.TAPE_OPEN_ALPHA : 1f;
+            if (it == handoffItem) {
+                if (t != null) dropHandoff(); // its own texture is ready
+                else if (handoffTex != 0) { gl.tex(handoffTex, handoffBox.left, handoffBox.top, handoffBox.width(), handoffBox.height(), al); return; }
+            }
             if (t != null) gl.tex(t.id, it.x, it.y + top, it.w, it.h, al);
             return;
         }
@@ -1727,13 +1765,18 @@ final class Engine implements Choreographer.FrameCallback {
             return t;
         }
         if (make != null && texPending.add(key)) {
+            final long queued = System.nanoTime();
             worker.execute(() -> {
                 Bitmap b = null;
+                long t0 = System.nanoTime();
                 try {
                     b = make.call();
                 } catch (Exception e) {
                     Log.e(Gl.TAG, "texture " + key, e);
                 }
+                if (key.startsWith("tape:") && b != null && System.nanoTime() - queued > 30_000_000L)
+                    Log.w(Gl.TAG, String.format(Locale.US, "tape texture %dx%d: waited %d ms, drawn in %d ms", b.getWidth(), b.getHeight(),
+                            (t0 - queued) / 1_000_000, (System.nanoTime() - t0) / 1_000_000));
                 final Bitmap bm = b;
                 h.post(() -> {
                     texPending.remove(key);
@@ -1748,6 +1791,7 @@ final class Engine implements Choreographer.FrameCallback {
                     texBytes += nt.bytes;
                     needCache = true;
                     wantFront = true;
+                    kickDisplay = true; // arrives with no pen on the screen: make sure the display picks it up
                     requestFrame();
                 });
             });
@@ -1799,6 +1843,13 @@ final class Engine implements Choreographer.FrameCallback {
     /** Front-buffer ink is possible here (the GPU offers it and the system hasn't kept refusing it). */
     private boolean canFront() { return gl.mutable && frontRefused < FRONT_TRIES; }
 
+    /**
+     * Set when the picture changes without a pen on the screen (a texture finished on the worker). In front-buffer
+     * mode a flush alone may not reach the display then (it can sit idle with nothing new queued), so that present
+     * queues the buffer with a swap instead.
+     */
+    private boolean kickDisplay;
+
     private void present() {
         needPresent = false;
         gl.bindWindow();
@@ -1806,8 +1857,11 @@ final class Engine implements Choreographer.FrameCallback {
         gl.blit();
         if (overlay) gl.drawSegs(gl.pred, 0, gl.pred.count, predMode);
         if (front) {
-            gl.flush();
+            if (kickDisplay) gl.swap(); // single-buffer surface: queues the shared buffer, the compositor shows it
+            else gl.flush();
+            kickDisplay = false;
         } else {
+            kickDisplay = false;
             boolean ask = wantFront && canFront();
             if (ask) gl.requestFront(true);
             gl.swap();
@@ -1818,7 +1872,7 @@ final class Engine implements Choreographer.FrameCallback {
                 gl.swap();
                 f = gl.isFront();
                 if (!f && ++frontRefused >= FRONT_TRIES)
-                    Log.w(Gl.TAG, "front buffer requests not honoured " + FRONT_TRIES + " times: ink is drawn double-buffered on this surface");
+                    Diag.warn("front buffer requests not honoured " + FRONT_TRIES + " times: ink is drawn double-buffered on this surface");
             }
             if (f) {
                 frontRefused = 0; // it does honour the mode: only refusals in a row count
@@ -1837,10 +1891,34 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void setFront(boolean f, String why) {
         if (f != front) {
-            Log.i(Gl.TAG, "front buffer " + (f ? "ON" : "off") + " (" + why + ")");
+            Diag.log(dir.getName() + ": front buffer " + (f ? "ON" : "off") + " (" + why + ")");
             frontWhy = why;
         }
         front = f;
+    }
+
+    /**
+     * The pen is going down: make sure the surface is still in front-buffer mode before drawing straight into it.
+     * The system can take a surface out of it (seen in split view on HyperOS: one pane's ink stopped showing while
+     * the strokes were still saved); ink drawn into what is then a back buffer never reaches the screen.
+     */
+    private void checkFront() {
+        if (!front || gl == null || !gl.hasSurface()) return;
+        if (!gl.isFront()) {
+            Diag.warn(dir.getName() + ": front buffer was turned off by the system; drawing frames normally");
+            setFront(false, "lost");
+            needPresent = true;
+        } else gl.requestFront(true); // re-assert it (and auto refresh) on this surface: cheap, and keeps it from lapsing
+    }
+
+    /**
+     * The pen lifted: queue the front buffer once, so the compositor shows the finished stroke even when it has
+     * stopped refreshing the buffer by itself (auto refresh lapsed, display idle).
+     */
+    private void showFront() {
+        if (!front || gl == null || !gl.hasSurface()) return;
+        gl.bindWindow();
+        gl.swap();
     }
 
     /** Patch the visible buffer with the overlay (pred buffer) without touching the cache. */
@@ -2113,6 +2191,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     /** Frees all GPU memory this engine holds except what's needed to draw again (surface gone / changed). */
     private void dropGpu() {
+        dropHandoff();
         for (PageInk pk : inks.values()) pk.free();
         inks.clear();
         gl.pen.lost();
@@ -2166,6 +2245,7 @@ final class Engine implements Choreographer.FrameCallback {
                 stopFling();
                 gesturing = false;
                 if (hasSel() && tool != TOOL_LASSO) clearSelection(); // writing next to a shape just carries on
+                checkFront();
                 // ink is drawn into the cache, so it must hold this view; then back into front-buffer mode if we can
                 if (!cacheValid()) renderNow();
                 else if (!front && canFront()) present();
@@ -2572,6 +2652,7 @@ final class Engine implements Choreographer.FrameCallback {
             one.add(done);
             select(donePage, one, new ArrayList<>()); // handles appear: stretch it now or come back later
         }
+        showFront();
         docChanged();
     }
 
@@ -2805,6 +2886,7 @@ final class Engine implements Choreographer.FrameCallback {
             predPrev.set(predCur);
             predCur.setEmpty();
             patchOverlay(null);
+            showFront();
             penNear = SystemClock.uptimeMillis();
         }
     }
@@ -3831,6 +3913,7 @@ final class Engine implements Choreographer.FrameCallback {
                 });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "save failed", e);
+                Diag.warn(dir.getName() + ": save failed: " + e);
                 toast("Couldn't save · will try again (is storage full?)");
                 h.post(() -> { dirtyDoc = true; h.removeCallbacks(saveR); h.postDelayed(saveR, 5000); });
             }
