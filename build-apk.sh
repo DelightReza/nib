@@ -36,6 +36,7 @@ VERSION_CODE=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 KS=${NIB_KEYSTORE:-$HOME/.android/debug.keystore}
 KS_PASS=${NIB_KS_PASS:-android}
 KEY_ALIAS=${NIB_KEY_ALIAS:-androiddebugkey}
+KEY_PASS=${NIB_KEY_PASS:-$KS_PASS}
 
 rm -rf "$OUT"
 rm -rf "$OUT/classes"   # never ship classes left over from an earlier build
@@ -90,7 +91,7 @@ fi
 echo "› sign"
 "${ZIPALIGN[@]}" "$OUT/unsigned.apk" "$OUT/aligned.apk"
 "${APKSIGNER[@]}" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --ks-key-alias "$KEY_ALIAS" \
-  --out "$OUT/nib.apk" "$OUT/aligned.apk"
+  --key-pass "pass:$KEY_PASS" --out "$OUT/nib.apk" "$OUT/aligned.apk"
 "${APKSIGNER[@]}" verify "$OUT/nib.apk"
 rm -f "$OUT/unsigned.apk" "$OUT/aligned.apk" "$OUT/nib.apk.idsig"
 echo "✓ $OUT/nib.apk ($(du -h "$OUT/nib.apk" | cut -f1), v$VERSION_NAME build $VERSION_CODE)"

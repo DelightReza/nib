@@ -1,6 +1,8 @@
 # build output
 build/
 build-debug/
+app/build/
+.gradle/
 # Google ML Kit libraries: fetched by tools/fetch_libs.py, not redistributed here
 libs/
 # signing keys never belong in the repo
@@ -13,3 +15,5 @@ design/
 tools/beautify-test/out/
 tools/beautify-test/*.svg
 tools/beautify-test/*.png
+metadata.json
+public
