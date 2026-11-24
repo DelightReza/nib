@@ -78,8 +78,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
-    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14;
+    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16;
     private File pendingSave; // exported PDF waiting for the user to pick where to save it
+    private int pendingPagePos = Engine.POS_AFTER;
+    private Engine pendingPageEngine;
+    private Runnable afterPageImport;
 
     private Engine engine;
     private SharedPreferences prefs;
@@ -115,7 +118,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private LinearLayout capLeft, capRight, capTools;
     private TextView hudView, toastView, pasteChip;
     private Ui.ToolDisc penB, hlB, eraserB, lassoB, laserB, textB, tapeB;
-    private Ui.IconButton undoB, redoB, pagesB, bookmarkB;
+    private Ui.IconButton undoB, redoB, addPageB, pagesB, bookmarkB;
     private LinearLayout favRow;
     private Ruler ruler;
     private Ui.ToolDisc rulerB, fingerB, moreToolsB;
@@ -1069,6 +1072,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             toast(on ? "Bookmark removed" : "Page " + (state.page + 1) + " bookmarked · long-press to name it");
         });
         bookmarkB.setOnLongClickListener(v -> { if (state != null) nameBookmark(state.page, null); return true; });
+        addPageB = icon(R.drawable.ic_page_add, "Add page");
+        addPageB.setOnClickListener(v -> showAddPage(Engine.POS_AFTER, null));
         pagesB = icon(R.drawable.ic_pages, "All pages");
         pagesB.setOnClickListener(v -> showPages());
         Ui.IconButton more = icon(R.drawable.ic_more, "More");
@@ -1076,6 +1081,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         capRight.addView(undoB);
         capRight.addView(redoB);
         capRight.addView(bookmarkB);
+        capRight.addView(addPageB);
         capRight.addView(pagesB);
         capRight.addView(more);
         FrameLayout.LayoutParams rl = new FrameLayout.LayoutParams(-2, Ui.dp(this, CAP_DP), Gravity.TOP | Gravity.END);
@@ -1086,7 +1092,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void showMore(View anchor) {
         Ui.Popover p = newPop(300);
         boolean canvas = state != null && state.canvas;
-        if (!canvas) p.add(Ui.actionRow(this, R.drawable.ic_page_add, "Add page", "Pages also add themselves as you write", v -> { pop.dismiss(); engine.addPage(); toast("Page added"); }));
+        if (!canvas) p.add(Ui.actionRow(this, R.drawable.ic_page_add, "Add page", "Templates, another notebook, images or PDF", v -> { pop.dismiss(); showAddPage(Engine.POS_AFTER, null); }));
         if (!canvas && state != null && state.marks != null) {
             boolean on = state.marks[state.page] != null;
             p.add(Ui.actionRow(this, on ? R.drawable.ic_bookmark_filled : R.drawable.ic_bookmark, on ? "Rename or remove bookmark" : "Bookmark this page",
@@ -2126,6 +2132,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         boolean narrow = root.getWidth() < Ui.dp(this, 520);
         boolean canvas = state != null && state.canvas;
         bookmarkB.setVisibility(narrow || canvas ? View.GONE : View.VISIBLE);
+        addPageB.setVisibility(narrow || canvas ? View.GONE : View.VISIBLE);
         pagesB.setVisibility(narrow || canvas ? View.GONE : View.VISIBLE);
         capRight.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED), View.MeasureSpec.makeMeasureSpec(Ui.dp(this, CAP_DP), View.MeasureSpec.EXACTLY));
         fitTabs();
@@ -3267,10 +3274,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         plus.setImageResource(R.drawable.ic_plus);
         plus.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, R.color.on_surface_variant)));
         af.addView(plus, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
-        af.setOnClickListener(v -> {
-            engine.pageOp("insert", n - 1, 0);
-            ui.postDelayed(() -> { if (pagesPanel != null) fillPages(grid); }, 150);
-        });
+        af.setOnClickListener(v -> showAddPage(Engine.POS_LAST, () ->
+                ui.postDelayed(() -> { if (pagesPanel != null) fillPages(grid); }, 150)));
         addCard.addView(af, new LinearLayout.LayoutParams(-1, -2));
         grid.addView(addCard);
     }
@@ -4093,6 +4098,231 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
     }
 
+    // ---- Page+ sheet: add templates, pages from another notebook, images, or PDFs ------------
+
+    private void showAddPage(int initialPos, Runnable after) {
+        if (state != null && state.canvas) return;
+        commitTextEdit();
+        final Engine target = engine;
+        int paper = state != null ? state.paper : Notebook.PAPER_WHITE;
+        Notebook.Page curStyle = null;
+        if (state != null) {
+            curStyle = new Notebook.Page(state.bg);
+            curStyle.spacing = state.spacing;
+            curStyle.strength = state.strength;
+            curStyle.lineColor = state.lineColor;
+            curStyle.margins = state.margins;
+        }
+        AddPageSheet.show(this, target.dir, paper, curStyle, myTemplates(), initialPos, bg, new AddPageSheet.Callback() {
+            @Override
+            public void onAddTemplate(int placement, Notebook.Page look) {
+                target.insertPage(placement, look);
+                toast("Page added");
+                if (after != null) after.run();
+            }
+
+            @Override
+            public void onImportFromNotebook(int placement, File srcDir, java.util.List<Integer> pageIndices, String srcTitle) {
+                importNotebookPages(target, placement, srcDir, pageIndices, srcTitle, after);
+            }
+
+            @Override
+            public void onPickImages(int placement) {
+                pendingPagePos = placement;
+                pendingPageEngine = target;
+                afterPageImport = after;
+                Intent in = new Intent(MediaStore.ACTION_PICK_IMAGES)
+                        .setType("image/*")
+                        .putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
+                startActivityForResult(in, REQ_PAGE_IMAGES);
+            }
+
+            @Override
+            public void onPickPdf(int placement) {
+                pendingPagePos = placement;
+                pendingPageEngine = target;
+                afterPageImport = after;
+                Intent in = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                        .addCategory(Intent.CATEGORY_OPENABLE)
+                        .setType("application/pdf");
+                startActivityForResult(in, REQ_PAGE_PDF);
+            }
+        });
+    }
+
+    private void importNotebookPages(Engine target, int pos, File srcDir, java.util.List<Integer> indices, String srcTitle, Runnable after) {
+        if (indices == null || indices.isEmpty()) return;
+        toast("Importing " + indices.size() + (indices.size() == 1 ? " page…" : " pages…"));
+        bg.execute(() -> {
+            java.util.ArrayList<Notebook.Page> out = new java.util.ArrayList<>();
+            File dstImgDir = new File(target.dir, "images");
+            File srcImgDir = new File(srcDir, "images");
+            try (Render.Pdf srcPdf = Render.Pdf.open(srcDir)) {
+                Notebook srcNb = Notebook.load(srcDir);
+                for (int idx : indices) {
+                    if (idx < 0 || idx >= srcNb.pages.size()) continue;
+                    Notebook.Page sp = srcNb.pages.get(idx);
+                    Notebook.Page np = new Notebook.Page(sp.pdf >= 0 ? Notebook.BG_BLANK : sp.bg);
+                    np.h = sp.h;
+                    np.copyStyle(sp);
+                    np.mark = sp.mark;
+
+                    java.util.ArrayList<Stroke> strokes = new java.util.ArrayList<>();
+                    for (Stroke s : sp.strokes()) strokes.add(s.shifted(0, 0));
+                    np.setStrokes(strokes);
+
+                    java.util.ArrayList<Notebook.Item> items = new java.util.ArrayList<>();
+                    if (sp.pdf >= 0 && srcPdf != null) {
+                        Bitmap bm = srcPdf.render(sp.pdf, 1800);
+                        if (bm != null) {
+                            dstImgDir.mkdirs();
+                            String name = UUID.randomUUID() + ".jpg";
+                            try (FileOutputStream o = new FileOutputStream(new File(dstImgDir, name))) {
+                                bm.compress(Bitmap.CompressFormat.JPEG, 92, o);
+                            }
+                            bm.recycle();
+                            items.add(new Notebook.Item(Notebook.Item.IMAGE, 0, 0, Notebook.PW, np.h, name, 0, 0));
+                        }
+                    }
+                    for (Notebook.Item it : sp.items()) {
+                        if (it.type == Notebook.Item.IMAGE && it.text != null) {
+                            File srcFile = new File(srcImgDir, it.text);
+                            String newName = it.text;
+                            if (srcFile.isFile()) {
+                                dstImgDir.mkdirs();
+                                int dot = it.text.lastIndexOf('.');
+                                String ext = dot >= 0 ? it.text.substring(dot) : ".png";
+                                newName = UUID.randomUUID() + ext;
+                                Io.copy(new java.io.FileInputStream(srcFile), new FileOutputStream(new File(dstImgDir, newName)));
+                            }
+                            items.add(new Notebook.Item(it.type, it.x, it.y, it.w, it.h, newName, it.size, it.color, it.pts, it.style).lay(it.layer));
+                        } else {
+                            float[] ptsCopy = it.pts == null ? null : it.pts.clone();
+                            items.add(new Notebook.Item(it.type, it.x, it.y, it.w, it.h, it.text, it.size, it.color, ptsCopy, it.style).lay(it.layer));
+                        }
+                    }
+                    np.setItems(items);
+                    sp.unload();
+                    out.add(np);
+                }
+            } catch (Exception e) {
+                Log.e(Gl.TAG, "import notebook pages", e);
+                ui.post(() -> toast("Couldn't import pages from " + srcTitle));
+                return;
+            }
+            if (out.isEmpty()) {
+                ui.post(() -> toast("No pages imported"));
+                return;
+            }
+            ui.post(() -> {
+                target.insertPages(pos, out);
+                int n = out.size();
+                toast("Added " + n + (n == 1 ? " page" : " pages") + " from " + srcTitle);
+                if (after != null) after.run();
+            });
+        });
+    }
+
+    private void importImagePages(Engine target, int pos, java.util.List<Uri> uris, Runnable after) {
+        if (uris == null || uris.isEmpty()) return;
+        toast("Adding " + uris.size() + (uris.size() == 1 ? " image page…" : " image pages…"));
+        bg.execute(() -> {
+            java.util.ArrayList<Notebook.Page> pages = new java.util.ArrayList<>();
+            File imgDir = new File(target.dir, "images");
+            imgDir.mkdirs();
+            for (Uri uri : uris) {
+                try {
+                    Bitmap b = ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(), uri), (dec, info, src) -> {
+                        int w = info.getSize().getWidth(), h = info.getSize().getHeight(), m = Math.max(w, h);
+                        if (m > 2400) dec.setTargetSize(w * 2400 / m, h * 2400 / m);
+                        dec.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                    });
+                    boolean alpha = b.hasAlpha();
+                    String name = UUID.randomUUID() + (alpha ? ".png" : ".jpg");
+                    try (FileOutputStream o = new FileOutputStream(new File(imgDir, name))) {
+                        b.compress(alpha ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 90, o);
+                    }
+                    int bw = Math.max(1, b.getWidth()), bh = Math.max(1, b.getHeight());
+                    b.recycle();
+
+                    Notebook.Page pg = new Notebook.Page(Notebook.BG_BLANK);
+                    float pad = 36f;
+                    float maxW = Notebook.PW - 2 * pad, maxH = pg.h - 2 * pad;
+                    float scale = Math.min(maxW / bw, maxH / bh);
+                    float iw = bw * scale, ih = bh * scale;
+                    float ix = (Notebook.PW - iw) * 0.5f, iy = (pg.h - ih) * 0.5f;
+                    java.util.ArrayList<Notebook.Item> items = new java.util.ArrayList<>();
+                    items.add(new Notebook.Item(Notebook.Item.IMAGE, ix, iy, iw, ih, name, 0, 0));
+                    pg.setItems(items);
+                    pages.add(pg);
+                } catch (Exception e) {
+                    Log.e(Gl.TAG, "image page", e);
+                }
+            }
+            if (pages.isEmpty()) {
+                ui.post(() -> toast("Couldn't add those images"));
+                return;
+            }
+            ui.post(() -> {
+                target.insertPages(pos, pages);
+                int n = pages.size();
+                toast("Added " + n + (n == 1 ? " image page" : " image pages"));
+                if (after != null) after.run();
+            });
+        });
+    }
+
+    private void importPdfPages(Engine target, int pos, Uri uri, Runnable after) {
+        toast("Importing PDF pages…");
+        bg.execute(() -> {
+            File tmp = new File(getCacheDir(), "import-" + UUID.randomUUID() + ".pdf");
+            java.util.ArrayList<Notebook.Page> pages = new java.util.ArrayList<>();
+            File imgDir = new File(target.dir, "images");
+            imgDir.mkdirs();
+            try {
+                Io.copy(getContentResolver().openInputStream(uri), new FileOutputStream(tmp));
+                try (Render.Pdf pdf = new Render.Pdf(tmp)) {
+                    int count = pdf.r.getPageCount();
+                    for (int i = 0; i < count; i++) {
+                        float ph;
+                        try (android.graphics.pdf.PdfRenderer.Page rp = pdf.r.openPage(i)) {
+                            ph = Notebook.PW * rp.getHeight() / (float) Math.max(1, rp.getWidth());
+                        }
+                        Bitmap bm = pdf.render(i, 1800);
+                        if (bm == null) continue;
+                        String name = UUID.randomUUID() + ".jpg";
+                        try (FileOutputStream o = new FileOutputStream(new File(imgDir, name))) {
+                            bm.compress(Bitmap.CompressFormat.JPEG, 92, o);
+                        }
+                        bm.recycle();
+                        Notebook.Page pg = new Notebook.Page(Notebook.BG_BLANK);
+                        pg.h = ph;
+                        java.util.ArrayList<Notebook.Item> items = new java.util.ArrayList<>();
+                        items.add(new Notebook.Item(Notebook.Item.IMAGE, 0, 0, Notebook.PW, ph, name, 0, 0));
+                        pg.setItems(items);
+                        pages.add(pg);
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(Gl.TAG, "pdf page import", e);
+                ui.post(() -> toast("Couldn't import that PDF"));
+                return;
+            } finally {
+                tmp.delete();
+            }
+            if (pages.isEmpty()) {
+                ui.post(() -> toast("No pages found in that PDF"));
+                return;
+            }
+            ui.post(() -> {
+                target.insertPages(pos, pages);
+                int n = pages.size();
+                toast("Added " + n + (n == 1 ? " PDF page" : " PDF pages"));
+                if (after != null) after.run();
+            });
+        });
+    }
+
     // ---- images --------------------------------------------------------------------------
 
     @Override
@@ -4131,6 +4361,29 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                     if (n > 0 && stickerAnchor != null && stickerAnchor.isAttachedToWindow()) showInsert(stickerAnchor);
                 });
             });
+            return;
+        }
+        if (req == REQ_PAGE_IMAGES) {
+            Engine target = pendingPageEngine != null ? pendingPageEngine : engine;
+            int pos = pendingPagePos;
+            Runnable after = afterPageImport;
+            pendingPageEngine = null;
+            afterPageImport = null;
+            if (res != RESULT_OK || data == null) return;
+            java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
+            if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
+            else if (data.getData() != null) uris.add(data.getData());
+            importImagePages(target, pos, uris, after);
+            return;
+        }
+        if (req == REQ_PAGE_PDF) {
+            Engine target = pendingPageEngine != null ? pendingPageEngine : engine;
+            int pos = pendingPagePos;
+            Runnable after = afterPageImport;
+            pendingPageEngine = null;
+            afterPageImport = null;
+            if (res != RESULT_OK || data == null || data.getData() == null) return;
+            importPdfPages(target, pos, data.getData(), after);
             return;
         }
         if (req != REQ_IMAGE || res != RESULT_OK || data == null || data.getData() == null) return;
@@ -4220,6 +4473,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             }
         }
         boolean narrowW = root.getWidth() > 0 && root.getWidth() < Ui.dp(this, 520);
+        addPageB.setVisibility(s.canvas || narrowW ? View.GONE : View.VISIBLE);
         pagesB.setVisibility(s.canvas || narrowW ? View.GONE : View.VISIBLE);
         if (ruler.getVisibility() == View.VISIBLE) ruler.invalidate(); // ticks follow the zoom
         bookmarkB.setVisibility(s.canvas || narrowW ? View.GONE : View.VISIBLE);

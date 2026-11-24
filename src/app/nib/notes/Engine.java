@@ -381,7 +381,26 @@ final class Engine implements Choreographer.FrameCallback {
         });
     }
 
+    static final int POS_BEFORE = 0, POS_AFTER = 1, POS_LAST = 2;
+
     void addPage() { h.post(() -> doAddPage(currentPage())); }
+
+    /** Inserts one new page with the chosen template/style at POS_BEFORE / POS_AFTER / POS_LAST. */
+    void insertPage(int pos, Notebook.Page look) {
+        h.post(() -> {
+            if (book == null || book.canvas) return;
+            Notebook.Page np = new Notebook.Page(look != null ? look.bg : Notebook.BG_LINED);
+            if (look != null) np.copyStyle(look);
+            doInsertPages(pos, java.util.Collections.singletonList(np));
+        });
+    }
+
+    /** Inserts ready-made pages (e.g. from another notebook, images, or PDF) at POS_BEFORE / POS_AFTER / POS_LAST. */
+    void insertPages(int pos, java.util.List<Notebook.Page> pages) {
+        if (pages == null || pages.isEmpty()) return;
+        final ArrayList<Notebook.Page> copy = new ArrayList<>(pages);
+        h.post(() -> doInsertPages(pos, copy));
+    }
 
     void clearPage() { pageOp("clear", -2, 0); }
 
@@ -4046,6 +4065,19 @@ final class Engine implements Choreographer.FrameCallback {
         push(new PagesEdit(before, new ArrayList<>(book.pages)));
         relayout();
         oy = tops[after + 1] - topPad / z;
+        edited();
+    }
+
+    private void doInsertPages(int pos, java.util.List<Notebook.Page> pages) {
+        if (book == null || book.canvas || pages.isEmpty()) return;
+        clearSelection();
+        int cur = Math.max(0, Math.min(book.pages.size() - 1, currentPage()));
+        int at = pos == POS_BEFORE ? cur : pos == POS_LAST ? book.pages.size() : Math.min(book.pages.size(), cur + 1);
+        ArrayList<Notebook.Page> before = new ArrayList<>(book.pages);
+        book.pages.addAll(at, pages);
+        push(new PagesEdit(before, new ArrayList<>(book.pages)));
+        relayout();
+        oy = tops[at] - topPad / z;
         edited();
     }
 
