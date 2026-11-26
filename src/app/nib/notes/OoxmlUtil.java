@@ -876,4 +876,83 @@ final class OoxmlUtil {
         @Override public void updateDrawState(TextPaint tp) { apply(tp); }
         @Override public void updateMeasureState(TextPaint tp) { apply(tp); }
     }
+
+    /**
+     * Maps OOXML Wingdings / Wingdings 2 / Wingdings 3 / Webdings / Symbol / PUA bullet characters
+     * to crisp standard Unicode glyphs so bullets never render as garbled Latin characters (e.g. ø, v, §).
+     */
+    static String mapBulletChar(String ch, String fontName) {
+        if (ch == null || ch.isEmpty()) return "•";
+        char raw = ch.charAt(0);
+        int code = (raw >= 0xF000 && raw <= 0xF0FF) ? (raw & 0xFF) : raw;
+        boolean pua = raw >= 0xF000 && raw <= 0xF0FF;
+        String fn = fontName != null ? fontName.toLowerCase(Locale.US) : "";
+        boolean isWingdings = fn.contains("wingding") || fn.contains("webding")
+                || fn.contains("dingbat") || fn.contains("monotype sorts");
+        boolean isSymbol = fn.contains("symbol");
+
+        if (isSymbol) {
+            switch (code) {
+                case 0xB7: return "•";
+                case 0x6F: return "◦";
+                case 0xA8: return "♦";
+                case 0xAE: return "→";
+                case 0xAC: return "←";
+                case 0xAD: return "↑";
+                case 0xAF: return "↓";
+                case 0xDE: return "⇒";
+                case 0xD7: return "•";
+                default: return "•";
+            }
+        }
+        if (isWingdings || pua) {
+            if (fn.contains("wingdings 3")) {
+                switch (code) {
+                    case 0x70: case 0x71: case 0x72: case 0x74: case 0x75: case 0x76: return "▸";
+                    case 0x67: case 0x68: case 0x80: case 0x81: case 0xA2: return "→";
+                    default: return "▸";
+                }
+            }
+            if (fn.contains("wingdings 2")) {
+                switch (code) {
+                    case 0x50: case 0x51: return "✓";
+                    case 0x97: case 0x98: case 0x99: return "•";
+                    case 0xA0: case 0xA1: case 0xA2: return "▪";
+                    case 0xA3: case 0xA4: return "▫";
+                    case 0xB0: case 0xB1: return "◆";
+                    default: return "•";
+                }
+            }
+            switch (code) {
+                case 0xD8: case 0xF8: return "➢"; // Wingdings 3D right arrowhead
+                case 0x76: case 0x75: case 0x77: return "❖"; // Wingdings 4-diamond ornament
+                case 0x6C: case 0xB7: return "•"; // filled circle
+                case 0x6D: return "○"; // open circle
+                case 0x6E: case 0x70: case 0xA7: return "▪"; // filled square
+                case 0x6F: case 0xA8: return "▫"; // open square
+                case 0x71: return "❑"; // shadowed box
+                case 0x72: return "❏";
+                case 0x73: case 0x74: return "◆"; // diamond
+                case 0xFC: return "✓"; // checkmark
+                case 0xFE: return "☑"; // checked box
+                case 0xFB: return "✗";
+                case 0xE0: case 0xE8: case 0xF0: case 0xE2: case 0xEA: case 0xF2: return "➔";
+                case 0xDF: case 0xE7: case 0xEF: return "←";
+                case 0xAB: case 0xBB: case 0xB5: return "★";
+                case 0x9F: return "•";
+                default: return "•";
+            }
+        }
+        // Fallback for common Wingdings characters emitted without explicit buFont
+        switch (raw) {
+            case '\u00F8': case '\u00D8': return "➢";
+            case '\u00A7': return "▪";
+            case '\u00A8': return "▫";
+            case '\u00FC': return "✓";
+            case '\u00FE': return "☑";
+            case '\u00B7': return "•";
+            case 'o': return "◦";
+            default: return ch;
+        }
+    }
 }

@@ -537,11 +537,17 @@ final class PptxRenderer {
         Element nvSpPr = OoxmlUtil.child(sp, isConnector ? "nvCxnSpPr" : "nvSpPr");
         Element nvPr = OoxmlUtil.child(nvSpPr, "nvPr");
         Element ph = OoxmlUtil.child(nvPr, "ph");
+        boolean hasPh = ph != null;
         String phType = ph != null ? OoxmlUtil.attr(ph, "type") : null;
         String phIdx = ph != null ? OoxmlUtil.attr(ph, "idx") : null;
 
-        Element layoutPh = (ph != null && ctx.layout != null) ? ctx.layout.findPlaceholder(phType, phIdx) : null;
-        Element masterPh = (ph != null && ctx.master != null) ? ctx.master.part.findPlaceholder(phType, phIdx) : null;
+        Element layoutPh = (hasPh && ctx.layout != null) ? ctx.layout.findPlaceholder(phType, phIdx) : null;
+        String effectivePhType = phType;
+        if (effectivePhType == null && layoutPh != null) {
+            Element lPh = OoxmlUtil.child(OoxmlUtil.child(OoxmlUtil.child(layoutPh, "nvSpPr"), "nvPr"), "ph");
+            if (lPh != null) effectivePhType = OoxmlUtil.attr(lPh, "type");
+        }
+        Element masterPh = (hasPh && ctx.master != null) ? ctx.master.part.findPlaceholder(effectivePhType, phIdx) : null;
 
         Element spPr = OoxmlUtil.child(sp, "spPr");
         Element lSpPr = layoutPh != null ? OoxmlUtil.child(layoutPh, "spPr") : null;
@@ -628,7 +634,7 @@ final class PptxRenderer {
                 int rep = fill.representativeColor();
                 if (rep != 0 && Color.alpha(rep) > 128) effectiveBgLuma = OoxmlUtil.luminance(rep);
             }
-            renderTextBody(cv, ctx, rect, txBody, phType, layoutPh, masterPh, styleEl, effectiveBgLuma);
+            renderTextBody(cv, ctx, rect, txBody, effectivePhType, hasPh, layoutPh, masterPh, styleEl, effectiveBgLuma);
         }
         cv.restore();
     }
@@ -969,7 +975,7 @@ final class PptxRenderer {
                 if (txBody != null) {
                     RectF inset = new RectF(cellRect.left + 4f, cellRect.top + 3f, cellRect.right - 4f, cellRect.bottom - 3f);
                     if (inset.width() > 4f && inset.height() > 4f) {
-                        renderTextBody(cv, ctx, inset, txBody, null, null, null, null, cellBgLuma);
+                        renderTextBody(cv, ctx, inset, txBody, null, false, null, null, null, cellBgLuma);
                     }
                 }
             }
@@ -993,18 +999,28 @@ final class PptxRenderer {
         Boolean italic = null;
         String fontName = null;
         Layout.Alignment align = null;
+        boolean justify = false;
         float marLPt = 0f;
+        float marRPt = 0f;
         float indentPt = 0f;
         float spcBefPt = -1f;
+        float spcBefPct = -1f;
         float spcAftPt = -1f;
+        float spcAftPct = -1f;
         float lineMult = 0f;
         String bulletChar = null;
+        String bulletFont = null;
+        int bulletColor = 0;
+        float bulletSzPct = 0f;
+        float bulletSzPt = 0f;
         boolean bulletAutoNum = false;
+        String bulletAutoType = "arabicPeriod";
+        int bulletStartAt = 1;
         boolean bulletNone = false;
     }
 
     private static void renderTextBody(Canvas cv, SlideCtx ctx, RectF boxRect, Element txBody,
-                                       String phType, Element layoutPh, Element masterPh,
+                                       String phType, boolean hasPh, Element layoutPh, Element masterPh,
                                        Element styleEl, float bgLuma) {
         List<Element> paras = OoxmlUtil.children(txBody, "p");
         if (paras.isEmpty()) return;
@@ -1024,14 +1040,20 @@ final class PptxRenderer {
                 OoxmlUtil.attr(lBodyPr, "wrap"), OoxmlUtil.attr(mBodyPr, "wrap"));
         boolean noWrap = "none".equalsIgnoreCase(wrapAttr);
         boolean spAutoFit = (sBodyPr != null && OoxmlUtil.child(sBodyPr, "spAutoFit") != null);
+        boolean explicitNoAutofit = (sBodyPr != null && OoxmlUtil.child(sBodyPr, "noAutofit") != null);
 
         float fontScale = 1f;
         float lnSpcReduction = 0f;
-        Element normAutofit = sBodyPr != null ? OoxmlUtil.child(sBodyPr, "normAutofit") : null;
-        if (normAutofit != null) {
-            fontScale = OoxmlUtil.attrFloat(normAutofit, "fontScale", 100000f) / 100000f;
-            lnSpcReduction = OoxmlUtil.attrFloat(normAutofit, "lnSpcReduction", 0f) / 100000f;
-            fontScale = Math.max(0.45f, Math.min(1f, fontScale));
+        if (!spAutoFit && !explicitNoAutofit) {
+            Element normAutofit = firstNonNull(
+                    OoxmlUtil.child(sBodyPr, "normAutofit"),
+                    OoxmlUtil.child(lBodyPr, "normAutofit"),
+                    OoxmlUtil.child(mBodyPr, "normAutofit"));
+            if (normAutofit != null) {
+                fontScale = OoxmlUtil.attrFloat(normAutofit, "fontScale", 100000f) / 100000f;
+                lnSpcReduction = OoxmlUtil.attrFloat(normAutofit, "lnSpcReduction", 0f) / 100000f;
+                fontScale = Math.max(0.45f, Math.min(1f, fontScale));
+            }
         }
 
         // Shape style fontRef color & font
@@ -1051,7 +1073,7 @@ final class PptxRenderer {
         List<Element> lstStyles = new ArrayList<>();
         if (ctx.defaultTextStyle != null) lstStyles.add(ctx.defaultTextStyle);
         if (ctx.master != null) {
-            Element mTx = selectMasterTxStyle(ctx.master, phType);
+            Element mTx = selectMasterTxStyle(ctx.master, phType, hasPh);
             if (mTx != null) lstStyles.add(mTx);
         }
         if (masterPh != null) {
@@ -1065,7 +1087,8 @@ final class PptxRenderer {
         Element shapeLst = OoxmlUtil.child(txBody, "lstStyle");
         if (shapeLst != null) lstStyles.add(shapeLst);
 
-        float availW = Math.max(20f, boxRect.width() - lIns - rIns);
+        float rightEdge = Math.min(boxRect.right, ctx.pageW - 4f);
+        float availW = Math.max(20f, rightEdge - boxRect.left - lIns - rIns);
         float availH = Math.max(12f, boxRect.height() - tIns - bIns);
         boolean isTitle = "title".equalsIgnoreCase(phType) || "ctrTitle".equalsIgnoreCase(phType);
         boolean isSubTitle = "subTitle".equalsIgnoreCase(phType);
@@ -1087,7 +1110,6 @@ final class PptxRenderer {
             if (baseColor == 0) baseColor = styleFontColor;
             if (baseColor == 0) {
                 int tx1 = OoxmlUtil.resolveSchemeColor("tx1", ctx.theme, ctx.clrMap, 0);
-                // Ensure readable contrast against effective background if color wasn't specified explicitly
                 if (tx1 != 0 && Math.abs(OoxmlUtil.luminance(tx1) - bgLuma) > 0.25f) baseColor = tx1;
                 else baseColor = bgLuma < 0.45f ? Color.WHITE : 0xFF1A1D24;
             }
@@ -1098,6 +1120,8 @@ final class PptxRenderer {
 
             SpannableStringBuilder sb = new SpannableStringBuilder();
             float maxRunSize = baseFontPt;
+            float firstRunSize = 0f;
+            int firstRunColor = 0;
 
             // Collect runs (<a:r>, <a:br>, <a:fld>)
             for (Element ch : OoxmlUtil.children(pEl, null)) {
@@ -1118,6 +1142,7 @@ final class PptxRenderer {
                         float pt = OoxmlUtil.attrFloat(rPr, "sz", 0f) / 100f;
                         if (pt > 0f) rSize = pt * fontScale;
                     }
+                    if (firstRunSize <= 0f) firstRunSize = rSize;
                     if (rSize > maxRunSize) maxRunSize = rSize;
 
                     boolean rBold = rPr != null && OoxmlUtil.attr(rPr, "b") != null ? OoxmlUtil.attrBool(rPr, "b", baseBold) : baseBold;
@@ -1132,6 +1157,7 @@ final class PptxRenderer {
                         if (sf != null) rCol = OoxmlUtil.parseColorNode(sf, ctx.theme, ctx.clrMap, 0);
                     }
                     if (rCol == 0) rCol = baseColor;
+                    if (firstRunColor == 0) firstRunColor = rCol;
 
                     String rFont = baseFont;
                     if (rPr != null) {
@@ -1155,21 +1181,57 @@ final class PptxRenderer {
                 }
             }
 
-            // Prepend bullet or numbering if paragraph has text and bullets enabled
-            float leftPad = Math.max(0f, ls.marLPt);
-            if (sb.length() > 0 && !ls.bulletNone) {
-                String prefix = null;
-                if (ls.bulletAutoNum) {
-                    autoNumCounter[lvl]++;
-                    prefix = autoNumCounter[lvl] + ". ";
-                } else if (ls.bulletChar != null && !ls.bulletChar.isEmpty()) {
-                    prefix = normalizeBullet(ls.bulletChar) + " ";
+            // Empty paragraph height from endParaRPr if present
+            if (sb.length() == 0) {
+                Element endPr = OoxmlUtil.child(pEl, "endParaRPr");
+                if (endPr != null && OoxmlUtil.attr(endPr, "sz") != null) {
+                    float pt = OoxmlUtil.attrFloat(endPr, "sz", 0f) / 100f;
+                    if (pt > 0f) maxRunSize = pt * fontScale;
                 }
-                if (prefix != null) {
-                    sb.insert(0, prefix);
-                    sb.setSpan(new OoxmlUtil.ExactSizeSpan(baseFontPt), 0, prefix.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                    sb.setSpan(new ForegroundColorSpan(baseColor), 0, prefix.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                    if (ls.indentPt < 0f) leftPad = Math.max(0f, leftPad + ls.indentPt);
+            }
+
+            float refSize = firstRunSize > 0f ? firstRunSize : maxRunSize;
+            float leftPad = Math.max(0f, ls.marLPt);
+            float rightPad = Math.max(0f, ls.marRPt);
+
+            // Resolve bullet glyph, color, size, and hanging position
+            String bulletGlyph = null;
+            float bulletSize = refSize;
+            int bulletCol = ls.bulletColor != 0 ? ls.bulletColor : (firstRunColor != 0 ? firstRunColor : baseColor);
+            float bulletX = 0f;
+
+            if (sb.length() > 0 && !ls.bulletNone) {
+                if (ls.bulletAutoNum) {
+                    if (autoNumCounter[lvl] == 0) autoNumCounter[lvl] = ls.bulletStartAt;
+                    else autoNumCounter[lvl]++;
+                    for (int k = lvl + 1; k < autoNumCounter.length; k++) autoNumCounter[k] = 0;
+                    bulletGlyph = formatAutoNum(autoNumCounter[lvl], ls.bulletAutoType);
+                } else if (ls.bulletChar != null && !ls.bulletChar.isEmpty()) {
+                    bulletGlyph = OoxmlUtil.mapBulletChar(ls.bulletChar, ls.bulletFont);
+                }
+                if (bulletGlyph != null) {
+                    if (ls.bulletSzPt > 0f) bulletSize = ls.bulletSzPt * fontScale;
+                    else if (ls.bulletSzPct > 0f) bulletSize = refSize * ls.bulletSzPct;
+
+                    if (align == Layout.Alignment.ALIGN_NORMAL) {
+                        Paint bp = new Paint(Paint.ANTI_ALIAS_FLAG);
+                        bp.setTextSize(bulletSize);
+                        float bw = bp.measureText(bulletGlyph);
+                        if (ls.indentPt < 0f) {
+                            bulletX = Math.max(0f, leftPad + ls.indentPt);
+                            if (leftPad < bulletX + bw + 4f) leftPad = bulletX + bw + 4f;
+                        } else {
+                            bulletX = leftPad;
+                            leftPad = bulletX + bw + Math.max(4f, bulletSize * 0.35f);
+                        }
+                    } else {
+                        // Centered / right-aligned: keep bullet inline with text
+                        String inlinePrefix = bulletGlyph + " ";
+                        sb.insert(0, inlinePrefix);
+                        sb.setSpan(new OoxmlUtil.ExactSizeSpan(bulletSize), 0, inlinePrefix.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        sb.setSpan(new ForegroundColorSpan(bulletCol), 0, inlinePrefix.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        bulletGlyph = null;
+                    }
                 }
             } else if (sb.length() == 0) {
                 autoNumCounter[lvl] = 0;
@@ -1179,10 +1241,24 @@ final class PptxRenderer {
             pd.text = sb;
             pd.baseFontPt = maxRunSize;
             pd.align = align;
-            pd.leftPad = Math.min(availW * 0.45f, leftPad);
-            pd.spcBef = ls.spcBefPt >= 0f ? ls.spcBefPt : 0f;
-            pd.spcAft = ls.spcAftPt >= 0f ? ls.spcAftPt : (maxRunSize * 0.2f);
-            float lm = ls.lineMult > 0f ? ls.lineMult : 1.12f;
+            pd.justify = ls.justify;
+            pd.leftPad = Math.min(availW * 0.48f, leftPad);
+            pd.rightPad = Math.min(availW * 0.3f, rightPad);
+            pd.bulletGlyph = bulletGlyph;
+            pd.bulletX = Math.min(pd.leftPad, bulletX);
+            pd.bulletSize = bulletSize;
+            pd.bulletColor = bulletCol;
+
+            if (ls.spcBefPt >= 0f) pd.spcBef = ls.spcBefPt * fontScale;
+            else if (ls.spcBefPct >= 0f) pd.spcBef = refSize * ls.spcBefPct;
+            else pd.spcBef = 0f;
+
+            if (ls.spcAftPt >= 0f) pd.spcAft = ls.spcAftPt * fontScale;
+            else if (ls.spcAftPct >= 0f) pd.spcAft = refSize * ls.spcAftPct;
+            else pd.spcAft = 0f;
+
+            // Android StaticLayout's 1.0 line height already matches PowerPoint's 100% single spacing
+            float lm = ls.lineMult > 0f ? ls.lineMult : 1.0f;
             pd.lineMult = Math.max(0.85f, lm - lnSpcReduction);
             rendered.add(pd);
         }
@@ -1190,17 +1266,17 @@ final class PptxRenderer {
         if (!hasAnyText) return;
 
         // Build StaticLayouts; if wrap="none", allow extra horizontal room so single-line labels don't break awkwardly
-        float layoutWidth = noWrap ? Math.max(availW, ctx.pageW - boxRect.left - lIns) : availW;
+        float layoutWidth = noWrap ? Math.max(availW, ctx.pageW - boxRect.left - lIns - 4f) : availW;
         float totalH = measureParagraphs(rendered, layoutWidth);
 
         // Gentle uniform scale-to-fit ONLY if text overflows a bounded box; re-measure at expanded
         // width so centered/right-aligned paragraphs stay aligned across the full box width.
         float fitScale = 1f;
-        if (!spAutoFit && availH > 12f && totalH > availH * 1.04f) {
+        if (!spAutoFit && availH > 12f && totalH > availH) {
             fitScale = Math.max(0.62f, (float) Math.sqrt(availH / totalH));
             totalH = measureParagraphs(rendered, layoutWidth / fitScale);
-            if (totalH * fitScale > availH * 1.04f) {
-                fitScale = Math.max(0.55f, availH / totalH);
+            if (totalH * fitScale > availH) {
+                fitScale = Math.max(0.52f, availH / totalH);
                 totalH = measureParagraphs(rendered, layoutWidth / fitScale);
             }
         }
@@ -1214,18 +1290,22 @@ final class PptxRenderer {
         }
 
         cv.save();
-        if (fitScale < 0.999f) {
-            cv.translate(boxRect.left + lIns, startY);
-            cv.scale(fitScale, fitScale);
-        } else {
-            cv.translate(boxRect.left + lIns, startY);
-        }
+        cv.translate(boxRect.left + lIns, startY);
+        if (fitScale < 0.999f) cv.scale(fitScale, fitScale);
 
+        Paint bp = new Paint(Paint.ANTI_ALIAS_FLAG);
         float curY = 0f;
         for (int i = 0; i < rendered.size(); i++) {
             ParaDraw pd = rendered.get(i);
             if (i > 0) curY += pd.spcBef;
             if (pd.layout != null) {
+                if (pd.bulletGlyph != null && pd.layout.getLineCount() > 0) {
+                    bp.setColor(pd.bulletColor);
+                    bp.setTextSize(pd.bulletSize);
+                    bp.setTypeface(Typeface.SANS_SERIF);
+                    float baselineY = curY + pd.layout.getLineBaseline(0);
+                    cv.drawText(pd.bulletGlyph, pd.bulletX, baselineY, bp);
+                }
                 cv.save();
                 cv.translate(pd.leftPad, curY);
                 pd.layout.draw(cv);
@@ -1243,7 +1323,13 @@ final class PptxRenderer {
         SpannableStringBuilder text;
         float baseFontPt;
         Layout.Alignment align;
+        boolean justify;
         float leftPad;
+        float rightPad;
+        String bulletGlyph;
+        float bulletX;
+        float bulletSize;
+        int bulletColor;
         float spcBef, spcAft;
         float lineMult;
         StaticLayout layout;
@@ -1257,12 +1343,13 @@ final class PptxRenderer {
             if (i > 0) total += pd.spcBef;
             if (pd.text.length() > 0) {
                 tp.setTextSize(pd.baseFontPt);
-                int w = Math.max(16, Math.round(availW - pd.leftPad));
-                pd.layout = StaticLayout.Builder.obtain(pd.text, 0, pd.text.length(), tp, w)
+                int w = Math.max(16, Math.round(availW - pd.leftPad - pd.rightPad));
+                StaticLayout.Builder b = StaticLayout.Builder.obtain(pd.text, 0, pd.text.length(), tp, w)
                         .setAlignment(pd.align)
                         .setLineSpacing(0f, pd.lineMult)
-                        .setIncludePad(false)
-                        .build();
+                        .setIncludePad(false);
+                if (pd.justify) b.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD);
+                pd.layout = b.build();
                 total += pd.layout.getHeight();
             } else {
                 pd.layout = null;
@@ -1273,19 +1360,22 @@ final class PptxRenderer {
         return total;
     }
 
-    private static Element selectMasterTxStyle(MasterInfo master, String phType) {
+    private static Element selectMasterTxStyle(MasterInfo master, String phType, boolean hasPh) {
         if (master == null) return null;
         if ("title".equalsIgnoreCase(phType) || "ctrTitle".equalsIgnoreCase(phType)) return master.titleStyle;
-        if (phType != null && !phType.isEmpty()) return master.bodyStyle;
+        if (hasPh) return master.bodyStyle != null ? master.bodyStyle : master.otherStyle;
         return master.otherStyle != null ? master.otherStyle : master.bodyStyle;
     }
 
     private static LevelStyle resolveLevelStyle(List<Element> lstStyles, int lvl, Element pPr, SlideCtx ctx) {
         LevelStyle ls = new LevelStyle();
         String lvlTag = "lvl" + (lvl + 1) + "pPr";
+        // Apply default paragraph styles first (lowest priority), then level-specific styles across the cascade
         for (Element lst : lstStyles) {
             Element defPPr = OoxmlUtil.child(lst, "defPPr");
             if (defPPr != null) applyPPr(ls, defPPr, ctx);
+        }
+        for (Element lst : lstStyles) {
             Element lEl = OoxmlUtil.child(lst, lvlTag);
             if (lEl != null) applyPPr(ls, lEl, ctx);
         }
@@ -1295,31 +1385,63 @@ final class PptxRenderer {
 
     private static void applyPPr(LevelStyle ls, Element pPr, SlideCtx ctx) {
         String algn = OoxmlUtil.attr(pPr, "algn");
-        if ("ctr".equalsIgnoreCase(algn)) ls.align = Layout.Alignment.ALIGN_CENTER;
-        else if ("r".equalsIgnoreCase(algn)) ls.align = Layout.Alignment.ALIGN_OPPOSITE;
-        else if ("l".equalsIgnoreCase(algn) || "just".equalsIgnoreCase(algn)) ls.align = Layout.Alignment.ALIGN_NORMAL;
+        if ("ctr".equalsIgnoreCase(algn)) { ls.align = Layout.Alignment.ALIGN_CENTER; ls.justify = false; }
+        else if ("r".equalsIgnoreCase(algn)) { ls.align = Layout.Alignment.ALIGN_OPPOSITE; ls.justify = false; }
+        else if ("just".equalsIgnoreCase(algn) || "dist".equalsIgnoreCase(algn)) { ls.align = Layout.Alignment.ALIGN_NORMAL; ls.justify = true; }
+        else if ("l".equalsIgnoreCase(algn)) { ls.align = Layout.Alignment.ALIGN_NORMAL; ls.justify = false; }
 
         if (OoxmlUtil.attr(pPr, "marL") != null) ls.marLPt = OoxmlUtil.attrFloat(pPr, "marL", 0f) / EMU_PT;
+        if (OoxmlUtil.attr(pPr, "marR") != null) ls.marRPt = OoxmlUtil.attrFloat(pPr, "marR", 0f) / EMU_PT;
         if (OoxmlUtil.attr(pPr, "indent") != null) ls.indentPt = OoxmlUtil.attrFloat(pPr, "indent", 0f) / EMU_PT;
 
         Element spcBef = OoxmlUtil.child(pPr, "spcBef");
         if (spcBef != null) {
-            float v = parseSpacingPt(spcBef, ls.fontSizePt > 0 ? ls.fontSizePt : 18f);
-            if (v >= 0f) ls.spcBefPt = v;
+            Element pts = OoxmlUtil.child(spcBef, "spcPts");
+            Element pct = OoxmlUtil.child(spcBef, "spcPct");
+            if (pts != null) { ls.spcBefPt = Math.max(0f, OoxmlUtil.attrFloat(pts, "val", 0f) / 100f); ls.spcBefPct = -1f; }
+            else if (pct != null) { ls.spcBefPct = Math.max(0f, OoxmlUtil.attrFloat(pct, "val", 0f) / 100000f); ls.spcBefPt = -1f; }
         }
         Element spcAft = OoxmlUtil.child(pPr, "spcAft");
         if (spcAft != null) {
-            float v = parseSpacingPt(spcAft, ls.fontSizePt > 0 ? ls.fontSizePt : 18f);
-            if (v >= 0f) ls.spcAftPt = v;
+            Element pts = OoxmlUtil.child(spcAft, "spcPts");
+            Element pct = OoxmlUtil.child(spcAft, "spcPct");
+            if (pts != null) { ls.spcAftPt = Math.max(0f, OoxmlUtil.attrFloat(pts, "val", 0f) / 100f); ls.spcAftPct = -1f; }
+            else if (pct != null) { ls.spcAftPct = Math.max(0f, OoxmlUtil.attrFloat(pct, "val", 0f) / 100000f); ls.spcAftPt = -1f; }
         }
         Element lnSpc = OoxmlUtil.child(pPr, "lnSpc");
         if (lnSpc != null) {
             Element pct = OoxmlUtil.child(lnSpc, "spcPct");
             if (pct != null) {
-                float m = OoxmlUtil.attrFloat(pct, "val", 112000f) / 100000f;
+                float m = OoxmlUtil.attrFloat(pct, "val", 100000f) / 100000f;
                 if (m > 0.5f && m < 4f) ls.lineMult = m;
             }
         }
+
+        Element buFont = OoxmlUtil.child(pPr, "buFont");
+        if (buFont != null) {
+            String tf = OoxmlUtil.attr(buFont, "typeface");
+            if (tf != null && !tf.isEmpty()) ls.bulletFont = tf;
+        }
+        if (OoxmlUtil.child(pPr, "buFontTx") != null) ls.bulletFont = null;
+
+        Element buClr = OoxmlUtil.child(pPr, "buClr");
+        if (buClr != null) {
+            int bc = OoxmlUtil.parseColorNode(buClr, ctx.theme, ctx.clrMap, 0);
+            if (bc != 0) ls.bulletColor = bc;
+        }
+        if (OoxmlUtil.child(pPr, "buClrTx") != null) ls.bulletColor = 0;
+
+        Element buSzPct = OoxmlUtil.child(pPr, "buSzPct");
+        if (buSzPct != null) {
+            float p = OoxmlUtil.attrFloat(buSzPct, "val", 100000f) / 100000f;
+            if (p >= 0.25f && p <= 4f) { ls.bulletSzPct = p; ls.bulletSzPt = 0f; }
+        }
+        Element buSzPts = OoxmlUtil.child(pPr, "buSzPts");
+        if (buSzPts != null) {
+            float pt = OoxmlUtil.attrFloat(buSzPts, "val", 0f) / 100f;
+            if (pt > 0f) { ls.bulletSzPt = pt; ls.bulletSzPct = 0f; }
+        }
+        if (OoxmlUtil.child(pPr, "buSzTx") != null) { ls.bulletSzPct = 0f; ls.bulletSzPt = 0f; }
 
         if (OoxmlUtil.child(pPr, "buNone") != null) {
             ls.bulletNone = true;
@@ -1332,9 +1454,13 @@ final class PptxRenderer {
                 ls.bulletAutoNum = false;
                 ls.bulletChar = OoxmlUtil.attr(buChar, "char");
             }
-            if (OoxmlUtil.child(pPr, "buAutoNum") != null) {
+            Element buAuto = OoxmlUtil.child(pPr, "buAutoNum");
+            if (buAuto != null) {
                 ls.bulletNone = false;
                 ls.bulletAutoNum = true;
+                String t = OoxmlUtil.attr(buAuto, "type");
+                if (t != null && !t.isEmpty()) ls.bulletAutoType = t;
+                ls.bulletStartAt = Math.max(1, OoxmlUtil.attrInt(buAuto, "startAt", 1));
             }
         }
 
@@ -1354,12 +1480,31 @@ final class PptxRenderer {
         }
     }
 
-    private static float parseSpacingPt(Element spcEl, float refFontPt) {
-        Element pts = OoxmlUtil.child(spcEl, "spcPts");
-        if (pts != null) return Math.max(0f, OoxmlUtil.attrFloat(pts, "val", 0f) / 100f);
-        Element pct = OoxmlUtil.child(spcEl, "spcPct");
-        if (pct != null) return Math.max(0f, refFontPt * (OoxmlUtil.attrFloat(pct, "val", 0f) / 100000f));
-        return -1f;
+    private static String formatAutoNum(int n, String type) {
+        if (type == null) return n + ".";
+        String t = type.toLowerCase(Locale.US);
+        String val;
+        if (t.startsWith("alphalc")) val = String.valueOf((char) ('a' + ((Math.max(1, n) - 1) % 26)));
+        else if (t.startsWith("alphauc")) val = String.valueOf((char) ('A' + ((Math.max(1, n) - 1) % 26)));
+        else if (t.startsWith("romanlc")) val = toRoman(n).toLowerCase(Locale.US);
+        else if (t.startsWith("romanuc")) val = toRoman(n);
+        else val = String.valueOf(n);
+
+        if (t.contains("parenboth")) return "(" + val + ")";
+        if (t.contains("parenr")) return val + ")";
+        if (t.contains("plain")) return val;
+        return val + ".";
+    }
+
+    private static String toRoman(int n) {
+        if (n <= 0 || n >= 4000) return String.valueOf(n);
+        int[] vals = {1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1};
+        String[] syms = {"M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"};
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < vals.length; i++) {
+            while (n >= vals[i]) { sb.append(syms[i]); n -= vals[i]; }
+        }
+        return sb.toString();
     }
 
     private static String extractFontName(Element rPr, OoxmlUtil.Theme theme) {
@@ -1371,15 +1516,6 @@ final class PptxRenderer {
         if (tf.startsWith("+mj")) return theme != null ? theme.majorFont : "Calibri Light";
         if (tf.startsWith("+mn")) return theme != null ? theme.minorFont : "Calibri";
         return tf;
-    }
-
-    private static String normalizeBullet(String ch) {
-        if (ch == null || ch.isEmpty()) return "•";
-        char c = ch.charAt(0);
-        // Replace Private Use Area Wingdings/Symbol glyphs with clean Unicode bullets
-        if (c >= 0xF000 || c == '\u00A7' || c == '\u006E') return "•";
-        if (c == 'o' || c == '○') return "◦";
-        return ch;
     }
 
     private static float resolveBodyInset(Element s, Element l, Element m, String attr, float defPt) {

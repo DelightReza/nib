@@ -184,6 +184,8 @@ final class DocxRenderer {
         String lvlText = "•";
         int start = 1;
         float indLeftPt = 24f;
+        float hangingPt = 14f;
+        String bulletFont;
     }
 
     // ---- Flow Blocks -------------------------------------------------------------------------
@@ -576,8 +578,16 @@ final class DocxRenderer {
                 if (ind != null) {
                     float left = OoxmlUtil.attrFloat(ind, "left", 0f) / TWIPS_PT;
                     if (left > 0f) nl.indLeftPt = Math.min(180f, left);
+                    float hang = OoxmlUtil.attrFloat(ind, "hanging", 0f) / TWIPS_PT;
+                    if (hang > 0f) nl.hangingPt = Math.min(48f, hang);
                 } else {
                     nl.indLeftPt = 18f + ilvl * 18f;
+                }
+                Element lvlRFonts = OoxmlUtil.child(OoxmlUtil.child(lvl, "rPr"), "rFonts");
+                if (lvlRFonts != null) {
+                    String bf = OoxmlUtil.attr(lvlRFonts, "ascii");
+                    if (bf == null) bf = OoxmlUtil.attr(lvlRFonts, "hAnsi");
+                    nl.bulletFont = bf;
                 }
                 lvls.put(ilvl, nl);
             }
@@ -606,18 +616,21 @@ final class DocxRenderer {
                 ps.align = Layout.Alignment.ALIGN_NORMAL;
             }
         }
+        if (jc == null && OoxmlUtil.child(pPr, "bidi") != null && OoxmlUtil.isWordToggleOn(OoxmlUtil.child(pPr, "bidi"))) {
+            ps.align = Layout.Alignment.ALIGN_OPPOSITE;
+        }
         Element spc = OoxmlUtil.child(pPr, "spacing");
         if (spc != null) {
             if (OoxmlUtil.attr(spc, "before") != null) ps.spaceBeforePt = Math.max(0f, OoxmlUtil.attrFloat(spc, "before", 0f) / TWIPS_PT);
             if (OoxmlUtil.attr(spc, "after") != null) ps.spaceAfterPt = Math.max(0f, OoxmlUtil.attrFloat(spc, "after", 0f) / TWIPS_PT);
             if (OoxmlUtil.attr(spc, "line") != null) {
-                float line = OoxmlUtil.attrFloat(spc, "line", 276f);
+                float line = OoxmlUtil.attrFloat(spc, "line", 240f);
                 String rule = OoxmlUtil.attr(spc, "lineRule");
                 if ("exact".equalsIgnoreCase(rule) || "atLeast".equalsIgnoreCase(rule)) {
                     ps.lineExactPt = Math.max(8f, line / TWIPS_PT);
                 } else {
                     float mult = line / 240f;
-                    if (mult >= 0.8f && mult <= 3.5f) ps.lineMult = mult;
+                    if (mult >= 0.8f && mult <= 3.5f) ps.lineMult = Math.max(0.92f, mult * 0.92f);
                 }
             }
         }
@@ -677,8 +690,10 @@ final class DocxRenderer {
         RunStyle rs = new RunStyle();
         if (rPr == null) return rs;
         Element b = OoxmlUtil.child(rPr, "b");
+        if (b == null) b = OoxmlUtil.child(rPr, "bCs");
         if (b != null) rs.bold = OoxmlUtil.isWordToggleOn(b);
         Element i = OoxmlUtil.child(rPr, "i");
+        if (i == null) i = OoxmlUtil.child(rPr, "iCs");
         if (i != null) rs.italic = OoxmlUtil.isWordToggleOn(i);
         Element u = OoxmlUtil.child(rPr, "u");
         if (u != null) rs.underline = OoxmlUtil.isWordToggleOn(u);
@@ -690,6 +705,7 @@ final class DocxRenderer {
         if (va != null) rs.vertAlign = OoxmlUtil.attr(va, "val");
 
         Element sz = OoxmlUtil.child(rPr, "sz");
+        if (sz == null) sz = OoxmlUtil.child(rPr, "szCs");
         if (sz != null) {
             float hp = OoxmlUtil.attrFloat(sz, "val", 0f);
             if (hp > 0f) rs.fontSizePt = hp / 2f;
@@ -1033,6 +1049,9 @@ final class DocxRenderer {
         if (nl == null) return "• ";
         if ("none".equalsIgnoreCase(nl.numFmt)) return "";
         if ("bullet".equalsIgnoreCase(nl.numFmt)) {
+            if (nl.lvlText != null && !nl.lvlText.isEmpty()) {
+                return OoxmlUtil.mapBulletChar(nl.lvlText, nl.bulletFont) + " ";
+            }
             if (ilvl == 1) return "◦ ";
             if (ilvl >= 2) return "▪ ";
             return "• ";
