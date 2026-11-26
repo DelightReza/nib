@@ -54,6 +54,7 @@ final class Engine implements Choreographer.FrameCallback {
         float spacing = 1f, strength = 1f; // current page's look
         int lineColor, margins;
         float z;        // screen px per page unit
+        float pageAspect = Notebook.PH / PW;
         String title;
         boolean zoomLocked, viewKnown;
         // where the view is, to reopen the notebook there: page at the top of the screen, how far down it (× its height),
@@ -96,6 +97,8 @@ final class Engine implements Choreographer.FrameCallback {
                                     float[] handleScreen, int[] handleIds, float[] boxCornersScreen) {}
         /** Zoom (% of fit-width) while pinching; a few times a second at most. */
         default void onZoom(int pct) {}
+        /** Current camera viewport + page bounds for the temporary visual grid overlay. */
+        default void onViewport(float ox, float oy, float z, boolean canvas, float[] tops, float[] heights) {}
     }
 
     private final HandlerThread thread = new HandlerThread("nib-ink");
@@ -128,6 +131,56 @@ final class Engine implements Choreographer.FrameCallback {
     private int deskColor = 0xffe7e9ee, predMode;
     private float shadow = 0.10f;
     private String frontWhy = "";
+
+    // temporary visual grid overlay + optional snapping (never persisted to pages or exports)
+    private volatile GridOverlay.Config gridConfig;
+    private float vpOx = Float.NaN, vpOy, vpZ;
+    private boolean vpCanvas;
+    private int vpPages = -1;
+    private final float[] snapTmp = new float[2];
+
+    void setGridConfig(GridOverlay.Config cfg) {
+        gridConfig = cfg == null ? null : cfg.copy();
+        h.post(() -> {
+            if (gridConfig != null && gridConfig.enabled) postViewport(true);
+        });
+    }
+
+    private void postViewport(boolean force) {
+        GridOverlay.Config gc = gridConfig;
+        if (gc == null || !gc.enabled || book == null || tops == null) return;
+        boolean cv = canvas();
+        int n = book.pages.size();
+        if (!force && ox == vpOx && oy == vpOy && z == vpZ && cv == vpCanvas && n == vpPages) return;
+        vpOx = ox;
+        vpOy = oy;
+        vpZ = z;
+        vpCanvas = cv;
+        vpPages = n;
+        final float fox = ox, foy = oy, fz = z;
+        final boolean fcv = cv;
+        final float[] ft = tops.clone();
+        final float[] fh = new float[n];
+        for (int i = 0; i < n; i++) fh[i] = book.pages.get(i).h;
+        main.post(() -> listener.onViewport(fox, foy, fz, fcv, ft, fh));
+    }
+
+    private boolean gridSnapActive() {
+        GridOverlay.Config gc = gridConfig;
+        return gc != null && gc.enabled && gc.snapEnabled;
+    }
+
+    private void snapGrid(int pageIdx, float x, float y, float[] out) {
+        GridOverlay.Config gc = gridConfig;
+        if (gc == null || !gc.enabled || !gc.snapEnabled) {
+            out[0] = x;
+            out[1] = y;
+            return;
+        }
+        float ph = (book != null && pageIdx >= 0 && pageIdx < book.pages.size())
+                ? book.pages.get(pageIdx).h : Notebook.PH;
+        GridOverlay.snapPoint(gc, PW, ph, x, y, out);
+    }
 
     // tools (engine thread)
     private int tool = TOOL_PEN;
@@ -1376,6 +1429,7 @@ final class Engine implements Choreographer.FrameCallback {
             y += book.pages.get(i).h + GAP;
         }
         docH = y - GAP;
+        postViewport(true);
     }
 
     private int pageAt(float docY) {
@@ -1501,6 +1555,7 @@ final class Engine implements Choreographer.FrameCallback {
             if (laser) drawLaser();
             if (taping) drawTapeDraft();
             gl.swap();
+            postViewport(false);
             setFront(gl.isFront(), dragging() ? "moving selection" : flinging ? "fling" : "pan/zoom");
             checkPage();
             if (dragging() || hasSel()) postSelection();
@@ -2164,6 +2219,7 @@ final class Engine implements Choreographer.FrameCallback {
         needCache = false;
         cacheOx = ox; cacheOy = oy; cacheZ = z; cacheW = W; cacheH = H;
         present();
+        postViewport(false);
     }
 
     // ---- without front-buffer ink (a GPU that lacks it, or a system that won't switch to it) -----------------------
@@ -3060,6 +3116,13 @@ final class Engine implements Choreographer.FrameCallback {
             }
         }
         float x = ox + sx / z, y = oy + sy / z - liveTop;
+        if (gridSnapActive() && rulerEdge == 0 && book != null
+                && livePage >= 0 && livePage < book.pages.size()
+                && book.pages.get(livePage).pdf >= 0) {
+            snapGrid(livePage, x, y, snapTmp);
+            x = snapTmp[0];
+            y = snapTmp[1];
+        }
         if (live.n > 0) {
             float dx = x - live.x(live.n - 1), dy = y - live.y(live.n - 1), min = 0.35f / z;
             if (dx * dx + dy * dy < min * min) return;
@@ -3750,6 +3813,11 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void shapeDrag(float sx, float sy) {
         float px = ox + sx / z, py = oy + sy / z - tops[selPage];
+        if (shapeBox < 0 && gridSnapActive()) {
+            snapGrid(selPage, px, py, snapTmp);
+            px = snapTmp[0];
+            py = snapTmp[1];
+        }
         Stroke o = shapeOrig;
         float pr = o.n > 0 ? o.p[2] : 0.5f;
         float[] pts;
@@ -3824,8 +3892,14 @@ final class Engine implements Choreographer.FrameCallback {
         }
         shPage = pageAt(docY);
         float top = tops[shPage];
-        shX0 = shX1 = docX;
-        shY0 = shY1 = docY - top;
+        float px0 = docX, py0 = docY - top;
+        if (gridSnapActive()) {
+            snapGrid(shPage, px0, py0, snapTmp);
+            px0 = snapTmp[0];
+            py0 = snapTmp[1];
+        }
+        shX0 = shX1 = px0;
+        shY0 = shY1 = py0;
         freeN = 0;
         if (ShapeSpec.KIND_FREEFORM.equals(shapeSpec.kind)) {
             freeAdd(shX0, shY0);
@@ -3856,11 +3930,24 @@ final class Engine implements Choreographer.FrameCallback {
             if (!shMoved && Math.hypot(ev.getX() - shDownSx, ev.getY() - shDownSy) > dp(6)) shMoved = true;
             if (ShapeSpec.KIND_FREEFORM.equals(shapeSpec.kind)) {
                 int hs = ev.getHistorySize();
-                for (int i = 0; i < hs; i++) freeAdd(ox + ev.getHistoricalX(i) / z, oy + ev.getHistoricalY(i) / z - top);
-                freeAdd(ox + ev.getX() / z, oy + ev.getY() / z - top);
+                boolean snap = gridSnapActive();
+                for (int i = 0; i < hs; i++) {
+                    float fx = ox + ev.getHistoricalX(i) / z, fy = oy + ev.getHistoricalY(i) / z - top;
+                    if (snap) { snapGrid(shPage, fx, fy, snapTmp); fx = snapTmp[0]; fy = snapTmp[1]; }
+                    freeAdd(fx, fy);
+                }
+                float fx = ox + ev.getX() / z, fy = oy + ev.getY() / z - top;
+                if (snap) { snapGrid(shPage, fx, fy, snapTmp); fx = snapTmp[0]; fy = snapTmp[1]; }
+                freeAdd(fx, fy);
             }
-            shX1 = ox + ev.getX() / z;
-            shY1 = oy + ev.getY() / z - top;
+            float px1 = ox + ev.getX() / z, py1 = oy + ev.getY() / z - top;
+            if (gridSnapActive()) {
+                snapGrid(shPage, px1, py1, snapTmp);
+                px1 = snapTmp[0];
+                py1 = snapTmp[1];
+            }
+            shX1 = px1;
+            shY1 = py1;
         }
         if (a == MotionEvent.ACTION_CANCEL) {
             gest = G_NONE;
@@ -4034,6 +4121,11 @@ final class Engine implements Choreographer.FrameCallback {
             Notebook.Page p = book.pages.get(selPage);
             if (a == MotionEvent.ACTION_MOVE) {
                 float px = ox + ev.getX() / z, py = oy + ev.getY() / z - tops[selPage];
+                if (itemShapeHandle != ShapeSpec.HANDLE_ROTATE && gridSnapActive()) {
+                    snapGrid(selPage, px, py, snapTmp);
+                    px = snapTmp[0];
+                    py = snapTmp[1];
+                }
                 liveEditShape = ShapeSpec.dragHandle(itemShapeOrig, itemShapeHandle, px, py, shapeLockCircle);
                 postSelection();
             } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
@@ -4091,8 +4183,14 @@ final class Engine implements Choreographer.FrameCallback {
                 float w0 = Math.max(4, selBounds.width()), h0 = Math.max(4, selBounds.height());
                 ss = Math.max(0.15f, Math.min(8f, Math.max((w0 + dx) / w0, (h0 + dy) / h0)));
             } else {
-                stx = dx;
-                sty = dy;
+                if (gridSnapActive()) {
+                    snapGrid(selPage, selBounds.left + dx, selBounds.top + dy, snapTmp);
+                    stx = snapTmp[0] - selBounds.left;
+                    sty = snapTmp[1] - selBounds.top;
+                } else {
+                    stx = dx;
+                    sty = dy;
+                }
             }
             requestFrame();
         } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
@@ -4167,8 +4265,15 @@ final class Engine implements Choreographer.FrameCallback {
             needCache = true;
             requestFrame();
         } else {
-            e.docX = canvas() ? x : Math.max(0, Math.min(PW - 60, x));
-            e.docY = canvas() ? py - textSize * 0.6f : Math.max(0, py - textSize * 0.6f);
+            float nx = canvas() ? x : Math.max(0, Math.min(PW - 60, x));
+            float ny = canvas() ? py - textSize * 0.6f : Math.max(0, py - textSize * 0.6f);
+            if (gridSnapActive()) {
+                snapGrid(pg, nx, ny, snapTmp);
+                nx = canvas() ? snapTmp[0] : Math.max(0, Math.min(PW - 60, snapTmp[0]));
+                ny = canvas() ? snapTmp[1] : Math.max(0, snapTmp[1]);
+            }
+            e.docX = nx;
+            e.docY = ny;
             e.width = canvas() ? 640 : Math.max(120, Math.min(640, PW - e.docX - 30));
             e.size = textSize;
             e.color = textColor != 0 ? textColor : penColor;
@@ -4592,6 +4697,7 @@ final class Engine implements Choreographer.FrameCallback {
             s.viewKnown = true;
         }
         s.z = z;
+        s.pageAspect = cp.h / PW;
         s.paper = book.paper;
         s.canvas = book.canvas;
         s.title = book.title;

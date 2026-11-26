@@ -107,7 +107,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private Ui.IconButton undoB, redoB, addPageB, pagesB, bookmarkB;
     private LinearLayout favRow;
     private Ruler ruler;
-    private Ui.ToolDisc rulerB, fingerB, moreToolsB;
+    private Ui.ToolDisc rulerB, gridB, fingerB, moreToolsB;
     private Ui.IconButton imgB;
     private int drawScale; // 1:N for this notebook; 0 = none
     private View favSep;
@@ -384,6 +384,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         final File dir;
         Engine engine;      // created when the tab is first shown (hidden tabs cost only their title)
         InkView ink;
+        GridOverlay.OverlayView gridView;
+        GridOverlay.Config gridCfg;
         SelectionView sel;
         Engine.State state;
         int scale;
@@ -409,6 +411,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             ink = new InkView(EditorActivity.this, engine);
             ink.penListener = EditorActivity.this::onPen;
             ink.rateKeeper = rateKeeper;
+            gridCfg = GridOverlay.Config.load(prefs, dir.getName());
+            gridView = new GridOverlay.OverlayView(EditorActivity.this);
+            gridView.setConfig(gridCfg);
+            engine.setGridConfig(gridCfg);
             sel = new SelectionView(EditorActivity.this);
             scale = prefs.getInt("scale:" + dir.getName(), 0);
         }
@@ -433,6 +439,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
         @Override public void onHaptic() { root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); }
         @Override public void onZoom(int pct) { if (on()) showZoomChip(pct, state != null && state.zoomLocked); }
+        @Override public void onViewport(float ox, float oy, float z, boolean canvas, float[] tops, float[] heights) {
+            if (gridView != null) gridView.updateViewport(ox, oy, z, canvas, tops, heights);
+        }
     }
 
     // ---- where each notebook was left: page, scroll, zoom and zoom lock (prefs "view:<folder>") -----------------------
@@ -566,9 +575,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             for (int i = getChildCount() - 1; i >= 0; i--) if (getChildAt(i) != bar) removeViewAt(i);
             if (d == null) return;
             d.ensure();
-            for (View v : new View[]{d.ink, d.sel}) if (v.getParent() != null) ((ViewGroup) v.getParent()).removeView(v);
+            for (View v : new View[]{d.ink, d.gridView, d.sel}) if (v != null && v.getParent() != null) ((ViewGroup) v.getParent()).removeView(v);
             addView(d.ink, 0, new FrameLayout.LayoutParams(-1, -1));
-            addView(d.sel, 1, new FrameLayout.LayoutParams(-1, -1));
+            addView(d.gridView, 1, new FrameLayout.LayoutParams(-1, -1));
+            addView(d.sel, 2, new FrameLayout.LayoutParams(-1, -1));
         }
     }
 
@@ -655,6 +665,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (penB != null) applyTool();
         if (state != null && undoB != null) onState(state);
         if (ruler != null) { ruler.invalidate(); rulerChanged(); }
+        if (gridB != null && d.gridCfg != null) gridB.set(d.gridCfg.enabled, 0, 0);
         updatePaneBars();
         renderTabs();
         saveTabs();
@@ -1124,6 +1135,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 if (d.engine != null) d.engine.setCover(cv);
             });
         }));
+        p.add(Ui.actionRow(this, R.drawable.ic_grid, "Grid settings",
+                cur != null && cur.gridCfg != null ? cur.gridCfg.summary() : "Off · tap to configure",
+                v -> { pop.dismiss(); showGridSettings(anchor, false); }));
         p.add(Ui.actionRow(this, R.drawable.ic_ruler, "Drawing scale", drawScale > 0 ? "1:" + drawScale + " · the ruler measures real lengths" : "None · the ruler measures the paper",
                 v -> { pop.dismiss(); showScale(anchor); }));
         p.add(Ui.actionRow(this, R.drawable.ic_share, "Export & share", "PDF, image or .nib", v -> { pop.dismiss(); showShare(anchor); }));
@@ -1178,6 +1192,12 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         rulerB.setOnClickListener(v -> { toggleRuler(); if (inShelf(v)) shelfUsed(); });
         rulerB.setTooltipText("Ruler");
         advRow.addView(rulerB);
+        gridB = new Ui.ToolDisc(this, R.drawable.ic_grid, "Grid", false);
+        gridB.setOnClickListener(v -> { toggleGrid(); if (inShelf(v)) shelfUsed(); });
+        gridB.setOnLongClickListener(v -> { showGridSettings(shelfAnchor(v), true); return true; });
+        gridB.setTooltipText("Grid · long-press for settings");
+        if (cur != null && cur.gridCfg != null) gridB.set(cur.gridCfg.enabled, 0, 0);
+        advRow.addView(gridB);
         fingerB = new Ui.ToolDisc(this, R.drawable.ic_touch, "Write with finger", false);
         fingerB.setTooltipText("Write with finger");
         fingerB.setOnClickListener(v -> { toggleFinger(); if (inShelf(v)) shelfUsed(); });
@@ -1290,7 +1310,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         shapeToolbar.setSelectedKind(drawPrefs.shapeKind);
         shapeToolbar.container.setVisibility(View.GONE);
         root.addView(shapeToolbar.container, new FrameLayout.LayoutParams(-2, Ui.dp(this, 48), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
-        View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, fingerB, beaut, toText, layersB};
+        View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, gridB, fingerB, beaut, toText, layersB};
         System.arraycopy(tv, 0, toolViews, 0, tv.length);
         for (View v : new View[]{imgB, rulerB, fingerB, beaut, toText, layersB}) v.setOnLongClickListener(this::showMoveMenu);
         applyToolLayout();
@@ -1430,9 +1450,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     // ---- which tools sit in the bar and which on the shelf: the owner's choice (long-press a tool → Move …) -------
 
     /** Every movable button in one fixed order; each side shows its own in this order. */
-    private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "finger", "beautify", "totext", "layers"};
+    private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "grid", "finger", "beautify", "totext", "layers"};
     private static final String[] TOOL_NAMES = {"Pen", "Highlighter", "Eraser", "Lasso", "Text", "Shapes", "Tape", "Laser pointer", "Image or sticker",
-            "Ruler", "Write with finger", "Beautify", "Handwriting to text", "Layers"};
+            "Ruler", "Grid", "Write with finger", "Beautify", "Handwriting to text", "Layers"};
     private static final String BASIC_DEFAULT = "pen,hl,eraser,lasso,shape";
     private final View[] toolViews = new View[TOOL_IDS.length];
     private final java.util.HashSet<String> basicIds = new java.util.HashSet<>();
@@ -2604,6 +2624,52 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         rulerB.set(on, 0, 0);
         rulerChanged();
         if (on) toast("Drag with one finger, turn with two · draw along an edge for straight lines");
+    }
+
+    // ---- temporary visual grid overlay + per-notebook/PDF settings ---------------------------
+
+    private void toggleGrid() {
+        if (cur == null) return;
+        cur.ensure();
+        cur.gridCfg.enabled = !cur.gridCfg.enabled;
+        applyDocGrid(cur);
+        toast(cur.gridCfg.enabled ? "Grid on · long-press for Grid settings" : "Grid off");
+    }
+
+    private void applyDocGrid(Doc d) {
+        if (d == null || d.gridCfg == null) return;
+        d.gridCfg.save(prefs, d.dir.getName());
+        if (d.gridView != null) d.gridView.setConfig(d.gridCfg);
+        if (d.engine != null) d.engine.setGridConfig(d.gridCfg);
+        if (d == cur && gridB != null) gridB.set(d.gridCfg.enabled, 0, 0);
+    }
+
+    private void showGridSettings(View anchor, boolean fromToolButton) {
+        if (cur == null) return;
+        cur.ensure();
+        if (pop != null) pop.dismiss();
+        final Doc target = cur;
+        float aspect = state != null && state.pageAspect > 0f ? state.pageAspect : (Notebook.PH / Notebook.PW);
+        int paperIdx = state != null ? Math.max(0, Math.min(2, state.paper)) : 0;
+        int paperBg = Render.PAPER[paperIdx][0];
+        if (fromToolButton) moveRowFor = gridB;
+        pop = GridSettingsPanel.show(this, anchor, target.gridCfg, aspect, paperBg, target.title, new GridSettingsPanel.Host() {
+            @Override public void onGridChanged(GridOverlay.Config cfg) {
+                target.gridCfg = cfg;
+                applyDocGrid(target);
+            }
+            @Override public void onGridReset(GridOverlay.Config cfg) {
+                target.gridCfg = cfg;
+                applyDocGrid(target);
+                toast("Grid settings reset for " + (target.title != null && !target.title.isEmpty() ? target.title : "this document"));
+            }
+            @Override public int[] paletteSlots() {
+                return drawPrefs != null ? drawPrefs.slots : null;
+            }
+            @Override public void onAddMoveRow(Ui.Popover p) {
+                if (fromToolButton) addMoveRow(p);
+            }
+        });
     }
 
     @Override public void rulerChanged() {
