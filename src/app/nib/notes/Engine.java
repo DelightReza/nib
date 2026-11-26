@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit;
  * added; full-scene changes (scroll, zoom, selection drags) temporarily use normal buffering.
  */
 final class Engine implements Choreographer.FrameCallback {
-    static final float PW = Notebook.PW, GAP = 0f; // continuous pages: each one starts where the last ends
+    static final float PW = Notebook.PW, GAP = 24f; // subtle desk gap between pages so page breaks are clearly visible
     static final int TOOL_PEN = 0, TOOL_HL = 1, TOOL_ERASER = 2, TOOL_LASSO = 3, TOOL_TEXT = 4, TOOL_LASER = 5, TOOL_TAPE = 6;
     /** Writes like the pen, but each stroke becomes a clean shape when the pen lifts (or sooner if it pauses). */
     static final int TOOL_SHAPE = 7;
@@ -56,6 +56,7 @@ final class Engine implements Choreographer.FrameCallback {
         float z;        // screen px per page unit
         float pageH = Notebook.PH;
         float pageAspect = Notebook.PH / PW;
+        float[] pageAspects = new float[0];
         String bgImage;
         String title;
         boolean zoomLocked, viewKnown;
@@ -1578,9 +1579,10 @@ final class Engine implements Choreographer.FrameCallback {
     private void drawCover() {
         if (!coverOn() || oy >= 0) return;
         final String cv = book.cover, title = book.title;
+        float coverY = -Notebook.PH - GAP;
         Tex t = tex("cover:" + cv + ":" + title.hashCode(), () -> Covers.bitmap(app, cv, title, 1200));
-        if (t != null) gl.tex(t.id, 0, -Notebook.PH, PW, Notebook.PH, 1);
-        else gl.page(0, -Notebook.PH, PW, Notebook.PH, 0, -Notebook.PH, Notebook.BG_BLANK, true, false); // until it's ready
+        if (t != null) gl.tex(t.id, 0, coverY, PW, Notebook.PH, 1);
+        else gl.page(0, coverY, PW, Notebook.PH, 0, coverY, Notebook.BG_BLANK, true, false); // until it's ready
     }
 
     private float minZ() { return fitZ * (canvas() ? 0.1f : 0.45f); }
@@ -1591,7 +1593,7 @@ final class Engine implements Choreographer.FrameCallback {
         float vw = W / z, vh = H / z;
         if (PW * z <= W) ox = (PW - vw) / 2;
         else ox = Math.max(-sidePad / z, Math.min(PW - vw + sidePad / z, ox));
-        float minY = -topPad / z - (coverOn() ? Notebook.PH : 0), maxY = docH - vh + botPad / z; // the cover sits above page 1
+        float minY = -topPad / z - (coverOn() ? Notebook.PH + GAP : 0), maxY = docH - vh + botPad / z; // the cover sits above page 1
         if (maxY < minY) maxY = minY;
         oy = Math.max(minY, Math.min(maxY, oy));
     }
@@ -2030,7 +2032,7 @@ final class Engine implements Choreographer.FrameCallback {
             int drawBg = (p.pdf >= 0 || hasCustomBg) ? Notebook.BG_BLANK : p.bg;
             gl.setLook(p.spacing, p.strength, p.lineColor, (canvas() || hasCustomBg) ? 0 : p.margins);
             if (canvas()) gl.page(ox, oy, W / z, H / z, 0, 0, drawBg, true, false); // paper everywhere you look
-            else gl.page(0, tops[i], PW, p.h, 0, tops[i], drawBg, true, i > 0);
+            else gl.page(0, tops[i], PW, p.h, 0, tops[i], drawBg, true, false);
             if (!hasCustomBg && p.bg == Notebook.BG_SITE && p.pdf < 0 && !canvas()) { // printed labels of the inspection form
                 final int pap = book.paper;
                 final float ph = p.h;
@@ -2088,10 +2090,18 @@ final class Engine implements Choreographer.FrameCallback {
             }
         }
         // the notebook never ends on screen: paper continues below the last page (it becomes real when written on)
-        if (!canvas() && !book.pages.isEmpty() && docH < oy + H / z) {
+        if (!canvas() && !book.pages.isEmpty() && docH + GAP < oy + H / z) {
             Notebook.Page lastP = book.pages.get(book.pages.size() - 1);
-            gl.setLook(lastP.spacing, lastP.strength, lastP.lineColor, lastP.margins);
-            gl.page(0, docH, PW, Notebook.PH, 0, docH, lastP.pdf >= 0 ? Notebook.BG_LINED : lastP.bg, true, true);
+            float ghostY = docH + GAP;
+            float ghostH = lastP.pdf < 0 && lastP.h > 100f ? lastP.h : Notebook.PH;
+            boolean ghostCustom = lastP.pdf < 0 && lastP.bgImage != null && !lastP.bgImage.isEmpty();
+            gl.setLook(lastP.spacing, lastP.strength, lastP.lineColor, ghostCustom ? 0 : lastP.margins);
+            gl.page(0, ghostY, PW, ghostH, 0, ghostY, (lastP.pdf >= 0 || ghostCustom) ? Notebook.BG_BLANK : lastP.bg, true, false);
+            if (ghostCustom) {
+                final String fn = lastP.bgImage;
+                Tex bt = tex("bgimg:" + fn, () -> Render.imageFile(Notebook.bgImageFile(app, dir, fn), 2400));
+                if (bt != null) gl.tex(bt.id, 0, ghostY, PW, ghostH, 1);
+            }
         }
         // highlighter under ink: every page's highlighter, then the recent one, then every page's ink, then the recent ink
         for (int i = first; i <= last; i++) {
@@ -4795,6 +4805,8 @@ final class Engine implements Choreographer.FrameCallback {
         s.z = z;
         s.pageH = cp.h;
         s.pageAspect = cp.h / PW;
+        s.pageAspects = new float[s.pages];
+        for (int i = 0; i < s.pages; i++) s.pageAspects[i] = book.pages.get(i).h / PW;
         s.bgImage = cp.bgImage;
         s.paper = book.paper;
         s.canvas = book.canvas;

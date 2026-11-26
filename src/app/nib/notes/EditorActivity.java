@@ -989,8 +989,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             }
             chip.setOnClickListener(v -> {
                 if (!act) { focusDoc(d); return; }
-                if (state != null && (state.canvas || Math.abs(state.zoom - 100) > 3)) engine.fitWidth();
-                else showPages();
+                if (state != null && state.canvas) engine.fitWidth();
+                else showJumpToPage();
             });
             chip.setOnLongClickListener(v -> { tabMenu(v, d); return true; });
             LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 40));
@@ -1013,6 +1013,77 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             return true;
         });
         pm.show();
+    }
+
+    /** Prompts for a 1-based page number and jumps straight to that page. */
+    private void showJumpToPage() {
+        if (state == null || state.canvas || engine == null) return;
+        commitTextEdit();
+        final int total = Math.max(1, state.pages);
+        final int curPage = Math.max(0, Math.min(total - 1, state.page));
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pd = Ui.dp(this, 22);
+        box.setPadding(pd, Ui.dp(this, 10), pd, Ui.dp(this, 4));
+
+        TextView hint = Ui.text(this, "Enter a page number (1 – " + total + ")",
+                13.5f, Ui.color(this, R.color.on_surface_variant), null);
+        hint.setPadding(0, 0, 0, Ui.dp(this, 10));
+        box.addView(hint);
+
+        EditText et = new EditText(this);
+        et.setInputType(InputType.TYPE_CLASS_NUMBER);
+        et.setSingleLine(true);
+        et.setHint("1 – " + total);
+        et.setText(String.valueOf(curPage + 1));
+        et.selectAll();
+        et.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
+        box.addView(et, new LinearLayout.LayoutParams(-1, -2));
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle("Jump to page")
+                .setView(box)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Go", null);
+        if (Math.abs(state.zoom - 100) > 3) {
+            b.setNeutralButton("Reset zoom", (dg, w) -> engine.fitWidth());
+        }
+        AlertDialog dialog = b.create();
+        Runnable submit = () -> {
+            String raw = et.getText().toString().trim();
+            if (raw.isEmpty()) {
+                toast("Enter a page number");
+                return;
+            }
+            try {
+                int target = Integer.parseInt(raw);
+                if (target < 1 || target > total) {
+                    toast("Page must be between 1 and " + total);
+                    return;
+                }
+                engine.gotoPage(target - 1);
+                dialog.dismiss();
+            } catch (NumberFormatException ex) {
+                toast("Invalid page number");
+            }
+        };
+        dialog.setOnShowListener(di -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> submit.run());
+            et.requestFocus();
+        });
+        et.setOnEditorActionListener((tv, actionId, ev) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO
+                    || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                submit.run();
+                return true;
+            }
+            return false;
+        });
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        }
+        dialog.show();
     }
 
     /** Keeps the tab strip clear of the right-hand capsule (it scrolls when there are many tabs). */
@@ -3871,20 +3942,23 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         int n = state == null ? 1 : state.pages, cur = state == null ? 0 : state.page;
         for (int i = 0; i < n; i++) {
             final int idx = i;
+            float ratio = (state != null && state.pageAspects != null && i < state.pageAspects.length && state.pageAspects[i] > 0.1f)
+                    ? state.pageAspects[i] : (Notebook.PH / Notebook.PW);
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setGravity(Gravity.CENTER_HORIZONTAL);
-            Ui.Aspect frame = new Ui.Aspect(this, Notebook.PH / Notebook.PW);
-            GradientDrawable g = Ui.round(0xffffffff, Ui.dp(this, 6));
-            g.setStroke(i == cur ? Ui.dp(this, 2) : Ui.hairline(this), Ui.color(this, i == cur ? R.color.accent : R.color.outline));
-            frame.setBackground(g);
+            Ui.Aspect frame = new Ui.Aspect(this, ratio);
+            frame.setBackground(Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 6)));
+            GradientDrawable border = Ui.round(0x00000000, Ui.dp(this, 6));
+            border.setStroke(i == cur ? Ui.dp(this, 2) : Ui.hairline(this), Ui.color(this, i == cur ? R.color.accent : R.color.outline));
+            frame.setForeground(border);
             frame.setClipToOutline(true);
             frame.setElevation(Ui.dp(this, 1));
             ImageView img = new ImageView(this);
-            img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            img.setScaleType(ImageView.ScaleType.FIT_XY);
             frame.addView(img, new FrameLayout.LayoutParams(-1, -1));
             View hit = new View(this);
-            hit.setBackground(Ui.ripple(this, null, Ui.dp(this, 10)));
+            hit.setBackground(Ui.ripple(this, null, Ui.dp(this, 6)));
             frame.addView(hit, new FrameLayout.LayoutParams(-1, -1));
             hit.setOnClickListener(v -> { engine.gotoPage(idx); closePages(); });
             hit.setOnLongClickListener(v -> { pageMenu(v, idx, grid); return true; });
@@ -3906,12 +3980,18 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             num.setPadding(0, Ui.dp(this, 8), 0, 0);
             card.addView(num);
             grid.addView(card);
-            engine.pageThumb(i, 320, img::setImageBitmap);
+            engine.pageThumb(i, 320, bm -> {
+                if (bm != null && bm.getWidth() > 0 && bm.getHeight() > 0) {
+                    frame.setRatio(bm.getHeight() / (float) bm.getWidth());
+                    img.setImageBitmap(bm);
+                }
+            });
         }
-        // "add page" tile
+        // "add page" tile (matches current page aspect ratio)
+        float addRatio = (state != null && state.pageAspect > 0.1f) ? state.pageAspect : (Notebook.PH / Notebook.PW);
         LinearLayout addCard = new LinearLayout(this);
         addCard.setOrientation(LinearLayout.VERTICAL);
-        Ui.Aspect af = new Ui.Aspect(this, Notebook.PH / Notebook.PW);
+        Ui.Aspect af = new Ui.Aspect(this, addRatio);
         GradientDrawable ag = Ui.round(Ui.color(this, R.color.surface_variant), Ui.dp(this, 6));
         ag.setStroke(Ui.hairline(this), Ui.color(this, R.color.outline));
         af.setBackground(Ui.ripple(this, ag, Ui.dp(this, 6)));
