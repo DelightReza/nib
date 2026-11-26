@@ -1259,6 +1259,15 @@ final class Engine implements Choreographer.FrameCallback {
 
     void saveNow() { h.post(() -> { h.removeCallbacks(saveR); save(); }); }
 
+    /** Saves any pending edits to disk, then runs {@code after} on the main thread once disk I/O finishes. */
+    void flush(Runnable after) {
+        h.post(() -> {
+            h.removeCallbacks(saveR);
+            save();
+            io.execute(() -> main.post(after));
+        });
+    }
+
     void release() {
         h.post(() -> {
             h.removeCallbacks(saveR);

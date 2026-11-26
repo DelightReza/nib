@@ -36,8 +36,8 @@ final class NewNotebookSheet {
         Choice(String name, Notebook.Page look, int paper) { this.name = name; this.look = look; this.paper = paper; }
     }
 
-    static void show(Activity a, String title, Notebook.Page defLook, int defPaper, org.json.JSONArray mine,
-                     Runnable importPdf, java.util.function.Consumer<org.json.JSONObject> saveDefault, Create create) {
+    static void show(Activity a, String title, boolean startCanvas, Notebook.Page defLook, int defPaper, org.json.JSONArray mine,
+                     java.util.function.Consumer<org.json.JSONObject> saveDefault, Create create) {
         Dialog d = new Dialog(a);
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
         int sw = a.getResources().getDisplayMetrics().widthPixels, sh = a.getResources().getDisplayMetrics().heightPixels;
@@ -49,7 +49,8 @@ final class NewNotebookSheet {
         // header: title and Create
         LinearLayout head = new LinearLayout(a);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.addView(Ui.text(a, "New notebook", 24, Ui.color(a, R.color.on_surface), Theme.titleFace(a)), new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView heading = Ui.text(a, startCanvas ? "New infinite canvas" : "New notebook", 24, Ui.color(a, R.color.on_surface), Theme.titleFace(a));
+        head.addView(heading, new LinearLayout.LayoutParams(0, -2, 1f));
         TextView cancel = Ui.text(a, "Cancel", 15, Ui.color(a, R.color.on_surface_variant), Ui.medium());
         cancel.setPadding(Ui.dp(a, 10), Ui.dp(a, 10), Ui.dp(a, 10), Ui.dp(a, 10));
         cancel.setOnClickListener(v -> d.dismiss());
@@ -76,23 +77,15 @@ final class NewNotebookSheet {
         nl.topMargin = Ui.dp(a, 14);
         box.addView(name, nl);
 
-        // what it is
-        final boolean[] canvas = {false};
+        // creation state
+        final boolean[] canvas = {startCanvas};
         final int[] paper = {defPaper};
         final String[] cover = {Covers.random()};
         final boolean[] withCover = {true};
         final Notebook.Page[] look = {defLook};
-        box.addView(caption(a, "Type"));
         LinearLayout coverBox = new LinearLayout(a);
         coverBox.setOrientation(LinearLayout.VERTICAL);
-        box.addView(Ui.segmented(a, new String[]{"Notebook", "Infinite canvas"}, 0, i -> {
-            canvas[0] = i == 1;
-            coverBox.setVisibility(canvas[0] ? View.GONE : View.VISIBLE); // a canvas has no pages to put a cover before
-        }));
-        TextView pdf = Ui.text(a, "Or import a PDF to write on…", 13.5f, Ui.color(a, R.color.accent), Ui.medium());
-        pdf.setPadding(0, Ui.dp(a, 10), 0, Ui.dp(a, 2));
-        pdf.setOnClickListener(v -> { d.dismiss(); importPdf.run(); });
-        if (importPdf != null) box.addView(pdf); // opened from a notebook's tab / split menu: no PDF import there
+        coverBox.setVisibility(startCanvas ? View.GONE : View.VISIBLE); // a canvas has no pages to put a cover before
 
         // page style: every template, then your own
         ArrayList<Choice> choices = new ArrayList<>();

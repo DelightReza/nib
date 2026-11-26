@@ -1092,7 +1092,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void showMore(View anchor) {
         Ui.Popover p = newPop(300);
         boolean canvas = state != null && state.canvas;
-        if (!canvas) p.add(Ui.actionRow(this, R.drawable.ic_page_add, "Add page", "Templates, another notebook, images or PDF", v -> { pop.dismiss(); showAddPage(Engine.POS_AFTER, null); }));
+        if (!canvas) {
+            String pagesSub = state != null ? state.pages + (state.pages == 1 ? " page" : " pages") + " · overview, reorder and bookmarks" : "Overview, reorder and bookmarks";
+            p.add(Ui.actionRow(this, R.drawable.ic_pages, "Pages", pagesSub, v -> { pop.dismiss(); showPages(); }));
+            p.add(Ui.actionRow(this, R.drawable.ic_page_add, "Add page", "Templates, another notebook, images or PDF", v -> { pop.dismiss(); showAddPage(Engine.POS_AFTER, null); }));
+        }
         if (!canvas && state != null && state.marks != null) {
             boolean on = state.marks[state.page] != null;
             p.add(Ui.actionRow(this, on ? R.drawable.ic_bookmark_filled : R.drawable.ic_bookmark, on ? "Rename or remove bookmark" : "Bookmark this page",
@@ -1112,7 +1116,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }));
         p.add(Ui.actionRow(this, R.drawable.ic_ruler, "Drawing scale", drawScale > 0 ? "1:" + drawScale + " · the ruler measures real lengths" : "None · the ruler measures the paper",
                 v -> { pop.dismiss(); showScale(anchor); }));
-        p.add(Ui.actionRow(this, R.drawable.ic_share, "Export & share", "PDF or image", v -> { pop.dismiss(); showShare(anchor); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_share, "Export & share", "PDF, image or .nib", v -> { pop.dismiss(); showShare(anchor); }));
         if (shown[1] != null) p.add(Ui.actionRow(this, R.drawable.ic_sidebar, "Close split view", "Keep only this side", v -> { pop.dismiss(); closeSplit(focusPane); }));
         else p.add(Ui.actionRow(this, R.drawable.ic_sidebar, "Split view",
                 (splitVert || root.getWidth() < Ui.dp(this, 520) ? "Two notebooks, one above the other" : "Two notebooks side by side") + " · both editable",
@@ -1961,8 +1965,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         java.util.List<Notebook.Entry> all = Notebook.list(this);
         all.sort((a, b2) -> Long.compare(b2.modified, a.modified));
         Ui.Popover p = newPop(380).title(title);
-        p.add(Ui.actionRow(this, R.drawable.ic_plus, "New notebook", "Pick its paper and cover, or make an infinite canvas",
-                v -> { pop.dismiss(); newNotebook(then); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_notebook_new, "New notebook", "Choose page style, paper, and cover",
+                v -> { pop.dismiss(); newNotebook(false, then); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_infinity, "New infinite canvas", "Unbounded canvas with your chosen paper",
+                v -> { pop.dismiss(); newNotebook(true, then); }));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         int shownN = 0;
@@ -1984,10 +1990,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     /**
-     * New notebook from a tab's + or the split view menu: the same New notebook sheet as the notes screen (name,
-     * notebook or canvas, page style, paper, cover), made in the current notebook's folder and opened where asked.
+     * New notebook or infinite canvas from a tab's + or the split view menu,
+     * made in the current notebook's folder and opened where asked.
      */
-    private void newNotebook(java.util.function.Consumer<Doc> then) {
+    private void newNotebook(boolean startCanvas, java.util.function.Consumer<Doc> then) {
         String title = new java.text.SimpleDateFormat("MMM d, h:mm a", java.util.Locale.getDefault()).format(new java.util.Date());
         Notebook.Page proto = new Notebook.Page(Notebook.BG_DOTS);
         int paper = Ui.dark(this) ? Notebook.PAPER_DARK : Notebook.PAPER_WHITE;
@@ -2002,7 +2008,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         org.json.JSONArray mine;
         try { mine = new org.json.JSONArray(prefs.getString("myTpl", "[]")); } catch (org.json.JSONException e) { mine = new org.json.JSONArray(); }
         final String folder = engine != null ? Notebook.meta(engine.dir).getProperty("folder", "") : "";
-        NewNotebookSheet.show(this, title, proto, paper, mine, null,
+        NewNotebookSheet.show(this, title, startCanvas, proto, paper, mine,
                 o -> prefs.edit().putString("defStyle", o.toString()).apply(),
                 (t, canvas, look, pp, cover) -> {
                     try {
@@ -2876,8 +2882,26 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         p.add(Ui.actionRow(this, R.drawable.ic_copy, "Whole notebook as PDF", "Vector ink, every page", v -> { pop.dismiss(); export(-1, false); }));
         p.add(Ui.actionRow(this, R.drawable.ic_template, "This page as PDF", null, v -> { pop.dismiss(); export(state == null ? 0 : state.page, false); }));
         p.add(Ui.actionRow(this, R.drawable.ic_image, "This page as image", "PNG, 2000 px wide", v -> { pop.dismiss(); export(state == null ? 0 : state.page, true); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_nib_archive, "Export as .nib", "Editable Nib notebook archive", v -> { pop.dismiss(); exportNib(); }));
         p.add(Ui.actionRow(this, R.drawable.ic_import, "Save PDF to…", "Pick a folder, e.g. Downloads or Drive", v -> { pop.dismiss(); saveTo(); }));
         p.show(anchor);
+    }
+
+    private void exportNib() {
+        commitTextEdit();
+        toast("Packaging notebook…");
+        final File dir = engine.dir;
+        final String title = state != null && state.title != null && !state.title.trim().isEmpty()
+                ? state.title : (cur != null && cur.title != null ? cur.title : "Notebook");
+        engine.flush(() -> bg.execute(() -> {
+            try {
+                File f = Backup.exportNotebook(this, dir, title);
+                ui.post(() -> Exporter.share(this, f, "application/octet-stream"));
+            } catch (Exception e) {
+                Log.e(Gl.TAG, "export nib", e);
+                ui.post(() -> toast("Export failed"));
+            }
+        }));
     }
 
     private void saveTo() {

@@ -148,46 +148,132 @@ final class Backup {
         }
     }
 
+    static final class RestoreResult {
+        final int count;
+        final File singleDir;
+        RestoreResult(int count, File singleDir) {
+            this.count = count;
+            this.singleDir = singleDir;
+        }
+    }
+
+    /** Exports a single notebook directory as a shareable .nib archive in cache/exports. */
+    static File exportNotebook(Context c, File nbDir, String title) throws IOException {
+        File out = new File(Exporter.exportDir(c), Exporter.safeName(title) + ".nib");
+        try (OutputStream os = new FileOutputStream(out); ZipOutputStream zip = new ZipOutputStream(os)) {
+            addDir(zip, nbDir, "");
+        }
+        return out;
+    }
+
     /** Unpacks a backup; notebooks that already exist are restored as copies. Returns count. */
     static int restore(Context c, Uri zipUri) throws IOException {
+        return restoreAny(c, zipUri, null).count;
+    }
+
+    /**
+     * Unpacks either a single-notebook .nib archive (files at archive root or inside a single directory)
+     * or a full library .zip backup. Returns how many notebooks were restored and the directory if exactly one.
+     */
+    static RestoreResult restoreAny(Context c, Uri zipUri, String targetFolder) throws IOException {
         File root = Notebook.root(c);
+        String rootCanon = root.getCanonicalPath();
         java.util.HashMap<String, File> map = new java.util.HashMap<>();
-        try (InputStream is = c.getContentResolver().openInputStream(zipUri); ZipInputStream zin = new ZipInputStream(is)) {
-            ZipEntry e;
-            while ((e = zin.getNextEntry()) != null) {
-                String n = e.getName();
-                if (n.equals(LIBRARY)) {
-                    java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
-                    Io.pipe(zin, b);
-                    mergeLibrary(c, b.toString("UTF-8"));
-                    continue;
-                }
-                if (e.isDirectory() || n.contains("..")) continue;
-                if (n.startsWith(Fonts.BACKUP_DIR)) {
-                    Fonts.restoreFile(c, n.substring(Fonts.BACKUP_DIR.length()), zin);
-                    continue;
-                }
-                if (n.startsWith(Stickers.BACKUP_DIR)) {
-                    Stickers.restoreFile(c, n.substring(Stickers.BACKUP_DIR.length()), zin);
-                    continue;
-                }
-                int slash = n.indexOf('/');
-                if (slash <= 0) continue;
-                String nb = n.substring(0, slash);
-                File target = map.get(nb);
-                if (target == null) {
-                    target = new File(root, nb);
-                    if (target.exists()) target = Notebook.newDir(c);
-                    map.put(nb, target);
-                }
-                File f = new File(target, n.substring(slash + 1));
-                if (!f.getCanonicalPath().startsWith(root.getCanonicalPath())) continue;
-                f.getParentFile().mkdirs();
-                try (OutputStream o = new FileOutputStream(f)) {
-                    Io.pipe(zin, o);
+        File rootNotebook = null;
+        boolean sawLibrary = false;
+
+        try (InputStream is = c.getContentResolver().openInputStream(zipUri)) {
+            if (is == null) throw new IOException("Could not open file");
+            try (ZipInputStream zin = new ZipInputStream(is)) {
+                ZipEntry e;
+                while ((e = zin.getNextEntry()) != null) {
+                    String n = e.getName();
+                    if (n == null || n.isEmpty()) continue;
+                    // normalize Windows separators if any
+                    n = n.replace('\\', '/');
+                    while (n.startsWith("/")) n = n.substring(1);
+                    if (n.isEmpty() || n.contains("..")) continue;
+
+                    if (n.equals(LIBRARY)) {
+                        sawLibrary = true;
+                        java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+                        Io.pipe(zin, b);
+                        mergeLibrary(c, b.toString("UTF-8"));
+                        continue;
+                    }
+                    if (e.isDirectory()) continue;
+                    if (n.startsWith(Fonts.BACKUP_DIR)) {
+                        Fonts.restoreFile(c, n.substring(Fonts.BACKUP_DIR.length()), zin);
+                        continue;
+                    }
+                    if (n.startsWith(Stickers.BACKUP_DIR)) {
+                        Stickers.restoreFile(c, n.substring(Stickers.BACKUP_DIR.length()), zin);
+                        continue;
+                    }
+
+                    int slash = n.indexOf('/');
+                    boolean flatNotebookEntry = slash < 0
+                            || n.startsWith("pages/")
+                            || n.startsWith("images/");
+
+                    File f;
+                    if (flatNotebookEntry) {
+                        if (rootNotebook == null) rootNotebook = Notebook.newDir(c);
+                        f = new File(rootNotebook, n);
+                    } else {
+                        String nb = n.substring(0, slash);
+                        File target = map.get(nb);
+                        if (target == null) {
+                            target = new File(root, nb);
+                            if (target.exists()) target = Notebook.newDir(c);
+                            map.put(nb, target);
+                        }
+                        f = new File(target, n.substring(slash + 1));
+                    }
+                    if (!f.getCanonicalPath().startsWith(rootCanon + File.separator)) continue;
+                    File parent = f.getParentFile();
+                    if (parent != null) parent.mkdirs();
+                    try (OutputStream o = new FileOutputStream(f)) {
+                        Io.pipe(zin, o);
+                    }
                 }
             }
         }
-        return map.size();
+
+        // Validate restored directories actually contain notebook data
+        ArrayList<File> restored = new ArrayList<>();
+        if (rootNotebook != null) {
+            if (isNotebookDir(rootNotebook)) restored.add(rootNotebook);
+            else Notebook.delete(rootNotebook);
+        }
+        for (File dir : map.values()) {
+            if (isNotebookDir(dir)) restored.add(dir);
+            else Notebook.delete(dir);
+        }
+        if (restored.isEmpty() && !sawLibrary) {
+            throw new IOException("No Nib notebooks found in this file");
+        }
+        if (restored.size() == 1 && targetFolder != null && !targetFolder.isEmpty()) {
+            File only = restored.get(0);
+            try {
+                // Only assign targetFolder when importing a single notebook whose folder was empty
+                java.util.Properties meta = new java.util.Properties();
+                File mf = new File(only, "meta.properties");
+                if (mf.isFile()) {
+                    try (FileInputStream fis = new FileInputStream(mf)) { meta.load(fis); }
+                }
+                if (meta.getProperty("folder", "").isEmpty()) {
+                    Notebook.setMeta(only, "folder", targetFolder);
+                }
+            } catch (Exception ignored) { }
+        }
+        return new RestoreResult(restored.size(), restored.size() == 1 ? restored.get(0) : null);
+    }
+
+    private static boolean isNotebookDir(File dir) {
+        return dir != null && dir.isDirectory()
+                && (new File(dir, "ink.bin").isFile()
+                || new File(dir, "meta.properties").isFile()
+                || new File(dir, "source.pdf").isFile());
     }
 }

@@ -2,18 +2,22 @@ package app.nib.notes;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.ImageDecoder;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.pdf.PdfRenderer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -34,6 +38,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.FileOutputStream;
 import java.text.SimpleDateFormat;
@@ -44,12 +49,17 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class LibraryActivity extends Activity {
-    private static final int REQ_PDF = 21, REQ_TREE = 22, REQ_RESTORE = 23;
+    private static final int REQ_PDF = 21, REQ_TREE = 22, REQ_RESTORE = 23,
+            REQ_DOC = 24, REQ_PHOTOS = 25, REQ_SCAN = 26;
     private static final String FAV = "★";
+
+    private ScanSheet scanSheet;
+    private File pendingScanFile;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
@@ -87,6 +97,10 @@ public final class LibraryActivity extends Activity {
         }
         prefs = getSharedPreferences("nib", MODE_PRIVATE);
         if (b == null) Theme.restore(this);
+        else {
+            String p = b.getString("pendingScanFile", null);
+            if (p != null) pendingScanFile = new File(p);
+        }
         sort = prefs.getInt("sort", 0);
         filter = prefs.getString("filter", "");
 
@@ -190,7 +204,7 @@ public final class LibraryActivity extends Activity {
         newB.setSingleLine(true);
         newB.setBackground(Ui.ripple(this, Ui.round(Ui.color(this, R.color.accent), Ui.dp(this, 22)), Ui.dp(this, 22)));
         newB.setOnClickListener(this::showNew);
-        newB.setContentDescription("New notebook");
+        newB.setContentDescription("New");
         newButton = newB;
         LinearLayout.LayoutParams nbl = new LinearLayout.LayoutParams(-2, Ui.dp(this, 44));
         nbl.leftMargin = Ui.dp(this, 10);
@@ -326,8 +340,21 @@ public final class LibraryActivity extends Activity {
     private LinearLayout contentCol;
     private TextView newButton;
 
-    /** New: a sheet to choose name, notebook or canvas, page style, paper and cover first (NewNotebookSheet). */
+    /** New: floating popup menu for creating notebooks/canvases/folders, importing files, or scanning documents. */
     private void showNew(View anchor) {
+        NewMenuPopover.show(this, anchor, new NewMenuPopover.Actions() {
+            @Override public void onNewNotebook() { openNewNotebookSheet(false); }
+            @Override public void onNewInfiniteCanvas() { openNewNotebookSheet(true); }
+            @Override public void onNewFolder() { newFolder(isFolderFilter() ? filter : "", null); }
+            @Override public void onImportPdf() { launchImportPdf(); }
+            @Override public void onImportDocument() { launchImportDocument(); }
+            @Override public void onImportPhoto() { launchImportPhotos(); }
+            @Override public void onImportNibBackup() { launchImportNibBackup(); }
+            @Override public void onScanDocuments() { launchCameraScan(true); }
+        });
+    }
+
+    private void openNewNotebookSheet(boolean startCanvas) {
         String title = new SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(new Date());
         // the page style chosen with "Use for new notebooks", else dotted; Graphite theme defaults to dark paper
         Notebook.Page proto = new Notebook.Page(Notebook.BG_DOTS);
@@ -342,10 +369,89 @@ public final class LibraryActivity extends Activity {
         } catch (org.json.JSONException ignored) { }
         org.json.JSONArray mine;
         try { mine = new org.json.JSONArray(prefs.getString("myTpl", "[]")); } catch (org.json.JSONException e) { mine = new org.json.JSONArray(); }
-        NewNotebookSheet.show(this, title, proto, paper, mine,
-                () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/pdf"), REQ_PDF),
+        NewNotebookSheet.show(this, title, startCanvas, proto, paper, mine,
                 o -> prefs.edit().putString("defStyle", o.toString()).apply(),
                 this::createNotebook);
+    }
+
+    private String currentFolder() {
+        return isFolderFilter() ? filter : "";
+    }
+
+    private void launchImportPdf() {
+        startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("application/pdf"), REQ_PDF);
+    }
+
+    private void launchImportDocument() {
+        Intent in = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "application/msword",
+                        "application/vnd.ms-powerpoint",
+                        "text/plain",
+                        "text/markdown",
+                        "text/x-markdown",
+                        "text/csv",
+                        "application/pdf"
+                });
+        startActivityForResult(in, REQ_DOC);
+    }
+
+    private void launchImportPhotos() {
+        try {
+            Intent in = new Intent(MediaStore.ACTION_PICK_IMAGES)
+                    .setType("image/*")
+                    .putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
+            startActivityForResult(in, REQ_PHOTOS);
+        } catch (ActivityNotFoundException e) {
+            Intent fallback = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("image/*")
+                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            startActivityForResult(fallback, REQ_PHOTOS);
+        }
+    }
+
+    private void launchImportNibBackup() {
+        // Use */* without EXTRA_MIME_TYPES so custom .nib files are never greyed out across file providers
+        Intent in = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*");
+        startActivityForResult(in, REQ_RESTORE);
+    }
+
+    private ScanSheet ensureScanSheet(boolean startFresh) {
+        if (startFresh || scanSheet == null) {
+            if (scanSheet != null) scanSheet.dismissAndCleanup();
+            scanSheet = new ScanSheet(this, bg, new ScanSheet.Callbacks() {
+                @Override public void onAddAnotherPage() { launchCameraScan(false); }
+                @Override public void onSaveScannedPdf(String title, File pdfFile) { importPdfFile(pdfFile, title, true); }
+            });
+        }
+        return scanSheet;
+    }
+
+    private void launchCameraScan(boolean startFresh) {
+        ensureScanSheet(startFresh);
+        File out = ScanSheet.createCaptureFile(this);
+        pendingScanFile = out;
+        Uri uri = ScanSheet.captureUri(out);
+        Intent cap = new Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                .putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        cap.setClipData(ClipData.newRawUri(out.getName(), uri));
+        try {
+            startActivityForResult(cap, REQ_SCAN);
+        } catch (ActivityNotFoundException e) {
+            pendingScanFile = null;
+            try { out.delete(); } catch (Exception ignored) { }
+            Toast.makeText(this, "No camera app available", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void createNotebook(String title, boolean canvas, Notebook.Page proto, int paper, String cover) {
@@ -1112,6 +1218,7 @@ public final class LibraryActivity extends Activity {
         mv.add(2, 11, fl.size() + 1, isFolderFilter() ? "New subfolder in " + leaf(filter) + "…" : "New folder…");
         m.add(0, 4, 4, "Duplicate");
         m.add(0, 5, 5, "Export as PDF");
+        m.add(0, 9, 5, "Export as .nib");
         m.add(0, 6, 6, "Move to trash");
         pm.setOnMenuItemClickListener(it -> {
             int id = it.getItemId();
@@ -1134,6 +1241,7 @@ public final class LibraryActivity extends Activity {
                 else if (id == 11) newFolder(isFolderFilter() ? filter : "", e);
                 else if (id == 4) duplicate(e);
                 else if (id == 5) exportPdf(e);
+                else if (id == 9) exportNib(e);
                 else if (id == 6) confirmDelete(e);
                 else return false;
             } catch (Exception ex) {
@@ -1314,6 +1422,19 @@ public final class LibraryActivity extends Activity {
         });
     }
 
+    private void exportNib(Notebook.Entry e) {
+        Toast.makeText(this, "Packaging notebook…", Toast.LENGTH_SHORT).show();
+        bg.execute(() -> {
+            try {
+                File f = Backup.exportNotebook(this, e.dir, e.title);
+                ui.post(() -> Exporter.share(this, f, "application/octet-stream"));
+            } catch (Exception ex) {
+                Log.e(Gl.TAG, "export nib", ex);
+                ui.post(() -> Toast.makeText(this, "Export failed", Toast.LENGTH_SHORT).show());
+            }
+        });
+    }
+
     /** Delete = move to the trash (30 days); real deletion happens from the trash. */
     private void confirmDelete(Notebook.Entry e) {
         if (Notebook.trash(this, e.dir)) Toast.makeText(this, "Moved to the trash · kept 30 days", Toast.LENGTH_SHORT).show();
@@ -1353,8 +1474,7 @@ public final class LibraryActivity extends Activity {
             } else if (id == 20 || id == 21) {
                 startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE);
             } else if (id == 22) {
-                startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                        .setType("application/zip"), REQ_RESTORE);
+                launchImportNibBackup();
             } else return false;
             return true;
         });
@@ -1375,25 +1495,199 @@ public final class LibraryActivity extends Activity {
     }
 
     @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (pendingScanFile != null) outState.putString("pendingScanFile", pendingScanFile.getPath());
+    }
+
+    @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (res != RESULT_OK || data == null || data.getData() == null) return;
+        if (req == REQ_SCAN) {
+            File captured = pendingScanFile;
+            pendingScanFile = null;
+            if (res == RESULT_OK && captured != null && captured.isFile() && captured.length() > 0) {
+                ensureScanSheet(false).addCapturedFile(captured);
+            } else {
+                if (captured != null) try { captured.delete(); } catch (Exception ignored) { }
+                if (scanSheet != null && scanSheet.hasPages()) scanSheet.showOrRefresh();
+            }
+            return;
+        }
+        if (res != RESULT_OK || data == null) return;
+        if (req == REQ_PHOTOS) {
+            ArrayList<Uri> uris = new ArrayList<>();
+            ClipData clip = data.getClipData();
+            if (clip != null && clip.getItemCount() > 0) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri u = clip.getItemAt(i).getUri();
+                    if (u != null) uris.add(u);
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+            if (!uris.isEmpty()) importPhotos(uris);
+            return;
+        }
         Uri uri = data.getData();
+        if (uri == null) return;
         if (req == REQ_PDF) importPdf(uri);
+        else if (req == REQ_DOC) importDocument(uri);
         else if (req == REQ_TREE) {
             getContentResolver().takePersistableUriPermission(uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             prefs.edit().putString(Backup.PREF_TREE, uri.toString()).apply();
             backupNow();
         } else if (req == REQ_RESTORE) {
+            Toast.makeText(this, "Importing Nib backup…", Toast.LENGTH_SHORT).show();
+            final String targetFolder = currentFolder();
             bg.execute(() -> {
                 try {
-                    int n = Backup.restore(this, uri);
-                    ui.post(() -> { Toast.makeText(this, "Restored " + n + " notebooks", Toast.LENGTH_LONG).show(); refresh(); });
+                    Backup.RestoreResult rr = Backup.restoreAny(this, uri, targetFolder);
+                    ui.post(() -> {
+                        refresh();
+                        if (rr.singleDir != null) {
+                            Toast.makeText(this, "Imported notebook", Toast.LENGTH_SHORT).show();
+                            open(rr.singleDir);
+                        } else if (rr.count > 0) {
+                            Toast.makeText(this, "Restored " + rr.count + " notebooks", Toast.LENGTH_LONG).show();
+                        } else {
+                            Toast.makeText(this, "Restored library settings", Toast.LENGTH_LONG).show();
+                        }
+                    });
                 } catch (Exception e) {
-                    ui.post(() -> Toast.makeText(this, "Restore failed", Toast.LENGTH_LONG).show());
+                    Log.e(Gl.TAG, "restore", e);
+                    ui.post(() -> Toast.makeText(this, e.getMessage() != null ? e.getMessage() : "Could not import Nib file", Toast.LENGTH_LONG).show());
                 }
             });
+        }
+    }
+
+    private String queryDisplayName(Uri uri, String fallback) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && c.getString(0) != null && !c.getString(0).trim().isEmpty()) {
+                return c.getString(0).trim();
+            }
+        } catch (Exception ignored) { }
+        return fallback;
+    }
+
+    private void importDocument(Uri uri) {
+        Toast.makeText(this, "Converting document to PDF…", Toast.LENGTH_SHORT).show();
+        bg.execute(() -> {
+            File tmpPdf = new File(getCacheDir(), "doc_" + System.currentTimeMillis() + ".pdf");
+            try {
+                String rawName = queryDisplayName(uri, "Imported document");
+                String title = rawName.replaceAll("(?i)\\.(docx|pptx|doc|ppt|txt|md|markdown|pdf)$", "").trim();
+                if (title.isEmpty()) title = "Imported document";
+                String mime = getContentResolver().getType(uri);
+                DocConverter.toPdf(this, uri, rawName, mime, tmpPdf);
+                createPdfNotebookOnBg(tmpPdf, title, true);
+            } catch (Exception e) {
+                Log.e(Gl.TAG, "doc import", e);
+                try { tmpPdf.delete(); } catch (Exception ignored) { }
+                String msg = e.getMessage() != null && !e.getMessage().isEmpty() ? e.getMessage() : "Couldn't convert that document";
+                ui.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void importPhotos(List<Uri> uris) {
+        Toast.makeText(this, uris.size() == 1 ? "Importing photo…" : "Importing " + uris.size() + " photos…", Toast.LENGTH_SHORT).show();
+        final String folder = currentFolder();
+        bg.execute(() -> {
+            File dir = Notebook.newDir(this);
+            try {
+                dir.mkdirs();
+                File imgDir = new File(dir, "images");
+                imgDir.mkdirs();
+                Notebook nb = new Notebook();
+                String title = "Photos " + new SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(new Date());
+                if (uris.size() == 1) {
+                    String raw = queryDisplayName(uris.get(0), "");
+                    String stripped = raw.replaceAll("(?i)\\.(jpe?g|png|webp|heic|heif|gif|bmp)$", "").trim();
+                    if (!stripped.isEmpty()) title = stripped;
+                }
+                nb.title = title;
+                nb.folder = folder;
+                nb.created = nb.modified = System.currentTimeMillis();
+
+                for (Uri u : uris) {
+                    try {
+                        Bitmap b = ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(), u), (dec, info, src) -> {
+                            int w = info.getSize().getWidth(), h = info.getSize().getHeight(), m = Math.max(w, h);
+                            if (m > 2400) dec.setTargetSize(w * 2400 / m, h * 2400 / m);
+                            dec.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                        });
+                        boolean alpha = b.hasAlpha();
+                        String fileName = UUID.randomUUID() + (alpha ? ".png" : ".jpg");
+                        try (FileOutputStream o = new FileOutputStream(new File(imgDir, fileName))) {
+                            b.compress(alpha ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 90, o);
+                        }
+                        int bw = Math.max(1, b.getWidth()), bh = Math.max(1, b.getHeight());
+                        b.recycle();
+
+                        Notebook.Page pg = new Notebook.Page(Notebook.BG_BLANK);
+                        float pad = 36f;
+                        float maxW = Notebook.PW - 2 * pad, maxH = pg.h - 2 * pad;
+                        float scale = Math.min(maxW / bw, maxH / bh);
+                        float iw = bw * scale, ih = bh * scale;
+                        float ix = (Notebook.PW - iw) * 0.5f, iy = (pg.h - ih) * 0.5f;
+                        ArrayList<Notebook.Item> items = new ArrayList<>();
+                        items.add(new Notebook.Item(Notebook.Item.IMAGE, ix, iy, iw, ih, fileName, 0, 0));
+                        pg.setItems(items);
+                        nb.pages.add(pg);
+                    } catch (Exception ex) {
+                        Log.e(Gl.TAG, "photo page", ex);
+                    }
+                }
+                if (nb.pages.isEmpty()) throw new IllegalStateException("No readable photos selected");
+                nb.write(dir);
+                ui.post(() -> { refresh(); open(dir); });
+            } catch (Exception e) {
+                Log.e(Gl.TAG, "photo import", e);
+                Notebook.delete(dir);
+                ui.post(() -> Toast.makeText(this, "Couldn't import those photos", Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void importPdfFile(File srcPdf, String name, boolean deleteSourceAfter) {
+        Toast.makeText(this, "Creating notebook…", Toast.LENGTH_SHORT).show();
+        bg.execute(() -> createPdfNotebookOnBg(srcPdf, name, deleteSourceAfter));
+    }
+
+    private void createPdfNotebookOnBg(File srcPdf, String name, boolean deleteSourceAfter) {
+        File dir = Notebook.newDir(this);
+        try {
+            dir.mkdirs();
+            File pdf = new File(dir, "source.pdf");
+            Io.copy(new FileInputStream(srcPdf), new FileOutputStream(pdf));
+            Notebook nb = new Notebook();
+            nb.title = name;
+            nb.folder = currentFolder();
+            nb.created = nb.modified = System.currentTimeMillis();
+            try (Render.Pdf r = new Render.Pdf(pdf)) {
+                for (int i = 0; i < r.r.getPageCount(); i++) {
+                    try (PdfRenderer.Page p = r.r.openPage(i)) {
+                        Notebook.Page pg = new Notebook.Page(Notebook.BG_BLANK);
+                        pg.pdf = i;
+                        pg.h = Notebook.PW * p.getHeight() / (float) Math.max(1, p.getWidth());
+                        nb.pages.add(pg);
+                    }
+                }
+            }
+            if (nb.pages.isEmpty()) throw new IllegalStateException("empty PDF");
+            nb.write(dir);
+            ui.post(() -> { refresh(); open(dir); });
+        } catch (Exception e) {
+            Log.e(Gl.TAG, "pdf file import", e);
+            Notebook.delete(dir);
+            ui.post(() -> Toast.makeText(this, "Couldn't open that PDF", Toast.LENGTH_LONG).show());
+        } finally {
+            if (deleteSourceAfter && srcPdf != null) {
+                try { srcPdf.delete(); } catch (Exception ignored) { }
+            }
         }
     }
 
@@ -1402,23 +1696,21 @@ public final class LibraryActivity extends Activity {
         bg.execute(() -> {
             File dir = Notebook.newDir(this);
             try {
-                String name = "Imported PDF";
-                try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-                    if (c != null && c.moveToFirst() && c.getString(0) != null) name = c.getString(0).replaceAll("(?i)\\.pdf$", "");
-                }
+                String name = queryDisplayName(uri, "Imported PDF").replaceAll("(?i)\\.pdf$", "").trim();
+                if (name.isEmpty()) name = "Imported PDF";
                 dir.mkdirs();
                 File pdf = new File(dir, "source.pdf");
                 Io.copy(getContentResolver().openInputStream(uri), new FileOutputStream(pdf));
                 Notebook nb = new Notebook();
                 nb.title = name;
-                nb.folder = filter.equals(FAV) || filter.equals(RECENT) ? "" : filter;
+                nb.folder = currentFolder();
                 nb.created = nb.modified = System.currentTimeMillis();
                 try (Render.Pdf r = new Render.Pdf(pdf)) {
                     for (int i = 0; i < r.r.getPageCount(); i++) {
                         try (PdfRenderer.Page p = r.r.openPage(i)) {
                             Notebook.Page pg = new Notebook.Page(Notebook.BG_BLANK);
                             pg.pdf = i;
-                            pg.h = Notebook.PW * p.getHeight() / (float) p.getWidth();
+                            pg.h = Notebook.PW * p.getHeight() / (float) Math.max(1, p.getWidth());
                             nb.pages.add(pg);
                         }
                     }
@@ -1436,6 +1728,7 @@ public final class LibraryActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (scanSheet != null) scanSheet.dismissAndCleanup();
         super.onDestroy();
         bg.shutdown();
     }
