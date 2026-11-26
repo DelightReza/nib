@@ -420,8 +420,8 @@ final class Gl {
             + "  float cov=clamp(0.5-d,0.0,1.0);\n"
             + "  if(cov<=0.0) discard;\n"
             + "  vec3 c=vColor.rgb;\n"
-            + "  if(uMode==1){ o=vec4(mix(vec3(1.0),c,cov),1.0); return; }\n"
-            + "  if(uMode==2){ o=vec4(c*0.6*cov,0.0); return; }\n"
+            + "  if(uMode==1){ o=vec4(mix(vec3(1.0),c,vColor.a*cov),1.0); return; }\n"
+            + "  if(uMode==2){ o=vec4(c*0.65*vColor.a*cov,0.0); return; }\n"
             + "  if(uMode==3 && dot(c,vec3(0.2126,0.7152,0.0722))<0.22) c=vec3(0.91,0.918,0.929);\n"
             + "  o=vec4(c*vColor.a*cov, vColor.a*cov);\n"
             + "}\n";

@@ -51,8 +51,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class EditorActivity extends Activity implements Engine.Listener, Ruler.Host {
-    private static final int[] PEN_COLORS = {0xff1d1f24, 0xff2f5bff, 0xffe23b3b, 0xff139a57};
-    private static final int[] HL_COLORS = {0xffffe066, 0xffb2f2a6, 0xffffbfe0, 0xffaedcff};
     static final int[] INK_PALETTE = {
             0xff1d1f24, 0xff5b6170, 0xff9aa0ac, 0xffffffff, 0xff8a5a2b, 0xff2f5bff, 0xff00a3ff,
             0xff00a99d, 0xff139a57, 0xff7cb518, 0xfff2b705, 0xffff7a1a, 0xffe23b3b, 0xffe8437a,
@@ -61,21 +59,6 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             0xffffe066, 0xfffff3a0, 0xffffd0a6, 0xffffbfe0, 0xfff3c4ff, 0xffd9c8ff, 0xffaedcff,
             0xffa8f0e8, 0xffb2f2a6, 0xffd8f5a2, 0xffe6e6e6, 0xffffc2c2, 0xffc2e0ff, 0xfffde2b8};
     private static final float PEN_MIN = 0.5f, PEN_MAX = 16f, HL_MIN = 6f, HL_MAX = 64f;
-    private static final float[] PEN_PRESETS = {1.2f, 2.6f, 6f}, HL_PRESETS = {12f, 22f, 40f};
-
-    /** Thickness slider 0..100 ↔ width: even steps feel even (each step is the same ratio, not the same amount). */
-    private static float sliderToW(int v, float min, float max) { return (float) (min * Math.pow(max / min, v / 100.0)); }
-
-    private static int wToSlider(float w, float min, float max) {
-        w = Math.max(min, Math.min(max, w));
-        return (int) Math.round(Math.log(w / min) / Math.log(max / min) * 100);
-    }
-
-    /** Ink diameter in screen px for this pen at normal writing pressure, at the current zoom. */
-    private float inkPx(int tool, float w) {
-        float z = state != null && state.z > 0 ? state.z : 1.8f;
-        return new Stroke(tool, 0, w).radius(0.5f) * 2 * z;
-    }
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
     private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16;
@@ -86,11 +69,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private Engine engine;
     private SharedPreferences prefs;
+    private DrawPrefs drawPrefs;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
     private int tool, prevTool = Engine.TOOL_PEN;
-    private final int[] penColors = PEN_COLORS.clone(), hlColors = HL_COLORS.clone();
-    private int penSlot, hlSlot, penType, prediction;
+    private int penType, prediction;
     private float textPt;          // size of new text boxes, in points
     private String textStyleEnc;   // font + style of new text boxes (Fonts.Style, encoded)
     private Engine.TextEdit fontImportFor; // the box being edited when the font picker opened
@@ -111,11 +94,12 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private boolean tapeFree;
 
     // Zen layout: no bars; three floating capsules that fade while the pen is writing.
-    private static final int CAP_DP = 48, TOOLCAP_DP = 60, EDGE_DP = 16;
+    private static final int CAP_DP = 48, TOOLCAP_DP = 60, STYLECAP_DP = 46, EDGE_DP = 16;
     private FrameLayout root;
     private RateKeeper rateKeeper;
     private float fastestRate = 144f;
-    private LinearLayout capLeft, capRight, capTools;
+    private LinearLayout capLeft, capRight, capTools, capStyle;
+    private boolean styleFloating;
     private TextView hudView, toastView, pasteChip;
     private Ui.ToolDisc penB, hlB, eraserB, lassoB, laserB, textB, tapeB;
     private Ui.IconButton undoB, redoB, addPageB, pagesB, bookmarkB;
@@ -126,12 +110,15 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private int drawScale; // 1:N for this notebook; 0 = none
     private View favSep;
     private final java.util.ArrayList<int[]> favs = new java.util.ArrayList<>(); // tool, penType, colour, width bits
-    private final Ui.Swatch[] sw = new Ui.Swatch[4];
+    private final Ui.Swatch[] sw = new Ui.Swatch[DrawPrefs.SLOT_COUNT];
+    private final Ui.SizeDot[] thickBtns = new Ui.SizeDot[DrawPrefs.THICK_COUNT];
     private Ui.SizeDot sizeB;
-    private LinearLayout palette;
+    private LinearLayout palette, thickRow;
+    private View palSep, thickSep;
+    private ShapeToolbar shapeToolbar;
     private SelectionView selView;
     private LinearLayout selBar;
-    private View editTextB, textTools;
+    private View editTextB, shapeStyleB, shapeOrderB, toTextB, beautifyB, textTools;
     private Engine.State state;
     private Ui.Popover pop;
     private boolean autoHide;
@@ -154,20 +141,15 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             return;
         }
         prefs = getSharedPreferences("nib", MODE_PRIVATE);
+        drawPrefs = DrawPrefs.load(prefs);
         tool = prefs.getInt("tool", Engine.TOOL_PEN);
         if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_TEXT || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) tool = Engine.TOOL_PEN;
-        penSlot = prefs.getInt("penColor", 0);
-        hlSlot = prefs.getInt("hlColor", 0);
-        penW = prefs.getFloat("penW", 2.6f);
-        hlW = prefs.getFloat("hlW", 22f);
+        penW = drawPrefs.penWidth();
+        hlW = drawPrefs.hlWidth();
         penType = prefs.getInt("penType", Stroke.PEN);
         textPt = prefs.getFloat("textPt", new float[]{12, 17, 25}[Math.max(0, Math.min(2, prefs.getInt("textSize", 1)))]);
         textStyleEnc = prefs.getString("textStyle", null);
         eraserDp = prefs.getFloat("eraserDp", 11f);
-        for (int i = 0; i < 4; i++) {
-            penColors[i] = prefs.getInt("pc" + i, PEN_COLORS[i]);
-            hlColors[i] = prefs.getInt("hc" + i, HL_COLORS[i]);
-        }
         prediction = prefs.getInt("predLevel", 1);
         fingerDraw = prefs.getBoolean("finger", false);
         taper = prefs.getBoolean("taper", true);
@@ -244,6 +226,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setEraseOptions(holdErase, erasePreview);
         engine.setTaper(taper);
         engine.setZoomLimit(maxZoomPct / 100f);
+        engine.setShapeConfig(drawPrefs.makeShapeSpec(), drawPrefs.shapeLockCircle);
         pushLaser();
         pushTape();
     }
@@ -431,6 +414,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         @Override public void onTool(int t) { if (on()) EditorActivity.this.onTool(t); }
         @Override public void onRulerLength(float u, boolean done) { if (on()) EditorActivity.this.onRulerLength(u, done); }
         @Override public void onHandles(float[] hs, boolean line, int box) { sel.setHandles(hs, line, box); }
+        @Override public void onShapeOverlay(Notebook.Item preview, float ox, float oy, float z, float pageTop, boolean darkPaper,
+                                             float[] handleScreen, int[] handleIds, float[] boxCornersScreen) {
+            sel.setShapeOverlay(preview, ox, oy, z, pageTop, darkPaper, handleScreen, handleIds, boxCornersScreen);
+        }
         @Override public void onHaptic() { root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); }
         @Override public void onZoom(int pct) { if (on()) showZoomChip(pct, state != null && state.zoomLocked); }
     }
@@ -507,7 +494,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         lp.gravity = Gravity.TOP | Gravity.START;
         lp.topMargin = 0;
         zoomChip.setLayoutParams(lp);
-        int below = Ui.dp(this, EDGE_DP + CAP_DP + 10 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 + shelfDp() : 0));
+        int below = Ui.dp(this, EDGE_DP + CAP_DP + 10 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 + styleBarDp() + shelfDp() : 0));
         float left = 0, width = root.getWidth(), top = below;
         Pane pn = shown[1] != null ? panes[focusPane] : null;
         if (pn != null && pn.getWidth() > 0) {
@@ -641,7 +628,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (d == null) return;
         d.ensure();
         commitTextEdit();
-        if (selView != null && cur != d) { selView.set(null); if (selBar != null) selBar.setVisibility(View.GONE); }
+        if (selView != null && cur != d) {
+            selView.set(null);
+            selView.setShapeOverlay(null, 0, 0, 1, 0, false, null, null, null);
+            if (selBar != null) selBar.setVisibility(View.GONE);
+        }
         cur = d;
         engine = d.engine;
         state = d.state;
@@ -1013,7 +1004,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     // ---- fade the capsules while writing ---------------------------------------------------
 
     private final Runnable showChrome = () -> {
-        for (View v : new View[]{capLeft, capRight, capTools, this.capAdv}) if (v != null) v.animate().alpha(1f).setDuration(110).start();
+        View sh = shapeToolbar != null ? shapeToolbar.container : null;
+        for (View v : new View[]{capLeft, capRight, capTools, capStyle, this.capAdv, sh}) if (v != null) v.animate().alpha(1f).setDuration(110).start();
     };
 
     private void onPen(boolean down) {
@@ -1023,7 +1015,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         boolean writing = tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER
                 || tool == Engine.TOOL_TAPE || tool == Engine.TOOL_SHAPE;
         if (down && writing) {
-            for (View v : new View[]{capLeft, capRight, capTools, capAdv}) if (v != null) v.animate().alpha(0f).setDuration(90).start();
+            View sh = shapeToolbar != null ? shapeToolbar.container : null;
+            for (View v : new View[]{capLeft, capRight, capTools, capStyle, capAdv, sh}) if (v != null) v.animate().alpha(0f).setDuration(90).start();
         } else if (!down) {
             ui.postDelayed(showChrome, 200); // short enough to feel instant, long enough not to flash between words
         }
@@ -1204,24 +1197,46 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         favRow = new LinearLayout(this);
         favRow.setGravity(Gravity.CENTER_VERTICAL);
         capTools.addView(favRow);
-        capTools.addView(Ui.divider(this));
+        palSep = Ui.divider(this);
+        capTools.addView(palSep);
         palette = new LinearLayout(this);
         palette.setGravity(Gravity.CENTER_VERTICAL);
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < DrawPrefs.SLOT_COUNT; i++) {
             final int idx = i;
             sw[i] = new Ui.Swatch(this);
             sw[i].setLayoutParams(new ViewGroup.MarginLayoutParams(Ui.dp(this, 34), Ui.dp(this, 44)));
+            sw[i].setContentDescription("Colour slot " + (i + 1) + " · long-press to customise");
             sw[i].setOnClickListener(v -> pickSlot(idx));
-            sw[i].setOnLongClickListener(v -> { pickSlot(idx); showColors(v); return true; });
+            sw[i].setOnLongClickListener(v -> { pickSlot(idx); openColorPicker(idx, null); return true; });
             palette.addView(sw[i]);
         }
         Ui.PaletteDot moreCol = new Ui.PaletteDot(this);
+        moreCol.setContentDescription("Customise 5 colour slots");
         moreCol.setOnClickListener(this::showColors);
         palette.addView(moreCol);
         sizeB = new Ui.SizeDot(this);
         sizeB.setLayoutParams(new ViewGroup.MarginLayoutParams(Ui.dp(this, 40), Ui.dp(this, 44)));
         sizeB.setOnClickListener(v -> openToolPanel(v)); // no longer in the bar: tapping the active tool again opens the same panel
         capTools.addView(palette);
+        thickSep = Ui.divider(this);
+        capTools.addView(thickSep);
+        thickRow = new LinearLayout(this);
+        thickRow.setGravity(Gravity.CENTER_VERTICAL);
+        for (int i = 0; i < DrawPrefs.THICK_COUNT; i++) {
+            final int idx = i;
+            thickBtns[i] = new Ui.SizeDot(this);
+            thickBtns[i].setLayoutParams(new ViewGroup.MarginLayoutParams(Ui.dp(this, 34), Ui.dp(this, 44)));
+            thickBtns[i].setContentDescription("Thickness slot " + (i + 1) + " · tap again or long-press to customise");
+            thickBtns[i].setOnClickListener(v -> pickThickSlot(idx, v));
+            thickBtns[i].setOnLongClickListener(v -> {
+                setActiveThickSlot(idx);
+                applyTool();
+                showThickSlotEditor(v, idx);
+                return true;
+            });
+            thickRow.addView(thickBtns[i]);
+        }
+        capTools.addView(thickRow);
         capTools.addView(Ui.divider(this));
         // opens / closes the shelf; while it's closed and one of its tools is in use, it shows that tool
         shelfB = new Ui.ToolDisc(this, R.drawable.ic_chevron, "More tools", false);
@@ -1234,6 +1249,30 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         grip.setOnTouchListener(this::dragToolbar);
         capTools.addView(grip);
         root.addView(capTools, new FrameLayout.LayoutParams(-2, Ui.dp(this, TOOLCAP_DP), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+        capStyle = new LinearLayout(this);
+        capStyle.setOrientation(LinearLayout.HORIZONTAL);
+        capStyle.setGravity(Gravity.CENTER_VERTICAL);
+        capStyle.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 8), 0);
+        Ui.capsule(capStyle, this, 18);
+        capStyle.setVisibility(View.GONE);
+        root.addView(capStyle, new FrameLayout.LayoutParams(-2, Ui.dp(this, STYLECAP_DP), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+        // Dedicated expandable Shape & Design toolbar capsule (shown when Shapes & Design tool is active)
+        shapeToolbar = new ShapeToolbar(this, new ShapeToolbar.Host() {
+            @Override public void onPickShapeKind(String kind) {
+                drawPrefs.shapeKind = kind;
+                drawPrefs.save(prefs);
+                applyTool();
+            }
+            @Override public void onOpenShapeStyle(View anchor) {
+                showShapeStylePanel(anchor, false);
+            }
+            @Override public void onExpandChanged(boolean expanded) {
+                placeShapeToolbar();
+            }
+        });
+        shapeToolbar.setSelectedKind(drawPrefs.shapeKind);
+        shapeToolbar.container.setVisibility(View.GONE);
+        root.addView(shapeToolbar.container, new FrameLayout.LayoutParams(-2, Ui.dp(this, 48), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
         View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, fingerB, beaut, toText, layersB};
         System.arraycopy(tv, 0, toolViews, 0, tv.length);
         for (View v : new View[]{imgB, rulerB, fingerB, beaut, toText, layersB}) v.setOnLongClickListener(this::showMoveMenu);
@@ -1284,6 +1323,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         prefs.edit().putBoolean("shelfOpen", open).apply();
         placeShelf(true);
         styleShelf();
+        placeShapeToolbar();
         for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
         placeZoomChip();
         placeChips();
@@ -1292,13 +1332,15 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void styleShelf() {
         if (shelfB == null) return;
         boolean adv = toolInShelf(tool);
-        int icon = !shelfOpen && adv ? toolIcon(tool) : R.drawable.ic_chevron;
+        int icon = !shelfOpen && adv ? (tool == Engine.TOOL_SHAPE ? ShapeToolbar.iconForKind(drawPrefs.shapeKind) : toolIcon(tool)) : R.drawable.ic_chevron;
         shelfB.setImageResource(icon);
         // the chevron points toward the shelf when closed, away from it when open
         float toward = dock == DOCK_BOTTOM ? -90 : dock == DOCK_TOP ? 90 : dock == DOCK_LEFT ? 0 : 180;
         shelfB.setRotation(icon == R.drawable.ic_chevron ? (shelfOpen ? toward + 180 : toward) : 0);
         int c = tool == Engine.TOOL_TAPE ? TAPE_COLORS[tapeCol] : tool == Engine.TOOL_LASER ? LASER_COLORS[laserCol]
-                : tool == Engine.TOOL_SHAPE || tool == Engine.TOOL_PEN ? penColors[penSlot] : tool == Engine.TOOL_HL ? hlColors[hlSlot] : 0;
+                : tool == Engine.TOOL_SHAPE ? drawPrefs.shapeStrokeRgb()
+                : tool == Engine.TOOL_PEN ? drawPrefs.penColorRgb()
+                : tool == Engine.TOOL_HL ? drawPrefs.hlColorRgb() : 0;
         shelfB.set(!shelfOpen && adv, c, 0);
         shelfB.setContentDescription(shelfOpen ? "Hide more tools" : "More tools");
         if (pinB != null) {
@@ -1326,12 +1368,12 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         int pad = Ui.dp(this, 6);
         if (vert) advRow.setPadding(0, pad, 0, pad); else advRow.setPadding(pad, 0, pad, 0);
         for (int i = 0; i < advRow.getChildCount(); i++) orient(advRow.getChildAt(i), vert);
-        int sh = Ui.dp(this, SHELF_DP), edge = Ui.dp(this, EDGE_DP), gap = Ui.dp(this, 10), tc = Ui.dp(this, TOOLCAP_DP);
+        int sh = Ui.dp(this, SHELF_DP), edge = Ui.dp(this, EDGE_DP), gap = Ui.dp(this, 10), tc = Ui.dp(this, TOOLCAP_DP), st = Ui.dp(this, styleBarDp());
         FrameLayout.LayoutParams lp;
         switch (dock) {
             case DOCK_TOP:
                 lp = new FrameLayout.LayoutParams(-2, sh, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-                lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12) + tc + gap;
+                lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12) + tc + st + gap;
                 break;
             case DOCK_LEFT:
                 lp = new FrameLayout.LayoutParams(sh, -2, Gravity.START | Gravity.CENTER_VERTICAL);
@@ -1343,7 +1385,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 break;
             default:
                 lp = new FrameLayout.LayoutParams(-2, sh, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-                lp.bottomMargin = Ui.dp(this, EDGE_DP + 4) + tc + gap;
+                lp.bottomMargin = Ui.dp(this, EDGE_DP + 4) + tc + st + gap;
         }
         // never wider (taller) than the window: it scrolls instead
         if (vert) lp.topMargin = lp.bottomMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12);
@@ -1374,7 +1416,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "finger", "beautify", "totext", "layers"};
     private static final String[] TOOL_NAMES = {"Pen", "Highlighter", "Eraser", "Lasso", "Text", "Shapes", "Tape", "Laser pointer", "Image or sticker",
             "Ruler", "Write with finger", "Beautify", "Handwriting to text", "Layers"};
-    private static final String BASIC_DEFAULT = "pen,hl,eraser,lasso";
+    private static final String BASIC_DEFAULT = "pen,hl,eraser,lasso,shape";
     private final View[] toolViews = new View[TOOL_IDS.length];
     private final java.util.HashSet<String> basicIds = new java.util.HashSet<>();
     private View advDiv1, advDiv2;
@@ -1609,9 +1651,13 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private boolean dockVertical() { return dock == DOCK_LEFT || dock == DOCK_RIGHT; }
 
     /** How far the page may scroll past the floating bars at its top and bottom. */
-    private int insetTop() { return Ui.dp(this, EDGE_DP + CAP_DP + 8 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 + shelfDp() : 0)); }
+    private int styleBarDp() { return styleFloating && !dockVertical() ? STYLECAP_DP + 8 : 0; }
 
-    private int insetBottom() { return Ui.dp(this, EDGE_DP + 12 + (dock == DOCK_BOTTOM ? TOOLCAP_DP + shelfDp() : 0)); }
+    private int shapeBarDp() { return tool == Engine.TOOL_SHAPE ? 56 : 0; }
+
+    private int insetTop() { return Ui.dp(this, EDGE_DP + CAP_DP + 8 + (dock == DOCK_TOP ? TOOLCAP_DP + 12 + styleBarDp() + shelfDp() + shapeBarDp() : 0)); }
+
+    private int insetBottom() { return Ui.dp(this, EDGE_DP + 12 + (dock == DOCK_BOTTOM ? TOOLCAP_DP + styleBarDp() + shelfDp() + shapeBarDp() : shapeBarDp())); }
 
     private boolean dragToolbar(View v, MotionEvent e) {
         switch (e.getActionMasked()) {
@@ -1696,16 +1742,17 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     /** Lays the tool bar along its edge: a row at the top / bottom, a column on the left / right. */
     private void applyDock() {
         boolean vert = dockVertical();
+        if (vert && styleFloating) setStyleFloating(false);
         capTools.setOrientation(vert ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
         capTools.setGravity(Gravity.CENTER);
         if (vert) capTools.setPadding(0, Ui.dp(this, 8), 0, Ui.dp(this, 6));
         else capTools.setPadding(Ui.dp(this, 8), 0, Ui.dp(this, 6), 0);
-        for (LinearLayout g : new LinearLayout[]{palette, favRow}) {
+        for (LinearLayout g : new LinearLayout[]{palette, thickRow, favRow}) {
             g.setOrientation(vert ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
             g.setGravity(Gravity.CENTER);
         }
-        for (LinearLayout g : new LinearLayout[]{capTools, palette, favRow})
-            for (int i = 0; i < g.getChildCount(); i++) if (!(g.getChildAt(i) == palette || g.getChildAt(i) == favRow)) orient(g.getChildAt(i), vert);
+        for (LinearLayout g : new LinearLayout[]{capTools, palette, thickRow, favRow})
+            for (int i = 0; i < g.getChildCount(); i++) if (!(g.getChildAt(i) == palette || g.getChildAt(i) == thickRow || g.getChildAt(i) == favRow)) orient(g.getChildAt(i), vert);
         orient(grip, vert);
         FrameLayout.LayoutParams lp;
         int tc = Ui.dp(this, TOOLCAP_DP), edge = Ui.dp(this, EDGE_DP);
@@ -1727,17 +1774,101 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 lp.bottomMargin = Ui.dp(this, EDGE_DP + 4);
         }
         capTools.setLayoutParams(lp);
+        placeStyleBar();
         placeShelf(false);
         styleShelf();
+        placeShapeToolbar();
         placeZoomChip();
         placeChips();
         for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
         ui.post(this::fitCapsule);
     }
 
-    /** Toast and paste chip sit above the bar (and an open shelf) when it's at the bottom, else near the bottom edge. */
+    /** Moves the 5-colour + 3-thickness group between inline (wide/vertical) and a floating pill beside capTools (narrow portrait). */
+    private void setStyleFloating(boolean floating) {
+        if (capStyle == null || floating == styleFloating) return;
+        styleFloating = floating;
+        for (View v : new View[]{palette, thickSep, thickRow}) {
+            if (v != null && v.getParent() instanceof ViewGroup) ((ViewGroup) v.getParent()).removeView(v);
+        }
+        if (floating) {
+            for (LinearLayout g : new LinearLayout[]{palette, thickRow}) {
+                g.setOrientation(LinearLayout.HORIZONTAL);
+                g.setGravity(Gravity.CENTER);
+                for (int i = 0; i < g.getChildCount(); i++) orient(g.getChildAt(i), false);
+            }
+            orient(thickSep, false);
+            capStyle.addView(palette);
+            capStyle.addView(thickSep);
+            capStyle.addView(thickRow);
+            if (palSep != null) palSep.setVisibility(View.GONE);
+            capStyle.setVisibility(View.VISIBLE);
+        } else {
+            boolean vert = dockVertical();
+            int at = palSep != null ? capTools.indexOfChild(palSep) + 1 : capTools.getChildCount();
+            if (at < 0) at = capTools.getChildCount();
+            capTools.addView(palette, at++);
+            capTools.addView(thickSep, at++);
+            capTools.addView(thickRow, at);
+            for (LinearLayout g : new LinearLayout[]{palette, thickRow}) {
+                g.setOrientation(vert ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+                g.setGravity(Gravity.CENTER);
+                for (int i = 0; i < g.getChildCount(); i++) orient(g.getChildAt(i), vert);
+            }
+            orient(thickSep, vert);
+            if (palSep != null) palSep.setVisibility(View.VISIBLE);
+            capStyle.setVisibility(View.GONE);
+        }
+    }
+
+    private void placeStyleBar() {
+        if (capStyle == null) return;
+        if (!styleFloating || dockVertical()) {
+            capStyle.setVisibility(View.GONE);
+            return;
+        }
+        capStyle.setVisibility(View.VISIBLE);
+        int h = Ui.dp(this, STYLECAP_DP), edge = Ui.dp(this, EDGE_DP), gap = Ui.dp(this, 8);
+        FrameLayout.LayoutParams lp;
+        if (dock == DOCK_TOP) {
+            lp = new FrameLayout.LayoutParams(-2, h, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12 + TOOLCAP_DP) + gap;
+        } else {
+            lp = new FrameLayout.LayoutParams(-2, h, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            lp.bottomMargin = Ui.dp(this, EDGE_DP + 4 + TOOLCAP_DP) + gap;
+        }
+        lp.leftMargin = edge;
+        lp.rightMargin = edge;
+        capStyle.setLayoutParams(lp);
+    }
+
+    /** Places the dedicated Shape & Design toolbar cleanly beside the tool bar without overlapping the shelf. */
+    private void placeShapeToolbar() {
+        if (shapeToolbar == null) return;
+        boolean show = tool == Engine.TOOL_SHAPE;
+        shapeToolbar.container.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (!show) return;
+        int h = Ui.dp(this, 48), edge = Ui.dp(this, EDGE_DP), gap = Ui.dp(this, 8);
+        int maxW = root.getWidth() > 0 ? Math.max(Ui.dp(this, 160), root.getWidth() - 2 * edge) : ViewGroup.LayoutParams.WRAP_CONTENT;
+        int w = shapeToolbar.isExpanded() ? Math.min(maxW, Ui.dp(this, 680)) : ViewGroup.LayoutParams.WRAP_CONTENT;
+        if (root.getWidth() == 0 && shapeToolbar.isExpanded()) w = ViewGroup.LayoutParams.WRAP_CONTENT;
+        FrameLayout.LayoutParams lp;
+        if (dock == DOCK_TOP) {
+            lp = new FrameLayout.LayoutParams(w, h, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            lp.topMargin = Ui.dp(this, EDGE_DP + CAP_DP + 12 + TOOLCAP_DP + styleBarDp() + shelfDp()) + gap;
+        } else {
+            lp = new FrameLayout.LayoutParams(w, h, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            int baseBottom = dock == DOCK_BOTTOM ? Ui.dp(this, EDGE_DP + 4 + TOOLCAP_DP + styleBarDp() + shelfDp()) + gap : edge;
+            lp.bottomMargin = baseBottom;
+        }
+        lp.leftMargin = edge;
+        lp.rightMargin = edge;
+        shapeToolbar.container.setLayoutParams(lp);
+    }
+
+    /** Toast and paste chip sit above the bar (and an open shelf / shape bar) when it's at the bottom, else near the bottom edge. */
     private void placeChips() {
-        int above = Ui.dp(this, dock == DOCK_BOTTOM ? EDGE_DP + TOOLCAP_DP + 16 + shelfDp() : EDGE_DP + 8);
+        int above = Ui.dp(this, (dock == DOCK_BOTTOM ? EDGE_DP + TOOLCAP_DP + 16 + styleBarDp() + shelfDp() : EDGE_DP + 8) + shapeBarDp());
         if (pasteChip != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) pasteChip.getLayoutParams(); c.bottomMargin = above; pasteChip.setLayoutParams(c); }
         if (toastView != null) { FrameLayout.LayoutParams c = (FrameLayout.LayoutParams) toastView.getLayoutParams(); c.bottomMargin = above + Ui.dp(this, 2); toastView.setLayoutParams(c); }
     }
@@ -1786,8 +1917,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void openToolPanel(View anchor) {
         moveRowFor = toolView(tool);
         switch (tool) {
-            case Engine.TOOL_PEN: case Engine.TOOL_SHAPE: showPenPanel(anchor, false); break;
+            case Engine.TOOL_PEN: showPenPanel(anchor, false); break;
             case Engine.TOOL_HL: showPenPanel(anchor, true); break;
+            case Engine.TOOL_SHAPE: showShapeStylePanel(anchor, false); break;
             case Engine.TOOL_ERASER: showEraserPanel(anchor); break;
             case Engine.TOOL_TEXT: showTextPanel(anchor); break;
             case Engine.TOOL_LASSO: showLassoPanel(anchor); break;
@@ -1796,69 +1928,244 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
     }
 
-    private int[] slotColors() { return tool == Engine.TOOL_HL ? hlColors : penColors; }
+    private int activeSlotForTool() {
+        if (tool == Engine.TOOL_HL) return drawPrefs.hlSlot;
+        if (tool == Engine.TOOL_SHAPE) return drawPrefs.shapeStrokeSlot;
+        return drawPrefs.penSlot;
+    }
 
-    private int curColor() { return tool == Engine.TOOL_HL ? hlColors[hlSlot] : penColors[penSlot]; }
+    private int curColor() {
+        return drawPrefs.slots[DrawPrefs.clamp(activeSlotForTool(), 0, DrawPrefs.SLOT_COUNT - 1)] | 0xff000000;
+    }
 
     private void pickSlot(int i) {
-        if (tool == Engine.TOOL_HL) hlSlot = i;
-        else penSlot = i;
-        if (tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) tool = Engine.TOOL_PEN;
-        if (state != null && state.hasSelection) engine.selRecolor(slotColors()[i]);
+        int idx = DrawPrefs.clamp(i, 0, DrawPrefs.SLOT_COUNT - 1);
+        if (tool == Engine.TOOL_HL) drawPrefs.hlSlot = idx;
+        else if (tool == Engine.TOOL_SHAPE) drawPrefs.shapeStrokeSlot = idx;
+        else {
+            drawPrefs.penSlot = idx;
+            if (tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) tool = Engine.TOOL_PEN;
+        }
+        int col = drawPrefs.slots[idx] | 0xff000000;
+        if (state != null && state.hasSelection) {
+            engine.selRecolor(tool == Engine.TOOL_HL ? drawPrefs.hlColorArgb() : col);
+        }
         applyTool();
     }
 
-    /** Puts a colour into the current slot. */
-    private void setColor(int c) {
-        if (tool == Engine.TOOL_HL) hlColors[hlSlot] = c;
-        else penColors[penSlot] = c;
-        if (state != null && state.hasSelection) engine.selRecolor(c);
+    private boolean toolHasThickness() {
+        return tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_SHAPE;
+    }
+
+    private int activeThickSlotForTool() {
+        if (tool == Engine.TOOL_HL) return drawPrefs.hlThick;
+        if (tool == Engine.TOOL_SHAPE) return drawPrefs.shapeThick;
+        return drawPrefs.penThick;
+    }
+
+    private void setActiveThickSlot(int idx) {
+        int c = DrawPrefs.clamp(idx, 0, DrawPrefs.THICK_COUNT - 1);
+        if (tool == Engine.TOOL_HL) drawPrefs.hlThick = c;
+        else if (tool == Engine.TOOL_SHAPE) drawPrefs.shapeThick = c;
+        else drawPrefs.penThick = c;
+    }
+
+    private float[] thickWidthsForTool() {
+        if (tool == Engine.TOOL_HL) return drawPrefs.hlWidths;
+        if (tool == Engine.TOOL_SHAPE) return drawPrefs.shapeWidths;
+        return drawPrefs.penWidths;
+    }
+
+    private float thickMinForTool() {
+        return tool == Engine.TOOL_HL ? DrawPrefs.HL_MIN : tool == Engine.TOOL_SHAPE ? DrawPrefs.SHAPE_MIN : DrawPrefs.PEN_MIN;
+    }
+
+    private float thickMaxForTool() {
+        return tool == Engine.TOOL_HL ? DrawPrefs.HL_MAX : tool == Engine.TOOL_SHAPE ? DrawPrefs.SHAPE_MAX : DrawPrefs.PEN_MAX;
+    }
+
+    /** Tap a toolbar thickness slot: selects it, or re-tapping the active slot opens the customiser popover. */
+    private void pickThickSlot(int idx, View anchor) {
+        int prev = activeThickSlotForTool();
+        setActiveThickSlot(idx);
+        if (state != null && state.selShape && state.selShapeStyle != null && tool == Engine.TOOL_SHAPE) {
+            ShapeSpec sp = ShapeSpec.parse(state.selShapeStyle);
+            sp.strokeWidth = drawPrefs.shapeWidth();
+            engine.selUpdateShape(sp);
+        }
         applyTool();
+        if (prev == idx) showThickSlotEditor(anchor, idx);
+    }
+
+    /** Quick popover anchored to a toolbar thickness slot so the user can define all 3 slot thicknesses themselves. */
+    private void showThickSlotEditor(View anchor, int initialSlot) {
+        final int targetTool = toolHasThickness() ? tool : Engine.TOOL_PEN;
+        final boolean hl = targetTool == Engine.TOOL_HL;
+        final boolean sh = targetTool == Engine.TOOL_SHAPE;
+        Ui.Popover p = newPop(356).title(hl ? "Highlighter thickness" : sh ? "Shape border thickness" : "Pen thickness");
+        TextView sub = Ui.text(this, "Tap a slot to pick it · slide below to define its thickness",
+                12.5f, Ui.color(this, R.color.on_surface_variant), null);
+        sub.setPadding(0, 0, 0, Ui.dp(this, 8));
+        p.add(sub);
+
+        Ui.StrokePreview prev = !sh ? new Ui.StrokePreview(this) : null;
+        Runnable refreshPrev = () -> {
+            if (prev == null) return;
+            int tl = hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType;
+            float cw = hl ? drawPrefs.hlWidth() : drawPrefs.penWidth();
+            int colArgb = hl ? drawPrefs.hlColorArgb() : drawPrefs.penColorArgb();
+            prev.set(tl, colArgb, cw);
+            prev.zoom(state != null ? state.z : 0);
+        };
+        if (prev != null) {
+            LinearLayout.LayoutParams pl = fullW(68);
+            pl.bottomMargin = Ui.dp(this, 10);
+            prev.setLayoutParams(pl);
+            p.add(prev);
+            refreshPrev.run();
+        }
+
+        float[] widths = hl ? drawPrefs.hlWidths : sh ? drawPrefs.shapeWidths : drawPrefs.penWidths;
+        float minW = hl ? DrawPrefs.HL_MIN : sh ? DrawPrefs.SHAPE_MIN : DrawPrefs.PEN_MIN;
+        float maxW = hl ? DrawPrefs.HL_MAX : sh ? DrawPrefs.SHAPE_MAX : DrawPrefs.PEN_MAX;
+        int tintRgb = hl ? drawPrefs.hlColorRgb() : sh ? drawPrefs.shapeStrokeRgb() : drawPrefs.penColorRgb();
+        float curW = widths[DrawPrefs.clamp(initialSlot, 0, DrawPrefs.THICK_COUNT - 1)];
+
+        p.add(ShapeToolbar.customThicknessControl(this, widths, initialSlot, curW, minW, maxW, tintRgb, false,
+                new ShapeToolbar.ThicknessCallback() {
+                    @Override public void onSelectSlot(int slotIdx, float width) {
+                        if (hl) drawPrefs.hlThick = slotIdx;
+                        else if (sh) drawPrefs.shapeThick = slotIdx;
+                        else drawPrefs.penThick = slotIdx;
+                        applyTool();
+                        refreshPrev.run();
+                    }
+                    @Override public void onEditWidth(int slotIdx, float width) {
+                        if (hl) { drawPrefs.hlThick = slotIdx; drawPrefs.hlWidths[slotIdx] = width; }
+                        else if (sh) {
+                            drawPrefs.shapeThick = slotIdx;
+                            drawPrefs.shapeWidths[slotIdx] = width;
+                            if (state != null && state.selShape && state.selShapeStyle != null) {
+                                ShapeSpec sp = ShapeSpec.parse(state.selShapeStyle);
+                                sp.strokeWidth = width;
+                                engine.selUpdateShape(sp);
+                            }
+                        } else { drawPrefs.penThick = slotIdx; drawPrefs.penWidths[slotIdx] = width; }
+                        applyTool();
+                        refreshPrev.run();
+                    }
+                    @Override public void onResetDefaults() {
+                        if (hl) drawPrefs.resetHlWidths();
+                        else if (sh) drawPrefs.resetShapeWidths();
+                        else drawPrefs.resetPenWidths();
+                        applyTool();
+                        refreshPrev.run();
+                        toast("Thickness slots reset to defaults");
+                    }
+                }));
+        p.show(anchor);
+    }
+
+    /** Opens the full HEX/RGB/Spectrum colour picker for the 5 customisable colour slots. */
+    private void openColorPicker(int initialSlot, Runnable onDone) {
+        ColorPickerDialog.show(this, drawPrefs.slots, initialSlot, "Custom colour palette (5 slots)", new ColorPickerDialog.Callback() {
+            @Override public void onApply(int slotIndex, int rgbColor) {
+                drawPrefs.slots[slotIndex] = rgbColor | 0xff000000;
+                if (tool == Engine.TOOL_HL) drawPrefs.hlSlot = slotIndex;
+                else if (tool == Engine.TOOL_SHAPE) drawPrefs.shapeStrokeSlot = slotIndex;
+                else drawPrefs.penSlot = slotIndex;
+                drawPrefs.save(prefs);
+                if (state != null && state.hasSelection) {
+                    engine.selRecolor(tool == Engine.TOOL_HL ? drawPrefs.hlColorArgb() : (rgbColor | 0xff000000));
+                }
+                applyTool();
+                if (onDone != null) onDone.run();
+            }
+            @Override public void onResetDefaults() {
+                drawPrefs.resetColors();
+                drawPrefs.save(prefs);
+                applyTool();
+                toast("Colour palette reset to defaults");
+                if (onDone != null) onDone.run();
+            }
+        });
     }
 
     private int appliedTool = -1;
 
     private void applyTool() {
-        penB.set(tool == Engine.TOOL_PEN, penColors[penSlot], penColors[penSlot]);
-        hlB.set(tool == Engine.TOOL_HL, hlColors[hlSlot], hlColors[hlSlot]);
+        penW = drawPrefs.penWidth();
+        hlW = drawPrefs.hlWidth();
+        penB.set(tool == Engine.TOOL_PEN, drawPrefs.penColorRgb(), drawPrefs.penColorRgb());
+        hlB.set(tool == Engine.TOOL_HL, drawPrefs.hlColorRgb(), drawPrefs.hlColorRgb());
         eraserB.set(tool == Engine.TOOL_ERASER, 0, 0);
         lassoB.set(tool == Engine.TOOL_LASSO, 0, 0);
         laserB.set(tool == Engine.TOOL_LASER, LASER_COLORS[laserCol], 0);
         tapeB.set(tool == Engine.TOOL_TAPE, TAPE_COLORS[tapeCol], 0);
         textB.set(tool == Engine.TOOL_TEXT, 0, 0);
-        shapeB.set(tool == Engine.TOOL_SHAPE, penColors[penSlot], 0);
+        shapeB.setImageResource(ShapeToolbar.iconForKind(drawPrefs.shapeKind));
+        shapeB.set(tool == Engine.TOOL_SHAPE, drawPrefs.shapeStrokeRgb(), 0);
+        if (shapeToolbar != null) shapeToolbar.setSelectedKind(drawPrefs.shapeKind);
         if (tool != Engine.TOOL_LASSO) pendingToText = null;
         styleShelf();
+        placeShapeToolbar();
+        placeChips();
         boolean hl = tool == Engine.TOOL_HL;
-        int[] cols = slotColors();
-        int sel = hl ? hlSlot : penSlot;
-        for (int i = 0; i < 4; i++) sw[i].set(cols[i], tool != Engine.TOOL_ERASER && tool != Engine.TOOL_LASSO && tool != Engine.TOOL_LASER && tool != Engine.TOOL_TAPE && i == sel);
-        float frac = hl ? (hlW - HL_MIN) / (HL_MAX - HL_MIN) : tool == Engine.TOOL_TEXT ? (textPt - Fonts.PT_MIN) / (40 - Fonts.PT_MIN)
-                : tool == Engine.TOOL_ERASER ? (eraserDp - 6) / 24f : (penW - PEN_MIN) / (PEN_MAX - PEN_MIN);
+        int sel = activeSlotForTool();
+        boolean paletteActive = tool != Engine.TOOL_ERASER && tool != Engine.TOOL_LASSO && tool != Engine.TOOL_LASER && tool != Engine.TOOL_TAPE;
+        for (int i = 0; i < DrawPrefs.SLOT_COUNT; i++) {
+            sw[i].set(drawPrefs.slots[i], paletteActive && i == sel);
+        }
+        boolean showThick = toolHasThickness();
+        if (thickRow != null && thickSep != null) {
+            thickRow.setVisibility(showThick ? View.VISIBLE : View.GONE);
+            thickSep.setVisibility(showThick ? View.VISIBLE : View.GONE);
+            if (showThick) {
+                float[] ws = thickWidthsForTool();
+                float mn = thickMinForTool(), mx = thickMaxForTool();
+                int activeT = activeThickSlotForTool();
+                int tintRgb = hl ? drawPrefs.hlColorRgb() : tool == Engine.TOOL_SHAPE ? drawPrefs.shapeStrokeRgb() : drawPrefs.penColorRgb();
+                for (int i = 0; i < DrawPrefs.THICK_COUNT; i++) {
+                    thickBtns[i].set(DrawPrefs.widthFrac(ws[i], mn, mx));
+                    thickBtns[i].tint(tintRgb);
+                    thickBtns[i].chosen(i == activeT);
+                    thickBtns[i].setContentDescription("Thickness slot " + (i + 1) + " (" + DrawPrefs.formatMm(ws[i]) + ") · tap again or long-press to customise");
+                }
+            }
+        }
+        float frac = hl ? DrawPrefs.widthFrac(hlW, DrawPrefs.HL_MIN, DrawPrefs.HL_MAX)
+                : tool == Engine.TOOL_SHAPE ? DrawPrefs.widthFrac(drawPrefs.shapeWidth(), DrawPrefs.SHAPE_MIN, DrawPrefs.SHAPE_MAX)
+                : tool == Engine.TOOL_TEXT ? (textPt - Fonts.PT_MIN) / (40 - Fonts.PT_MIN)
+                : tool == Engine.TOOL_ERASER ? (eraserDp - 6) / 24f
+                : DrawPrefs.widthFrac(penW, DrawPrefs.PEN_MIN, DrawPrefs.PEN_MAX);
         sizeB.set(Math.max(0, Math.min(1, frac)));
         sizeB.setVisibility(tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE ? View.GONE : View.VISIBLE);
         palette.animate().alpha(tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE ? 0.4f : 1f).setDuration(120).start();
         engine.setTool(tool);
-        engine.setColor(Engine.TOOL_PEN, penColors[penSlot]);
-        engine.setColor(Engine.TOOL_HL, hlColors[hlSlot]);
+        engine.setColor(Engine.TOOL_PEN, drawPrefs.penColorArgb());
+        engine.setColor(Engine.TOOL_HL, drawPrefs.hlColorArgb());
         engine.setWidth(Engine.TOOL_PEN, penW);
         engine.setWidth(Engine.TOOL_HL, hlW);
+        engine.setShapeConfig(drawPrefs.makeShapeSpec(), drawPrefs.shapeLockCircle);
         engine.setTextSize(textPt * Fonts.UNITS_PER_PT);
         engine.setTextLook(textStyleEnc, 0);
         engine.setPenType(penType);
         engine.setEraserSize(eraserDp);
         // only a tool change drops the selection (colour / size changes recolour or keep a fresh shape's handles)
-        if (tool != appliedTool && tool != Engine.TOOL_LASSO) hideSelection();
+        if (tool != appliedTool && tool != Engine.TOOL_LASSO && tool != Engine.TOOL_SHAPE) hideSelection();
         // a tool was picked (from the bar or the shelf): the shelf closes unless it's pinned open
         if (tool != appliedTool && appliedTool != -1 && shelfOpen && !shelfPinned && pendingToText == null) setShelfOpen(false);
+        if (tool != appliedTool) {
+            for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
+            ui.post(this::fitCapsule);
+        }
         appliedTool = tool;
         updatePaste();
         renderFavs();
-        SharedPreferences.Editor e = prefs.edit().putInt("tool", tool).putInt("penColor", penSlot).putInt("hlColor", hlSlot)
+        drawPrefs.save(prefs);
+        prefs.edit().putInt("tool", tool).putInt("penColor", drawPrefs.penSlot).putInt("hlColor", drawPrefs.hlSlot)
                 .putFloat("penW", penW).putFloat("hlW", hlW).putFloat("textPt", textPt).putString("textStyle", textStyleEnc).putInt("penType", penType)
-                .putFloat("eraserDp", eraserDp);
-        for (int i = 0; i < 4; i++) e.putInt("pc" + i, penColors[i]).putInt("hc" + i, hlColors[i]);
-        e.apply();
+                .putFloat("eraserDp", eraserDp).apply();
     }
 
     // ---- tool panels -------------------------------------------------------------------------
@@ -1874,69 +2181,71 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void showPenPanel(View anchor, boolean hl) {
-        Ui.Popover p = newPop(372).title(hl ? "Highlighter" : tool == Engine.TOOL_SHAPE ? "Shapes · drawn strokes become clean shapes" : "Pen");
+        Ui.Popover p = newPop(372).title(hl ? "Highlighter" : "Pen");
         Ui.StrokePreview prev = new Ui.StrokePreview(this);
-        java.util.ArrayList<Ui.SizeDot> dots = new java.util.ArrayList<>();
-        float[] pr = hl ? HL_PRESETS : PEN_PRESETS;
         Runnable refresh = () -> {
             int tl = hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType;
-            float cw = hl ? hlW : penW;
-            prev.set(tl, curColor(), cw);
+            float cw = hl ? drawPrefs.hlWidth() : drawPrefs.penWidth();
+            int colArgb = hl ? drawPrefs.hlColorArgb() : drawPrefs.penColorArgb();
+            prev.set(tl, colArgb, cw);
             prev.zoom(state != null ? state.z : 0);
-            for (int i = 0; i < dots.size(); i++) {
-                dots.get(i).ink(inkPx(tl, pr[i]));
-                dots.get(i).chosen(Math.abs(pr[i] - cw) < 0.05f);
-            }
         };
         if (hl) {
             p.section("Tip");
             p.add(Ui.segmented(this, new String[]{"Round", "Flat"}, hlFlat ? 1 : 0, i -> { hlFlat = i == 1; saveOptions(); refresh.run(); }));
-        }
-        if (!hl) {
+        } else {
             p.section("Type");
             int sel = 0;
             for (int i = 0; i < PEN_TYPE_IDS.length; i++) if (PEN_TYPE_IDS[i] == penType) sel = i;
             p.add(Ui.segmented(this, PEN_TYPES, sel, i -> { penType = PEN_TYPE_IDS[i]; applyTool(); refresh.run(); }));
         }
-        LinearLayout.LayoutParams pl = fullW(84);
-        pl.topMargin = Ui.dp(this, 14);
+        LinearLayout.LayoutParams pl = fullW(78);
+        pl.topMargin = Ui.dp(this, 12);
         prev.setLayoutParams(pl);
         p.add(prev);
-        p.section("Thickness");
-        float min = hl ? HL_MIN : PEN_MIN, max = hl ? HL_MAX : PEN_MAX;
-        TextView wLabel = Ui.text(this, "", 12.5f, Ui.color(this, R.color.on_surface_variant), null);
-        // on an A4-wide page (1000 units = 210 mm), at normal writing pressure: the same width the dots show
-        Runnable label = () -> wLabel.setText(String.format(java.util.Locale.US, "%.1f mm",
-                new Stroke(hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType, 0, hl ? hlW : penW).radius(0.5f) * 2 * 0.21f));
-        SeekBar sb = Ui.slider(this, 100, wToSlider(hl ? hlW : penW, min, max), v -> {
-            float w = sliderToW(v, min, max);
-            if (hl) hlW = w; else penW = w;
+
+        // 3 user-definable thickness slots + customisation slider (remembered independently per tool)
+        p.section("Thickness (3 custom slots)");
+        p.add(ShapeToolbar.customThicknessControl(this,
+                hl ? drawPrefs.hlWidths : drawPrefs.penWidths,
+                hl ? drawPrefs.hlThick : drawPrefs.penThick,
+                hl ? drawPrefs.hlWidth() : drawPrefs.penWidth(),
+                hl ? DrawPrefs.HL_MIN : DrawPrefs.PEN_MIN,
+                hl ? DrawPrefs.HL_MAX : DrawPrefs.PEN_MAX,
+                hl ? drawPrefs.hlColorRgb() : drawPrefs.penColorRgb(),
+                false,
+                new ShapeToolbar.ThicknessCallback() {
+                    @Override public void onSelectSlot(int slotIdx, float width) {
+                        if (hl) drawPrefs.hlThick = slotIdx; else drawPrefs.penThick = slotIdx;
+                        applyTool();
+                        refresh.run();
+                    }
+                    @Override public void onEditWidth(int slotIdx, float width) {
+                        if (hl) { drawPrefs.hlThick = slotIdx; drawPrefs.hlWidths[slotIdx] = width; }
+                        else { drawPrefs.penThick = slotIdx; drawPrefs.penWidths[slotIdx] = width; }
+                        applyTool();
+                        refresh.run();
+                    }
+                    @Override public void onResetDefaults() {
+                        if (hl) drawPrefs.resetHlWidths(); else drawPrefs.resetPenWidths();
+                        applyTool();
+                        refresh.run();
+                        toast("Thickness slots reset to defaults");
+                    }
+                }));
+
+        // Independent Opacity slider (0%..100%)
+        int curOp = hl ? drawPrefs.hlOpacity : drawPrefs.penOpacity;
+        TextView opLbl = Ui.text(this, "Opacity · " + curOp + "%", 12.5f, Ui.color(this, R.color.on_surface_variant), Ui.medium());
+        opLbl.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 4));
+        p.add(opLbl);
+        p.add(Ui.slider(this, 100, curOp, v -> {
+            if (hl) drawPrefs.hlOpacity = v; else drawPrefs.penOpacity = v;
+            opLbl.setText("Opacity · " + v + "%");
             applyTool();
             refresh.run();
-            label.run();
-        });
-        LinearLayout presets = new LinearLayout(this);
-        presets.setGravity(Gravity.CENTER_VERTICAL);
-        for (int i = 0; i < pr.length; i++) {
-            final float w = pr[i];
-            Ui.SizeDot d = new Ui.SizeDot(this);
-            d.tint(curColor());
-            d.setOnClickListener(v -> {
-                if (hl) hlW = w; else penW = w;
-                sb.setProgress(wToSlider(w, min, max));
-                applyTool();
-                refresh.run();
-                label.run();
-            });
-            dots.add(d);
-            presets.addView(d);
-        }
-        presets.addView(sb, new LinearLayout.LayoutParams(0, -2, 1f));
-        label.run();
-        presets.addView(wLabel, new LinearLayout.LayoutParams(Ui.dp(this, 52), -2));
-        wLabel.setGravity(Gravity.END);
-        p.add(presets);
-        refresh.run();
+        }));
+
         if (hl) {
             p.section("Straighten on lift");
             p.add(Ui.segmented(this, new String[]{"Off", "Auto", "Always"}, hlStraight,
@@ -1946,8 +2255,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             sh.setPadding(0, Ui.dp(this, 6), 0, 0);
             p.add(sh);
         }
-        p.section("Colour");
-        p.add(Ui.colorGrid(this, hl ? HL_PALETTE : INK_PALETTE, curColor(), c -> { setColor(c); refresh.run(); pop.dismiss(); }));
+
+        // 5 customisable colour slots + Customise button (HEX / RGB / Spectrum / Reset)
+        p.section("Colour palette (5 custom slots)");
+        p.add(ShapeToolbar.fiveSlotRow(this, drawPrefs.slots, hl ? drawPrefs.hlColorRgb() : drawPrefs.penColorRgb(), (slotIdx, col) -> {
+            if (hl) drawPrefs.hlSlot = slotIdx; else drawPrefs.penSlot = slotIdx;
+            applyTool();
+            refresh.run();
+        }, slotIdx -> {
+            pop.dismiss();
+            openColorPicker(slotIdx, () -> showPenPanel(anchor, hl));
+        }));
+        refresh.run();
+
         LinearLayout.LayoutParams fl = fullW(-1);
         fl.topMargin = Ui.dp(this, 8);
         View fav = Ui.actionRow(this, R.drawable.ic_star, "Save as favourite", "Puts this pen in the tool bar for one-tap switching",
@@ -1955,6 +2275,65 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         fav.setLayoutParams(fl);
         p.add(fav);
         addMoveRow(p);
+        p.show(anchor);
+    }
+
+    /** Shape appearance, fill styles, thickness presets, opacity, geometry & layer order popover. */
+    private void showShapeStylePanel(View anchor, boolean editingExisting) {
+        ShapeSpec initial = editingExisting && state != null && state.selShapeStyle != null
+                ? ShapeSpec.parse(state.selShapeStyle)
+                : drawPrefs.makeShapeSpec();
+        Ui.Popover p = newPop(388);
+        ShapeToolbar.populateStylePopover(this, p, drawPrefs, initial, editingExisting, new ShapeToolbar.StyleCallback() {
+            @Override public void onSpecChanged(ShapeSpec updated) {
+                if (editingExisting) {
+                    engine.selUpdateShape(updated);
+                } else {
+                    drawPrefs.shapeFillStyle = updated.fillStyle;
+                    drawPrefs.shapeStrokeOpacity = updated.strokeAlpha;
+                    if (updated.fillStyle == ShapeSpec.STYLE_TRANSPARENT || updated.fillStyle == ShapeSpec.STYLE_CUSTOM) {
+                        drawPrefs.shapeFillOpacity = updated.fillAlpha;
+                    }
+                    drawPrefs.shapeCornerRadius = updated.cornerRadius;
+                    drawPrefs.shapePolygonSides = updated.sides;
+                    drawPrefs.shapeArrowSize = updated.arrowSize;
+                    drawPrefs.save(prefs);
+                    applyTool();
+                }
+            }
+            @Override public void onEditSlot(int slotIndex, Runnable afterEdit) {
+                pop.dismiss();
+                openColorPicker(slotIndex, () -> {
+                    if (afterEdit != null) afterEdit.run();
+                    showShapeStylePanel(anchor, editingExisting);
+                });
+            }
+            @Override public void onLayerOrder(int op) {
+                engine.selReorderShape(op);
+            }
+        });
+        if (!editingExisting) addMoveRow(p);
+        p.show(anchor);
+    }
+
+    /** Dedicated quick Layer Order menu for a selected shape (behind vs in front of handwriting). */
+    private void showShapeOrderMenu(View anchor) {
+        ShapeSpec sp = state != null && state.selShapeStyle != null ? ShapeSpec.parse(state.selShapeStyle) : new ShapeSpec();
+        Ui.Popover p = newPop(300).title("Layer order");
+        TextView status = Ui.text(this, sp.zOrder < 0
+                ? "Currently behind handwriting (default so writing stays readable)"
+                : "Currently in front of handwriting",
+                12.5f, Ui.color(this, R.color.accent), Ui.medium());
+        status.setPadding(0, 0, 0, Ui.dp(this, 8));
+        p.add(status);
+        p.add(Ui.actionRow(this, R.drawable.ic_layer_front, "Bring to Front", "Places shape above handwriting & other shapes",
+                v -> { pop.dismiss(); engine.selReorderShape(ShapeSpec.Z_BRING_TO_FRONT); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_layer_forward, "Bring Forward", "Moves one step forward (can cross above handwriting)",
+                v -> { pop.dismiss(); engine.selReorderShape(ShapeSpec.Z_BRING_FORWARD); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_layer_backward, "Send Backward", "Moves one step back (can return behind handwriting)",
+                v -> { pop.dismiss(); engine.selReorderShape(ShapeSpec.Z_SEND_BACKWARD); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_layer_back, "Send to Back", "Places shape behind handwriting & all other shapes",
+                v -> { pop.dismiss(); engine.selReorderShape(ShapeSpec.Z_SEND_TO_BACK); }));
         p.show(anchor);
     }
 
@@ -2118,22 +2497,53 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void fitCapsule() {
         if (capTools == null || root.getWidth() == 0) return;
-        // dropped in this order until the bar fits (favourites stay reachable under their own disc); the shelf scrolls
-        View[] order = {favRow, favSep, sw[0], sw[1], sw[2], sw[3]};
         boolean vert = dockVertical();
+        boolean showThick = toolHasThickness();
         // a column must clear the top bars; a row must fit the width
         int avail = vert ? root.getHeight() - Ui.dp(this, 2 * (EDGE_DP + CAP_DP + 12)) : root.getWidth() - Ui.dp(this, 2 * EDGE_DP);
-        for (View v : order) if (v != null && v != favRow && v != favSep) v.setVisibility(View.VISIBLE);
+        for (int i = 0; i < DrawPrefs.SLOT_COUNT; i++) if (sw[i] != null) sw[i].setVisibility(View.VISIBLE);
+        if (thickRow != null) thickRow.setVisibility(showThick ? View.VISIBLE : View.GONE);
+        if (thickSep != null) thickSep.setVisibility(showThick ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < DrawPrefs.THICK_COUNT; i++) if (thickBtns[i] != null) thickBtns[i].setVisibility(showThick ? View.VISIBLE : View.GONE);
         moreToolsB.setVisibility(View.GONE);
         favsFolded = false;
         renderFavs();
+        setStyleFloating(false);
         int tc = View.MeasureSpec.makeMeasureSpec(Ui.dp(this, TOOLCAP_DP), View.MeasureSpec.EXACTLY), free = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
-        for (View v : order) {
-            if (vert) capTools.measure(tc, free); else capTools.measure(free, tc);
-            if ((vert ? capTools.getMeasuredHeight() : capTools.getMeasuredWidth()) <= avail) break;
-            if (v != null) v.setVisibility(View.GONE);
-            if (v == favRow && !favs.isEmpty()) { favsFolded = true; moreToolsB.setVisibility(View.VISIBLE); }
+        if (vert) {
+            View[] order = {favRow, favSep, sw[4], sw[3], thickBtns[2], sw[2], thickBtns[1], sw[1], thickBtns[0], thickSep, sw[0]};
+            for (View v : order) {
+                capTools.measure(tc, free);
+                if (capTools.getMeasuredHeight() <= avail) break;
+                if (v != null) v.setVisibility(View.GONE);
+                if (v == favRow && !favs.isEmpty()) { favsFolded = true; moreToolsB.setVisibility(View.VISIBLE); }
+            }
+        } else {
+            // Try fitting inline first (folding favourites before floating the style capsule)
+            for (View v : new View[]{favRow, favSep}) {
+                capTools.measure(free, tc);
+                if (capTools.getMeasuredWidth() <= avail) break;
+                if (v != null) v.setVisibility(View.GONE);
+                if (v == favRow && !favs.isEmpty()) { favsFolded = true; moreToolsB.setVisibility(View.VISIBLE); }
+            }
+            capTools.measure(free, tc);
+            if (capTools.getMeasuredWidth() > avail) {
+                // Narrow screen (portrait phone): float the 5 colour slots + 3 thickness slots into capStyle right beside capTools so none disappear
+                setStyleFloating(true);
+                int sc = View.MeasureSpec.makeMeasureSpec(Ui.dp(this, STYLECAP_DP), View.MeasureSpec.EXACTLY);
+                View[] styleOrder = {sw[4], sw[3], thickBtns[2], sw[2], thickBtns[1], sw[1], thickBtns[0], thickSep, sw[0]};
+                for (View v : styleOrder) {
+                    capStyle.measure(free, sc);
+                    if (capStyle.getMeasuredWidth() <= avail) break;
+                    if (v != null) v.setVisibility(View.GONE);
+                }
+            }
         }
+        placeStyleBar();
+        placeShelf(false);
+        placeShapeToolbar();
+        placeChips();
+        for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
         // narrow window: bookmark + pages leave the top-right capsule (both stay in ⋯ / the page counter)
         boolean narrow = root.getWidth() < Ui.dp(this, 520);
         boolean canvas = state != null && state.canvas;
@@ -2255,18 +2665,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         commitTextEdit();
         tool = f[0];
         boolean hl = tool == Engine.TOOL_HL;
-        int[] cols = hl ? hlColors : penColors;
+        int col = f[2] | 0xff000000;
         int slot = -1;
-        for (int i = 0; i < 4; i++) if (cols[i] == f[2]) slot = i;
-        if (slot < 0) { slot = hl ? hlSlot : penSlot; cols[slot] = f[2]; }
+        for (int i = 0; i < DrawPrefs.SLOT_COUNT; i++) if ((drawPrefs.slots[i] | 0xff000000) == col) { slot = i; break; }
+        if (slot < 0) { slot = hl ? drawPrefs.hlSlot : drawPrefs.penSlot; drawPrefs.slots[slot] = col; }
         float w = Float.intBitsToFloat(f[3]);
-        if (hl) { hlSlot = slot; hlW = w; } else { penSlot = slot; penW = w; penType = f[1]; }
+        if (hl) { drawPrefs.hlSlot = slot; drawPrefs.hlThick = DrawPrefs.nearestPreset(w, drawPrefs.hlWidths); }
+        else { drawPrefs.penSlot = slot; drawPrefs.penThick = DrawPrefs.nearestPreset(w, drawPrefs.penWidths); penType = f[1]; }
         applyTool();
     }
 
     private void addFav() {
         boolean hl = tool == Engine.TOOL_HL;
-        int[] f = {hl ? Engine.TOOL_HL : Engine.TOOL_PEN, penType, curColor(), Float.floatToIntBits(hl ? hlW : penW)};
+        int[] f = {hl ? Engine.TOOL_HL : Engine.TOOL_PEN, penType, curColor(), Float.floatToIntBits(hl ? drawPrefs.hlWidth() : drawPrefs.penWidth())};
         for (int[] g : favs) if (java.util.Arrays.equals(g, f)) { toast("Already a favourite"); return; }
         if (favs.size() >= 4) { toast("Up to 4 favourites · long-press one in the tool bar to remove it"); return; }
         favs.add(f);
@@ -2297,21 +2708,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void showColors(View anchor) {
-        if (tool == Engine.TOOL_ERASER || tool == Engine.TOOL_LASSO && (state == null || !state.hasSelection)) {
+        if (tool == Engine.TOOL_ERASER || (tool == Engine.TOOL_LASSO && (state == null || !state.hasSelection))) {
             tool = prevToolForColor();
             applyTool();
         }
-        boolean hl = tool == Engine.TOOL_HL;
-        Ui.Popover p = newPop(340).title(hl ? "Highlighter colour" : "Ink colour");
-        TextView hint = Ui.text(this, "Replaces the selected colour slot · long-press a slot to edit it", 12.5f,
-                Ui.color(this, R.color.on_surface_variant), null);
-        hint.setPadding(0, 0, 0, Ui.dp(this, 10));
-        p.add(hint);
-        p.add(Ui.colorGrid(this, hl ? HL_PALETTE : INK_PALETTE, curColor(), c -> { setColor(c); pop.dismiss(); }));
-        p.show(anchor);
+        openColorPicker(activeSlotForTool(), null);
     }
 
-    private int prevToolForColor() { return prevTool == Engine.TOOL_HL ? Engine.TOOL_HL : Engine.TOOL_PEN; }
+    private int prevToolForColor() { return prevTool == Engine.TOOL_HL ? Engine.TOOL_HL : prevTool == Engine.TOOL_SHAPE ? Engine.TOOL_SHAPE : Engine.TOOL_PEN; }
 
     private void showEraserPanel(View anchor) {
         Ui.Popover p = newPop(340).title("Eraser");
@@ -2356,7 +2760,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         p.section("Style");
         p.add(styleRow(st, s2 -> { textStyleEnc = s2.encode(); applyTool(); }));
         p.section("Colour");
-        p.add(Ui.colorGrid(this, INK_PALETTE, penColors[penSlot], c -> { penColors[penSlot] = c; applyTool(); pop.dismiss(); }));
+        p.add(ShapeToolbar.fiveSlotRow(this, drawPrefs.slots, drawPrefs.penColorRgb(), (slotIdx, col) -> {
+            drawPrefs.penSlot = slotIdx;
+            applyTool();
+            pop.dismiss();
+        }, slotIdx -> {
+            pop.dismiss();
+            openColorPicker(slotIdx, () -> showTextPanel(anchor));
+        }));
         TextView hint = Ui.text(this, "Tap the page to add a text box · tap a box to edit it", 12.5f,
                 Ui.color(this, R.color.on_surface_variant), null);
         hint.setPadding(0, Ui.dp(this, 12), 0, 0);
@@ -3340,21 +3751,120 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     // ---- selection -------------------------------------------------------------------------
 
-    /** Draws the selection frame; never takes touches (the engine handles drags). */
+    /** Draws the selection frame, live vector shape previews & editable shape handles; never takes touches. */
     private static final class SelectionView extends View {
         RectF r;
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         SelectionView(EditorActivity a) { super(a); }
-        float[] handles; // a lone shape's stretch handles (view px)
+        float[] handles; // legacy lone shape stroke stretch handles (view px)
         boolean line;
-        void set(RectF nr) { r = nr; if (nr == null) handles = null; invalidate(); }
-        int box = -1; // handles from here on are the scaling box's corners
+        int box = -1;
+
+        // Advanced editable vector shape overlay (live preview + rotated box + corner/rotate/vertex/control/tail handles)
+        Notebook.Item shapePreview;
+        float shOx, shOy, shZ = 1f, shTop;
+        boolean shDark;
+        float[] shHandles;
+        int[] shHandleIds;
+        float[] shBox;
+
+        void set(RectF nr) {
+            r = nr;
+            if (nr == null) { handles = null; shHandles = null; shHandleIds = null; shBox = null; }
+            invalidate();
+        }
         void setHandles(float[] h, boolean ln, int bx) { handles = h; line = ln; box = bx; invalidate(); }
+        void setShapeOverlay(Notebook.Item preview, float ox, float oy, float z, float pageTop, boolean darkPaper,
+                             float[] hs, int[] ids, float[] boxCorners) {
+            shapePreview = preview;
+            shOx = ox; shOy = oy; shZ = z > 0 ? z : 1f; shTop = pageTop; shDark = darkPaper;
+            shHandles = hs; shHandleIds = ids; shBox = boxCorners;
+            invalidate();
+        }
+
         @Override protected void onDraw(Canvas c) {
-            if (r == null) return;
             float d = getResources().getDisplayMetrics().density;
             int acc = Ui.color(getContext(), R.color.accent);
-            if (handles != null) { // a shape: knobs on its own corners / ends, plus a light box whose corners scale it
+
+            // 1. Live vector shape preview (during drag-creation, freeform sketching, or interactive handle dragging)
+            if (shapePreview != null) {
+                c.save();
+                c.scale(shZ, shZ);
+                c.translate(-shOx, shTop - shOy);
+                ShapeSpec.draw(c, shapePreview, shDark);
+                c.restore();
+            }
+
+            // 2. Editable vector shape handles (rotated bounding box + corner resize + top rotate + vertices/endpoints/control/tail)
+            if (shHandles != null && shHandleIds != null && shHandleIds.length > 0) {
+                if (shBox != null && shBox.length >= 8) {
+                    p.setStyle(Paint.Style.STROKE);
+                    p.setStrokeWidth(1.4f * d);
+                    p.setColor((acc & 0x00ffffff) | 0xaa000000);
+                    p.setPathEffect(new DashPathEffect(new float[]{5 * d, 4 * d}, 0));
+                    c.drawLine(shBox[0], shBox[1], shBox[2], shBox[3], p);
+                    c.drawLine(shBox[2], shBox[3], shBox[4], shBox[5], p);
+                    c.drawLine(shBox[4], shBox[5], shBox[6], shBox[7], p);
+                    c.drawLine(shBox[6], shBox[7], shBox[0], shBox[1], p);
+                    p.setPathEffect(null);
+                    // Draw rotation stem from midpoint of top edge to rotate handle if present
+                    for (int k = 0; k < shHandleIds.length; k++) {
+                        if (shHandleIds[k] == ShapeSpec.HANDLE_ROTATE && k * 2 + 1 < shHandles.length) {
+                            float topMx = (shBox[0] + shBox[2]) * 0.5f;
+                            float topMy = (shBox[1] + shBox[3]) * 0.5f;
+                            p.setStrokeWidth(1.5f * d);
+                            p.setColor((acc & 0x00ffffff) | 0xcc000000);
+                            c.drawLine(topMx, topMy, shHandles[k * 2], shHandles[k * 2 + 1], p);
+                            break;
+                        }
+                    }
+                }
+                for (int k = 0; k < shHandleIds.length && k * 2 + 1 < shHandles.length; k++) {
+                    int id = shHandleIds[k];
+                    float hx = shHandles[k * 2], hy = shHandles[k * 2 + 1];
+                    if (id == ShapeSpec.HANDLE_ROTATE) {
+                        float rad = 10f * d;
+                        p.setStyle(Paint.Style.FILL);
+                        p.setColor(0xffffffff);
+                        c.drawCircle(hx, hy, rad, p);
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(2.2f * d);
+                        p.setColor(acc);
+                        c.drawCircle(hx, hy, rad, p);
+                        // Subtle rotation arc indicator inside the knob
+                        p.setStrokeWidth(1.8f * d);
+                        c.drawArc(new RectF(hx - 4.5f * d, hy - 4.5f * d, hx + 4.5f * d, hy + 4.5f * d), -60, 260, false, p);
+                    } else if (id >= ShapeSpec.HANDLE_POINT_BASE) {
+                        // Geometry point: vertex / endpoint / Bezier control point / speech-bubble tail tip
+                        float rad = 8.5f * d;
+                        p.setStyle(Paint.Style.FILL);
+                        p.setColor(0xffffffff);
+                        c.drawCircle(hx, hy, rad, p);
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(2.2f * d);
+                        p.setColor(0xffff7a1a);
+                        c.drawCircle(hx, hy, rad, p);
+                        p.setStyle(Paint.Style.FILL);
+                        p.setColor(0xffff7a1a);
+                        c.drawCircle(hx, hy, 3.2f * d, p);
+                    } else {
+                        // Corner resize handle (0..3)
+                        float hs = 6.5f * d;
+                        RectF q = new RectF(hx - hs, hy - hs, hx + hs, hy + hs);
+                        p.setStyle(Paint.Style.FILL);
+                        p.setColor(0xffffffff);
+                        c.drawRoundRect(q, 2.5f * d, 2.5f * d, p);
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(2f * d);
+                        p.setColor(acc);
+                        c.drawRoundRect(q, 2.5f * d, 2.5f * d, p);
+                    }
+                }
+                return;
+            }
+
+            if (r == null) return;
+            if (handles != null) { // legacy stroke shape: knobs on its own corners / ends, plus a light box whose corners scale it
                 if (box >= 0 && box + 7 < handles.length) {
                     RectF bx = new RectF(handles[box], handles[box + 1], handles[box + 4], handles[box + 5]);
                     p.setStyle(Paint.Style.STROKE);
@@ -3414,14 +3924,22 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         selBar.setGravity(Gravity.CENTER_VERTICAL);
         Ui.pill(selBar, this);
         selBar.setVisibility(View.GONE);
+        editTextB = selAction(R.drawable.ic_text, "Edit text", v -> engine.editSelectedText());
+        editTextB.setVisibility(View.GONE);
+        selBar.addView(editTextB);
+        shapeStyleB = selAction(R.drawable.ic_palette, "Style", v -> showShapeStylePanel(v, true));
+        shapeStyleB.setVisibility(View.GONE);
+        selBar.addView(shapeStyleB);
+        shapeOrderB = selAction(R.drawable.ic_layer_front, "Order", this::showShapeOrderMenu);
+        shapeOrderB.setVisibility(View.GONE);
+        selBar.addView(shapeOrderB);
         selBar.addView(selAction(R.drawable.ic_copy, "Copy", v -> engine.selCopy()));
         selBar.addView(selAction(R.drawable.ic_cut, "Cut", v -> engine.selCut()));
         selBar.addView(selAction(R.drawable.ic_duplicate, "Duplicate", v -> engine.selDuplicate()));
-        selBar.addView(selAction(R.drawable.ic_text, "To text", v -> engine.selInk(ink -> showConvert(v, ink))));
-        editTextB = selAction(R.drawable.ic_text, "Edit text", v -> engine.editSelectedText());
-        editTextB.setVisibility(View.GONE);
-        selBar.addView(editTextB, 0);
-        selBar.addView(selAction(R.drawable.ic_sparkle, "Beautify", v -> beautify(false)));
+        toTextB = selAction(R.drawable.ic_text, "To text", v -> engine.selInk(ink -> showConvert(v, ink)));
+        selBar.addView(toTextB);
+        beautifyB = selAction(R.drawable.ic_sparkle, "Beautify", v -> beautify(false));
+        selBar.addView(beautifyB);
         toLayerB = selAction(R.drawable.ic_layers, "Layer", this::pickLayerForSelection);
         toLayerB.setVisibility(View.GONE);
         selBar.addView(toLayerB);
@@ -3610,14 +4128,18 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             engine.selInk(ink -> { if (!ink.isEmpty()) showConvert(anchor, ink); });
         }
         selBar.setVisibility(View.VISIBLE);
-        int availW = panes[focusPane].getWidth() - Ui.dp(this, 24), fitKey = availW * 2 + (editTextB.getVisibility() == View.VISIBLE ? 1 : 0);
+        int availW = panes[focusPane].getWidth() - Ui.dp(this, 24);
+        int fitKey = availW * 8
+                + (editTextB.getVisibility() == View.VISIBLE ? 1 : 0)
+                + (shapeStyleB != null && shapeStyleB.getVisibility() == View.VISIBLE ? 2 : 0)
+                + (toLayerB != null && toLayerB.getVisibility() == View.VISIBLE ? 4 : 0);
         if (fitKey != selFitKey) { selFitKey = fitKey; fitSelBar(availW); } // not on every frame of a drag
         else selBar.measure(0, 0);
         float bw = selBar.getMeasuredWidth(), bh = selBar.getMeasuredHeight();
         float px = paneLeft();
         float x = Math.max(px + Ui.dp(this, 12), Math.min(px + panes[focusPane].getWidth() - bw - Ui.dp(this, 12), px + r.centerX() - bw / 2));
         float pt = paneTop();
-        float y = pt + r.top - bh - Ui.dp(this, 24);
+        float y = pt + r.top - bh - Ui.dp(this, 36);
         if (y < Math.max(pt, Ui.dp(this, EDGE_DP + CAP_DP + 8))) y = Math.min(pt + r.bottom + Ui.dp(this, 26), root.getHeight() - bh - Ui.dp(this, 70));
         selBar.setTranslationX(x);
         selBar.setTranslationY(y);
@@ -3625,6 +4147,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void hideSelection() {
         selView.set(null);
+        selView.setShapeOverlay(null, 0, 0, 1, 0, false, null, null, null);
         selBar.setVisibility(View.GONE);
     }
 
@@ -4483,6 +5006,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     @Override
     public void onState(Engine.State s) {
         if (editTextB != null) editTextB.setVisibility(s.selText ? View.VISIBLE : View.GONE);
+        if (shapeStyleB != null) shapeStyleB.setVisibility(s.selShape ? View.VISIBLE : View.GONE);
+        if (shapeOrderB != null) shapeOrderB.setVisibility(s.selShape ? View.VISIBLE : View.GONE);
+        if (toTextB != null) toTextB.setVisibility(s.selShape ? View.GONE : View.VISIBLE);
+        if (beautifyB != null) beautifyB.setVisibility(s.selShape ? View.GONE : View.VISIBLE);
         if (toLayerB != null) toLayerB.setVisibility(s.layerIds.length > 1 ? View.VISIBLE : View.GONE);
         if (layersBox != null && pop != null && layersBox.isAttachedToWindow()) ui.post(() -> renderLayers(layersBox));
         state = s;

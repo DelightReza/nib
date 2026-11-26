@@ -47,7 +47,8 @@ final class Engine implements Choreographer.FrameCallback {
     static final float[] TEXT_SIZES = {20f, 28f, 42f};
 
     static final class State {
-        boolean canUndo, canRedo, front, hasSelection, hasClipboard, canvas, selText;
+        boolean canUndo, canRedo, front, hasSelection, hasClipboard, canvas, selText, selShape;
+        String selShapeStyle;
         int page, pages, bg, zoom, paper, undoCount, redoCount;
         String[] marks; // per page: bookmark title ("" untitled) or null
         float spacing = 1f, strength = 1f; // current page's look
@@ -90,6 +91,9 @@ final class Engine implements Choreographer.FrameCallback {
         /** Stretch handles of a lone selected shape, in view px (null = none); line: just its two ends. */
         /** A lone shape's handles (screen px); from index box on (if >= 0) they are its scaling box's corners. */
         default void onHandles(float[] screen, boolean line, int box) {}
+        /** Live vector shape preview + editable handles (corners, rotate, vertices/control/tail) in screen px. */
+        default void onShapeOverlay(Notebook.Item preview, float ox, float oy, float z, float pageTop, boolean darkPaper,
+                                    float[] handleScreen, int[] handleIds, float[] boxCornersScreen) {}
         /** Zoom (% of fit-width) while pinching; a few times a second at most. */
         default void onZoom(int pct) {}
     }
@@ -146,8 +150,22 @@ final class Engine implements Choreographer.FrameCallback {
     private int tn;
 
     // gestures
-    private static final int G_NONE = 0, G_INK = 1, G_ERASE = 2, G_PAN = 3, G_IGNORE = 4, G_LASSO = 5, G_SEL = 6, G_TAP = 7, G_LASER = 8, G_TAPE = 9;
+    private static final int G_NONE = 0, G_INK = 1, G_ERASE = 2, G_PAN = 3, G_IGNORE = 4, G_LASSO = 5, G_SEL = 6, G_TAP = 7, G_LASER = 8, G_TAPE = 9, G_SHAPE = 10;
     private int gest = G_NONE;
+
+    // shape & design tool (engine thread)
+    private ShapeSpec shapeSpec = new ShapeSpec();
+    private boolean shapeLockCircle = true;
+    private int shPage;
+    private float shX0, shY0, shX1, shY1, shDownSx, shDownSy;
+    private boolean shMoved;
+    private float[] freePts = new float[256];
+    private int freeN;
+    private Notebook.Item liveDraftShape;
+    private int itemShapeHandle = -1;
+    private Notebook.Item itemShapeOrig, liveEditShape;
+    private Object[] itemShapeBefore;
+    private int itemShapeIdx = -1;
     private volatile long penNear, stylusAt; // stylusAt: only the real pen (hover / touch), so fingers don't write next to it
     private boolean fingerGest;             // the current gesture was started by a finger (finger drawing on)
     private static final float FINGER_P = 0.5f; // fingers report contact size, not pressure: draw at the nominal width
@@ -274,11 +292,17 @@ final class Engine implements Choreographer.FrameCallback {
     void setTool(int t) {
         h.post(() -> {
             if (t != tool) {
-                if (t != TOOL_LASSO) clearSelection();
+                if (t != TOOL_LASSO && !(t == TOOL_SHAPE && itemShapeMode())) clearSelection();
                 if (t != TOOL_LASER && hovering) { hovering = false; laserUpAt = SystemClock.uptimeMillis(); requestFrame(); }
                 tool = t;
             }
         });
+    }
+
+    /** Configures the active Shape & Design tool (kind, fill style, colours, opacities, thickness, options). */
+    void setShapeConfig(ShapeSpec spec, boolean lockCircle) {
+        final ShapeSpec cp = spec != null ? spec.copy() : new ShapeSpec();
+        h.post(() -> { shapeSpec = cp; shapeLockCircle = lockCircle; });
     }
 
     /** Tape tool: colour, pattern (Notebook.Item.TAPE_PATTERNS) and strip thickness in page units. */
@@ -1021,9 +1045,60 @@ final class Engine implements Choreographer.FrameCallback {
             if (!hasSel()) return;
             ArrayList<Stroke> ns = new ArrayList<>();
             ArrayList<Notebook.Item> ni = new ArrayList<>();
+            int rgb = color | 0xff000000;
             for (Stroke s : selStrokes) ns.add(s.hl() ? s : s.withColor(color));
-            for (Notebook.Item it : selItems) ni.add(it.type == Notebook.Item.TEXT || it.type == Notebook.Item.TAPE ? it.withColor(color) : it);
+            for (Notebook.Item it : selItems) {
+                if (it.type == Notebook.Item.TEXT || it.type == Notebook.Item.TAPE) {
+                    ni.add(it.withColor(rgb));
+                } else if (it.type == Notebook.Item.SHAPE) {
+                    ShapeSpec sp = ShapeSpec.of(it).copy();
+                    if (sp.strokeAlpha == 0 && sp.fillStyle != ShapeSpec.STYLE_OUTLINE) sp.fillColor = rgb;
+                    else sp.strokeColor = rgb;
+                    ni.add(ShapeSpec.withSpec(it, sp));
+                } else {
+                    ni.add(it);
+                }
+            }
+            dropShapeTextures();
             replaceSelection(ns, ni, true);
+        });
+    }
+
+    /** Updates style/fill/border/opacity/thickness/geometry properties of a selected SHAPE item (one undo step). */
+    void selUpdateShape(ShapeSpec updated) {
+        if (updated == null) return;
+        final ShapeSpec cp = updated.copy();
+        h.post(() -> {
+            if (!itemShapeMode()) return;
+            Notebook.Item cur = selItems.get(0);
+            Notebook.Item next = ShapeSpec.withSpec(cur, cp);
+            ArrayList<Notebook.Item> ni = new ArrayList<>();
+            ni.add(next);
+            dropShapeTextures();
+            replaceSelection(new ArrayList<>(), ni, true);
+        });
+    }
+
+    /** Changes stacking order (Bring to Front, Bring Forward, Send Backward, Send to Back) of a selected SHAPE (undoable). */
+    void selReorderShape(int op) {
+        h.post(() -> {
+            if (!itemShapeMode()) return;
+            Notebook.Page p = book.pages.get(selPage);
+            Notebook.Item cur = selItems.get(0);
+            Object[] before = pageState(p);
+            Notebook.Item reordered = ShapeSpec.reorder(p.items(), cur, op);
+            if (reordered == cur) {
+                ShapeSpec sp = ShapeSpec.of(cur);
+                toast(sp.zOrder < 0 ? "Already at the back (behind handwriting)" : "Already at the front (in front of handwriting)");
+                return;
+            }
+            push(new PageEdit(p, before, pageState(p)));
+            ArrayList<Notebook.Item> one = new ArrayList<>();
+            one.add(reordered);
+            select(selPage, new ArrayList<>(), one);
+            edited();
+            ShapeSpec sp = ShapeSpec.of(reordered);
+            toast(sp.zOrder < 0 ? "Order updated · behind handwriting" : "Order updated · in front of handwriting");
         });
     }
 
@@ -1833,9 +1908,28 @@ final class Engine implements Choreographer.FrameCallback {
                 if (t == null) t = tex("pdf:" + idx + ":1800", () -> pdfPage(idx, 1800));
                 if (t != null) gl.tex(t.id, 0, tops[i], PW, p.h, 1);
             }
+            // Pass 1 (pre-ink): IMAGE, TEXT, and behind-ink SHAPE items (zOrder < 0, default behind handwriting!)
+            ArrayList<Notebook.Item> behindShapes = new ArrayList<>();
             for (Notebook.Item it : book.itemsInDrawOrder(p.items())) {
                 if (it == editing || it.type == Notebook.Item.TAPE || (i == selPage && selItems.contains(it)) || !book.layerVisible(it.layer)) continue;
-                drawItem(it, tops[i]);
+                if (it.type == Notebook.Item.SHAPE) {
+                    if (ShapeSpec.isBehindInk(it)) behindShapes.add(it);
+                } else {
+                    drawItem(it, tops[i]);
+                }
+            }
+            behindShapes.sort((a, b) -> Integer.compare(ShapeSpec.zOrderOf(a), ShapeSpec.zOrderOf(b)));
+            for (Notebook.Item it : behindShapes) drawItem(it, tops[i]);
+            // Selected behind-ink shapes also render behind handwriting while being moved!
+            if (hasSel() && i == selPage) {
+                gl.setXform(spx, spy, ss, stx, sty + tops[selPage]);
+                ArrayList<Notebook.Item> selBehind = new ArrayList<>();
+                for (Notebook.Item it : selItems) {
+                    if (it.type == Notebook.Item.SHAPE && ShapeSpec.isBehindInk(it) && !(liveEditShape != null && it == selItems.get(0))) selBehind.add(it);
+                }
+                selBehind.sort((a, b) -> Integer.compare(ShapeSpec.zOrderOf(a), ShapeSpec.zOrderOf(b)));
+                for (Notebook.Item it : selBehind) drawItem(it, 0);
+                gl.resetXform();
             }
         }
         // the notebook never ends on screen: paper continues below the last page (it becomes real when written on)
@@ -1862,6 +1956,18 @@ final class Engine implements Choreographer.FrameCallback {
         gl.resetXform();
         gl.drawSegs(gl.pen, 0, gl.pen.count, 0);
         buildAhead();
+        // Pass 2 (post-ink): front-of-ink SHAPE items (explicitly moved above handwriting via Bring to Front / Forward)
+        for (int i = first; i <= last; i++) {
+            ArrayList<Notebook.Item> frontShapes = new ArrayList<>();
+            for (Notebook.Item it : book.itemsInDrawOrder(book.pages.get(i).items())) {
+                if (it.type == Notebook.Item.SHAPE && !ShapeSpec.isBehindInk(it)
+                        && !(i == selPage && selItems.contains(it)) && book.layerVisible(it.layer)) {
+                    frontShapes.add(it);
+                }
+            }
+            frontShapes.sort((a, b) -> Integer.compare(ShapeSpec.zOrderOf(a), ShapeSpec.zOrderOf(b)));
+            for (Notebook.Item it : frontShapes) drawItem(it, tops[i]);
+        }
         // tape goes over the ink it hides
         for (int i = first; i <= last; i++)
             for (Notebook.Item it : book.itemsInDrawOrder(book.pages.get(i).items()))
@@ -1869,9 +1975,16 @@ final class Engine implements Choreographer.FrameCallback {
         if (hasSel()) {
             // selection buffers are page-local; the transform adds the page top
             gl.setXform(spx, spy, ss, stx, sty + tops[selPage]);
-            for (Notebook.Item it : selItems) if (it.type != Notebook.Item.TAPE) drawItem(it, 0);
+            for (Notebook.Item it : selItems)
+                if (it.type != Notebook.Item.TAPE && it.type != Notebook.Item.SHAPE) drawItem(it, 0);
             gl.drawSegs(gl.selHl, 0, gl.selHl.count, 1);
             gl.drawSegs(gl.selPen, 0, gl.selPen.count, 0);
+            ArrayList<Notebook.Item> selFront = new ArrayList<>();
+            for (Notebook.Item it : selItems) {
+                if (it.type == Notebook.Item.SHAPE && !ShapeSpec.isBehindInk(it) && !(liveEditShape != null && it == selItems.get(0))) selFront.add(it);
+            }
+            selFront.sort((a, b) -> Integer.compare(ShapeSpec.zOrderOf(a), ShapeSpec.zOrderOf(b)));
+            for (Notebook.Item it : selFront) drawItem(it, 0);
             for (Notebook.Item it : selItems) if (it.type == Notebook.Item.TAPE) drawItem(it, 0);
             gl.resetXform();
         }
@@ -1879,6 +1992,22 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void drawItem(Notebook.Item it, float top) {
         Tex t;
+        if (it.type == Notebook.Item.SHAPE) {
+            final int lvl = z * 1.3f <= 2 ? 2 : z * 1.3f <= 4 ? 4 : 6;
+            final Notebook.Item item = it;
+            final boolean dk = book.paper == Notebook.PAPER_DARK;
+            String base = "shp:" + System.identityHashCode(it) + (dk ? ":d:" : ":l:");
+            t = tex(base + lvl, () -> ShapeSpec.toBitmap(item, lvl, dk));
+            if (t == null) for (int l : new int[]{2, 4, 6}) {
+                Tex o = texs.get(base + l);
+                if (o != null) { t = o; break; }
+            }
+            if (t != null) {
+                RectF rb = ShapeSpec.renderBounds(it);
+                gl.tex(t.id, rb.left, rb.top + top, rb.width(), rb.height(), 1f);
+            }
+            return;
+        }
         if (it.type == Notebook.Item.TAPE) {
             final int lvl = z * 1.3f <= 2 ? 2 : z * 1.3f <= 4 ? 4 : 6;
             final Notebook.Item item = it;
@@ -1929,6 +2058,18 @@ final class Engine implements Choreographer.FrameCallback {
         while (it.hasNext()) {
             Map.Entry<String, Tex> e = it.next();
             if (e.getKey().startsWith("txt:")) {
+                gl.deleteTex(e.getValue().id);
+                texBytes -= e.getValue().bytes;
+                it.remove();
+            }
+        }
+    }
+
+    private void dropShapeTextures() {
+        Iterator<Map.Entry<String, Tex>> it = texs.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, Tex> e = it.next();
+            if (e.getKey().startsWith("shp:")) {
                 gl.deleteTex(e.getValue().id);
                 texBytes -= e.getValue().bytes;
                 it.remove();
@@ -2423,8 +2564,8 @@ final class Engine implements Choreographer.FrameCallback {
             }
             if (pen) h.removeCallbacks(autoRun); // still writing: convert after the next pause
             if (editing != null || tool == TOOL_TEXT) main.post(listener::onDismissText);
-            // touching the current selection moves/scales it (pen or finger)
-            if (hasSel() && (tool == TOOL_LASSO || shapeMode()) && selHit(ev.getX(), ev.getY())) {
+            // touching the current selection moves/scales/edits its handles (pen or finger)
+            if (hasSel() && (tool == TOOL_LASSO || shapeMode() || itemShapeMode()) && selHit(ev.getX(), ev.getY())) {
                 stopFling();
                 gest = G_SEL;
                 selBegin(ev);
@@ -2464,6 +2605,9 @@ final class Engine implements Choreographer.FrameCallback {
                 } else if (tool == TOOL_TAPE) {
                     gest = G_TAPE;
                     tapeBegin(ev);
+                } else if (tool == TOOL_SHAPE) {
+                    gest = G_SHAPE;
+                    shapeDrawBegin(ev);
                 } else if (tool == TOOL_LASSO) {
                     clearSelection();
                     gest = G_LASSO;
@@ -2531,6 +2675,12 @@ final class Engine implements Choreographer.FrameCallback {
                     tapeEvent(ev, MotionEvent.ACTION_CANCEL);
                     toPan(ev, a);
                 } else tapeEvent(ev, a);
+                break;
+            case G_SHAPE:
+                if (a == MotionEvent.ACTION_POINTER_DOWN && fingerGest) {
+                    shapeDrawEvent(ev, MotionEvent.ACTION_CANCEL);
+                    toPan(ev, a);
+                } else shapeDrawEvent(ev, a);
                 break;
             case G_SEL:
                 selEvent(ev, a);
@@ -3361,7 +3511,21 @@ final class Engine implements Choreographer.FrameCallback {
             if (ln >= 3) {
                 // the loop is closed with a straight line from where the pen lifted back to where it started
                 for (Stroke s : p.strokes()) if (lassoed(s, xs, ys, ln)) ss.add(s);
-                for (Notebook.Item it : p.items()) if (it.layer == book.activeLayer && Geo.inside(it.x + it.w / 2, it.y + it.h / 2, xs, ys, ln)) si.add(it);
+                for (Notebook.Item it : p.items()) {
+                    if (it.layer != book.activeLayer) continue;
+                    boolean hit = Geo.inside(it.x + it.w / 2, it.y + it.h / 2, xs, ys, ln);
+                    if (!hit && it.type == Notebook.Item.SHAPE) {
+                        RectF rb = ShapeSpec.renderBounds(it);
+                        hit = Geo.inside(rb.centerX(), rb.centerY(), xs, ys, ln);
+                        if (!hit && it.pts != null) {
+                            for (int pi = 0; pi + 1 < it.pts.length; pi += 2) {
+                                float[] pp = ShapeSpec.toPage(it, it.pts[pi], it.pts[pi + 1]);
+                                if (Geo.inside(pp[0], pp[1], xs, ys, ln)) { hit = true; break; }
+                            }
+                        }
+                    }
+                    if (hit) si.add(it);
+                }
                 // strokes started on a neighbouring page that run into this one
                 int[] pr = inkPages(min(ly, ln), max(ly, ln));
                 for (int j = pr[0]; j <= pr[1]; j++) {
@@ -3373,12 +3537,12 @@ final class Engine implements Choreographer.FrameCallback {
                         if (lassoed(s, xs, ysj, ln)) other.computeIfAbsent(j, k -> new ArrayList<>()).add(s);
                 }
             }
-            // a tap (or tiny lasso) selects what's under it: a picture, text box or tape, else a stroke (a shape gets its handles)
+            // a tap (or tiny lasso) selects what's under it: a picture, text box, shape or tape, else a stroke
             if (ss.isEmpty() && si.isEmpty()) {
                 float cx = xs[0], cy = ys[0];
                 for (int i = p.items().size() - 1; i >= 0; i--) {
                     Notebook.Item it = p.items().get(i);
-                    if (it.layer == book.activeLayer && it.contains(cx, cy, 0)) {
+                    if (it.layer == book.activeLayer && it.contains(cx, cy, dp(8) / z)) {
                         si.add(it);
                         break;
                     }
@@ -3430,8 +3594,14 @@ final class Engine implements Choreographer.FrameCallback {
             b.right = Math.max(b.right, s.r); b.bottom = Math.max(b.bottom, s.b);
         }
         for (Notebook.Item it : si) {
-            b.left = Math.min(b.left, it.x); b.top = Math.min(b.top, it.y);
-            b.right = Math.max(b.right, it.x + it.w); b.bottom = Math.max(b.bottom, it.y + it.h);
+            if (it.type == Notebook.Item.SHAPE) {
+                RectF rb = ShapeSpec.renderBounds(it);
+                b.left = Math.min(b.left, rb.left); b.top = Math.min(b.top, rb.top);
+                b.right = Math.max(b.right, rb.right); b.bottom = Math.max(b.bottom, rb.bottom);
+            } else {
+                b.left = Math.min(b.left, it.x); b.top = Math.min(b.top, it.y);
+                b.right = Math.max(b.right, it.x + it.w); b.bottom = Math.max(b.bottom, it.y + it.h);
+            }
         }
         if (b.left > b.right) b.set(0, 0, 0, 0);
         return b;
@@ -3443,10 +3613,16 @@ final class Engine implements Choreographer.FrameCallback {
         selPage = -1;
         selStrokes = new ArrayList<>();
         selItems = new ArrayList<>();
+        liveEditShape = null;
+        itemShapeHandle = -1;
         needRebuild = true;
         wantFront = true;
         requestFrame();
-        main.post(() -> { listener.onSelection(null); listener.onHandles(null, false, -1); });
+        main.post(() -> {
+            listener.onSelection(null);
+            listener.onHandles(null, false, -1);
+            listener.onShapeOverlay(null, 0, 0, 1, 0, false, null, null, null);
+        });
         notifyState();
     }
 
@@ -3460,12 +3636,28 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void postSelection() {
         if (!hasSel()) return;
+        if (itemShapeMode()) {
+            Notebook.Item sh = liveEditShape != null ? liveEditShape : selItems.get(0);
+            postItemShapeOverlay(sh, liveEditShape != null);
+            RectF rb = ShapeSpec.renderBounds(sh);
+            float top = tops[selPage];
+            float l = (rb.left - spx) * ss + spx + stx, t = (rb.top - spy) * ss + spy + sty;
+            float r2 = (rb.right - spx) * ss + spx + stx, b = (rb.bottom - spy) * ss + spy + sty;
+            final RectF sr = new RectF((l - ox) * z, (t + top - oy) * z, (r2 - ox) * z, (b + top - oy) * z);
+            sr.inset(-dp(10), -dp(26)); // leave room for top rotation handle so selBar clears it
+            main.post(() -> { listener.onHandles(null, false, -1); listener.onSelection(sr); });
+            return;
+        }
         final RectF r = selScreen();
         final float[] hs = shapeMode() ? handlesScreen() : null;
         final boolean line = hs != null && selStrokes.get(0).shape == Stroke.LINE;
         final int box = hs != null && !line ? handlesLocal().length : -1; // where the box corners start in hs
         if (box >= 0) r.inset(-boxPad() * z - dp(8), -boxPad() * z - dp(8)); // the selection bar clears the scaling box
-        main.post(() -> { listener.onSelection(r); listener.onHandles(hs, line, box); });
+        main.post(() -> {
+            listener.onShapeOverlay(null, 0, 0, 1, 0, false, null, null, null);
+            listener.onSelection(r);
+            listener.onHandles(hs, line, box);
+        });
     }
 
     // ---- shape handles: a lone snapped shape can be stretched any time -------------------------
@@ -3476,6 +3668,7 @@ final class Engine implements Choreographer.FrameCallback {
     private int shapeIdx;
 
     private boolean shapeMode() { return hasSel() && selItems.isEmpty() && selStrokes.size() == 1 && selStrokes.get(0).shape != 0; }
+    private boolean itemShapeMode() { return hasSel() && selStrokes.isEmpty() && selItems.size() == 1 && selItems.get(0).type == Notebook.Item.SHAPE; }
 
     private static RectF ptsBox(Stroke s) {
         RectF b = new RectF(Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE);
@@ -3606,9 +3799,181 @@ final class Engine implements Choreographer.FrameCallback {
         requestFrame();
     }
 
+    // ---- Interactive Shape & Design tool (Freeform, Geometric, Lines, Arrows, Curves, Annotations) ----
+
+    private void shapeDrawBegin(MotionEvent ev) {
+        shDownSx = ev.getX();
+        shDownSy = ev.getY();
+        shMoved = false;
+        float docX = ox + shDownSx / z, docY = oy + shDownSy / z;
+        if (!canvas() && docY > docH && !book.pages.isEmpty()) {
+            Notebook.Page lastP = book.pages.get(book.pages.size() - 1);
+            Notebook.Page np = new Notebook.Page(lastP.pdf >= 0 ? Notebook.BG_LINED : lastP.bg);
+            np.copyStyle(lastP);
+            book.pages.add(np);
+            relayout();
+            main.post(this::notifyStateLater);
+        }
+        shPage = pageAt(docY);
+        float top = tops[shPage];
+        shX0 = shX1 = docX;
+        shY0 = shY1 = docY - top;
+        freeN = 0;
+        if (ShapeSpec.KIND_FREEFORM.equals(shapeSpec.kind)) {
+            freeAdd(shX0, shY0);
+        }
+        liveDraftShape = null;
+        Notebook.Layer al = book.layer(book.activeLayer);
+        if (al != null && !al.visible) {
+            al.visible = true;
+            needRebuild = true;
+            needCache = true;
+            toast("Showing \"" + al.name + "\": you're drawing on it");
+            notifyState();
+            docChanged();
+        }
+    }
+
+    private void freeAdd(float px, float py) {
+        if (freeN > 0 && Math.hypot(px - freePts[2 * freeN - 2], py - freePts[2 * freeN - 1]) < 2.2f / Math.max(0.3f, z)) return;
+        if (2 * freeN + 2 > freePts.length) freePts = Arrays.copyOf(freePts, freePts.length * 2);
+        freePts[2 * freeN] = px;
+        freePts[2 * freeN + 1] = py;
+        freeN++;
+    }
+
+    private void shapeDrawEvent(MotionEvent ev, int a) {
+        float top = tops[shPage];
+        if (a == MotionEvent.ACTION_MOVE || a == MotionEvent.ACTION_UP) {
+            if (!shMoved && Math.hypot(ev.getX() - shDownSx, ev.getY() - shDownSy) > dp(6)) shMoved = true;
+            if (ShapeSpec.KIND_FREEFORM.equals(shapeSpec.kind)) {
+                int hs = ev.getHistorySize();
+                for (int i = 0; i < hs; i++) freeAdd(ox + ev.getHistoricalX(i) / z, oy + ev.getHistoricalY(i) / z - top);
+                freeAdd(ox + ev.getX() / z, oy + ev.getY() / z - top);
+            }
+            shX1 = ox + ev.getX() / z;
+            shY1 = oy + ev.getY() / z - top;
+        }
+        if (a == MotionEvent.ACTION_CANCEL) {
+            gest = G_NONE;
+            liveDraftShape = null;
+            main.post(() -> listener.onShapeOverlay(null, 0, 0, 1, 0, false, null, null, null));
+            penNear = SystemClock.uptimeMillis();
+            return;
+        }
+        if (a == MotionEvent.ACTION_MOVE && shMoved) {
+            liveDraftShape = ShapeSpec.KIND_FREEFORM.equals(shapeSpec.kind)
+                    ? ShapeSpec.createFreeform(shapeSpec, freePts, freeN, book.activeLayer)
+                    : ShapeSpec.createFromDrag(shapeSpec, shX0, shY0, shX1, shY1, shapeLockCircle, book.activeLayer);
+            if (liveDraftShape != null) {
+                final Notebook.Item preview = liveDraftShape;
+                final float pox = ox, poy = oy, pz = z, ptop = top;
+                final boolean dk = book.paper == Notebook.PAPER_DARK;
+                main.post(() -> listener.onShapeOverlay(preview, pox, poy, pz, ptop, dk, null, null, null));
+            }
+            return;
+        }
+        if (a == MotionEvent.ACTION_UP) {
+            gest = G_NONE;
+            penNear = SystemClock.uptimeMillis();
+            liveDraftShape = null;
+            if (!shMoved) {
+                // Quick tap in Shape mode: select existing shape under tap, or deselect cleanly
+                main.post(() -> listener.onShapeOverlay(null, 0, 0, 1, 0, false, null, null, null));
+                Notebook.Page p = book.pages.get(shPage);
+                float pad = dp(10) / z;
+                Notebook.Item hit = null;
+                // Prefer topmost (front-of-ink first, then behind-ink)
+                for (int pass = 0; pass < 2 && hit == null; pass++) {
+                    boolean wantBehind = pass == 1;
+                    ArrayList<Notebook.Item> list = ShapeSpec.filterAndSort(p.items(), wantBehind);
+                    for (int i = list.size() - 1; i >= 0; i--) {
+                        Notebook.Item it = list.get(i);
+                        if (it.layer == book.activeLayer && ShapeSpec.hitTest(it, shX0, shY0, pad)) { hit = it; break; }
+                    }
+                }
+                if (hit != null) {
+                    ArrayList<Notebook.Item> one = new ArrayList<>();
+                    one.add(hit);
+                    select(shPage, new ArrayList<>(), one);
+                } else {
+                    clearSelection();
+                }
+                return;
+            }
+            Notebook.Item made = ShapeSpec.KIND_FREEFORM.equals(shapeSpec.kind)
+                    ? ShapeSpec.createFreeform(shapeSpec, freePts, freeN, book.activeLayer)
+                    : ShapeSpec.createFromDrag(shapeSpec, shX0, shY0, shX1, shY1, shapeLockCircle, book.activeLayer);
+            if (made == null) {
+                main.post(() -> listener.onShapeOverlay(null, 0, 0, 1, 0, false, null, null, null));
+                return;
+            }
+            Notebook.Page p = book.pages.get(shPage);
+            Object[] before = pageState(p);
+            p.items().add(made);
+            push(new PageEdit(p, before, pageState(p)));
+            if (shPage == book.pages.size() - 1) ensureTrailingPage();
+            ArrayList<Notebook.Item> one = new ArrayList<>();
+            one.add(made);
+            select(shPage, new ArrayList<>(), one);
+            edited();
+        }
+    }
+
+    private void postItemShapeOverlay(Notebook.Item sh, boolean drawPreview) {
+        if (sh == null || selPage < 0 || selPage >= tops.length) return;
+        float top = tops[selPage];
+        ArrayList<ShapeSpec.Handle> hs = ShapeSpec.handles(sh, z);
+        float[] hScreen = new float[hs.size() * 2];
+        int[] hIds = new int[hs.size()];
+        for (int i = 0; i < hs.size(); i++) {
+            ShapeSpec.Handle hh = hs.get(i);
+            float lx = (hh.x - spx) * ss + spx + stx;
+            float ly = (hh.y - spy) * ss + spy + sty;
+            hScreen[2 * i] = (lx - ox) * z;
+            hScreen[2 * i + 1] = (ly + top - oy) * z;
+            hIds[i] = hh.id;
+        }
+        ShapeSpec sp = ShapeSpec.of(sh);
+        float[] boxCorners = null;
+        if (!sp.isLineLike()) {
+            boxCorners = new float[8];
+            float[][] c = {{sh.x, sh.y}, {sh.x + sh.w, sh.y}, {sh.x + sh.w, sh.y + sh.h}, {sh.x, sh.y + sh.h}};
+            for (int i = 0; i < 4; i++) {
+                float[] pg = ShapeSpec.toPage(sh, c[i][0], c[i][1]);
+                float lx = (pg[0] - spx) * ss + spx + stx;
+                float ly = (pg[1] - spy) * ss + spy + sty;
+                boxCorners[2 * i] = (lx - ox) * z;
+                boxCorners[2 * i + 1] = (ly + top - oy) * z;
+            }
+        }
+        final Notebook.Item preview = drawPreview ? sh : null;
+        final float pox = ox, poy = oy, pz = z, ptop = top;
+        final boolean dk = book.paper == Notebook.PAPER_DARK;
+        final float[] boxF = boxCorners;
+        main.post(() -> listener.onShapeOverlay(preview, pox, poy, pz, ptop, dk, hScreen, hIds, boxF));
+    }
+
     private boolean selHit(float sx, float sy) {
         RectF r = selScreen();
         shapeHandle = -1;
+        itemShapeHandle = -1;
+        if (itemShapeMode()) {
+            Notebook.Item sh = selItems.get(0);
+            float top = tops[selPage];
+            ArrayList<ShapeSpec.Handle> hs = ShapeSpec.handles(sh, z);
+            float best = dp(28);
+            for (ShapeSpec.Handle hh : hs) {
+                float hx = (hh.x - ox) * z;
+                float hy = (hh.y + top - oy) * z;
+                float d = (float) Math.hypot(sx - hx, sy - hy);
+                if (d < best) { best = d; itemShapeHandle = hh.id; }
+            }
+            selScale = false;
+            if (itemShapeHandle >= 0) return true;
+            float px = ox + sx / z, py = oy + sy / z - top;
+            return ShapeSpec.hitTest(sh, px, py, dp(14) / z);
+        }
         if (shapeMode()) {
             float[] h = handlesScreen();
             float best = dp(26);
@@ -3631,6 +3996,16 @@ final class Engine implements Choreographer.FrameCallback {
         sDownX = ev.getX();
         sDownY = ev.getY();
         shapeBox = -1;
+        if (itemShapeHandle >= 0 && itemShapeMode()) {
+            itemShapeOrig = selItems.get(0);
+            liveEditShape = itemShapeOrig;
+            Notebook.Page p = book.pages.get(selPage);
+            itemShapeBefore = pageState(p);
+            itemShapeIdx = p.items().indexOf(itemShapeOrig);
+            if (itemShapeIdx < 0) { itemShapeHandle = -1; liveEditShape = null; }
+            else { needCache = true; requestFrame(); postSelection(); }
+            return;
+        }
         if (shapeHandle >= 0) {
             int own = handlesLocal().length / 2; // handles after the shape's own are the box corners
             if (shapeHandle >= own) shapeBox = shapeHandle - own;
@@ -3647,6 +4022,35 @@ final class Engine implements Choreographer.FrameCallback {
     }
 
     private void selEvent(MotionEvent ev, int a) {
+        if (itemShapeHandle >= 0) {
+            Notebook.Page p = book.pages.get(selPage);
+            if (a == MotionEvent.ACTION_MOVE) {
+                float px = ox + ev.getX() / z, py = oy + ev.getY() / z - tops[selPage];
+                liveEditShape = ShapeSpec.dragHandle(itemShapeOrig, itemShapeHandle, px, py, shapeLockCircle);
+                postSelection();
+            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                gest = G_NONE;
+                penNear = SystemClock.uptimeMillis();
+                Notebook.Item finalItem = liveEditShape;
+                liveEditShape = null;
+                itemShapeHandle = -1;
+                if (a == MotionEvent.ACTION_UP && finalItem != null && finalItem != itemShapeOrig && itemShapeIdx >= 0 && itemShapeIdx < p.items().size()) {
+                    p.items().set(itemShapeIdx, finalItem);
+                    push(new PageEdit(p, itemShapeBefore, pageState(p)));
+                    dropShapeTextures();
+                    ArrayList<Notebook.Item> one = new ArrayList<>();
+                    one.add(finalItem);
+                    select(selPage, new ArrayList<>(), one);
+                    edited();
+                } else {
+                    needCache = true;
+                    wantFront = true;
+                    requestFrame();
+                    postSelection();
+                }
+            }
+            return;
+        }
         if (shapeHandle >= 0) {
             Notebook.Page p = book.pages.get(selPage);
             if (a == MotionEvent.ACTION_MOVE) {
@@ -3695,6 +4099,7 @@ final class Engine implements Choreographer.FrameCallback {
                 spx = spy = stx = sty = 0;
                 ss = 1;
                 dropTextTextures();
+                dropShapeTextures();
                 replaceSelection(ns, ni, true);
             } else {
                 spx = spy = stx = sty = 0;
@@ -4195,8 +4600,13 @@ final class Engine implements Choreographer.FrameCallback {
         s.activeLayer = book.activeLayer;
         s.hasSelection = hasSel();
         s.selText = hasSel() && selStrokes.isEmpty() && selItems.size() == 1 && selItems.get(0).type == Notebook.Item.TEXT;
+        s.selShape = itemShapeMode();
+        s.selShapeStyle = s.selShape ? selItems.get(0).style : null;
         s.hasClipboard = !clipStrokes.isEmpty() || !clipItems.isEmpty();
         main.post(() -> listener.onState(s));
-        if (!hasSel()) main.post(() -> listener.onSelection(null));
+        if (!hasSel()) main.post(() -> {
+            listener.onSelection(null);
+            if (liveDraftShape == null) listener.onShapeOverlay(null, 0, 0, 1, 0, false, null, null, null);
+        });
     }
 }

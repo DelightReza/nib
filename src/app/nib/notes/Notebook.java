@@ -40,7 +40,7 @@ final class Notebook {
 
     /** Text box or picture placed on a page (page-local units). */
     static final class Item {
-        static final int TEXT = 0, IMAGE = 1, TAPE = 2;
+        static final int TEXT = 0, IMAGE = 1, TAPE = 2, SHAPE = 3;
         static final String[] TAPE_PATTERNS = {"plain", "stripes", "grid", "dots"};
         final int type;
         final float x, y, w, h;
@@ -133,6 +133,9 @@ final class Notebook {
                 np = new float[pts.length];
                 for (int i = 0; i + 1 < pts.length; i += 2) { np[i] = (pts[i] - px) * s + px + tx; np[i + 1] = (pts[i + 1] - py) * s + py + ty; }
             }
+            if (type == SHAPE) {
+                return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size, color, np, style).lay(layer);
+            }
             return new Item(type, (x - px) * s + px + tx, (y - py) * s + py + ty, w * s, h * s, text, size * s, color, np, Fonts.scaled(style, s)).lay(layer);
         }
 
@@ -152,6 +155,7 @@ final class Notebook {
         Item withRevealed(boolean r) { return new Item(type, x, y, w, h, pattern() + (r ? "|open" : ""), size, color, pts, style).lay(layer); }
 
         boolean contains(float px, float py, float pad) {
+            if (type == SHAPE) return ShapeSpec.hitTest(this, px, py, pad);
             if (px < x - pad || px > x + w + pad || py < y - pad || py > y + h + pad) return false;
             if (type != TAPE || pts == null) return true;
             float rr = size / 2 + pad; // on the strip: near its centre line

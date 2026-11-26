@@ -171,6 +171,43 @@ final class Ui {
         }
     }
 
+    /** Swatch representing "No colour" (transparent / unfilled) with a clean diagonal slash and matching active ring. */
+    static final class NoColorSwatch extends View {
+        boolean sel;
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        NoColorSwatch(Context c) {
+            super(c);
+            setLayoutParams(new ViewGroup.MarginLayoutParams(dp(c, 42), dp(c, 44)));
+            setBackground(ripple(c, null, dp(c, 19)));
+            setContentDescription("No colour");
+            setTooltipText("No colour");
+        }
+        void setSel(boolean s) { sel = s; invalidate(); }
+        @Override protected void onDraw(Canvas cv) {
+            Context c = getContext();
+            float cx = getWidth() / 2f, cy = getHeight() / 2f;
+            if (sel) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(c, 1.6f));
+                p.setColor(color(c, R.color.on_surface));
+                cv.drawCircle(cx, cy, dp(c, 12.5f), p);
+            }
+            float r = dp(c, 9);
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(color(c, R.color.surface));
+            cv.drawCircle(cx, cy, r, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp(c, 1.1f));
+            p.setColor(dark(c) ? 0x66ffffff : 0x44000000);
+            cv.drawCircle(cx, cy, r, p);
+            float d = r * 0.68f;
+            p.setStrokeCap(Paint.Cap.ROUND);
+            p.setStrokeWidth(dp(c, 1.8f));
+            p.setColor(0xffd93025);
+            cv.drawLine(cx - d, cy + d, cx + d, cy - d, p);
+        }
+    }
+
     static final class SizeDot extends View {
         float frac = 0.5f;
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -190,14 +227,29 @@ final class Ui {
         void tint(int c) { tint = c; invalidate(); }
         @Override protected void onDraw(Canvas cv) {
             Context c = getContext();
-            float cx = getWidth() / 2f, cy = getHeight() / 2f, ring = dp(c, 12.5f);
-            float r = diam >= 0 ? Math.max(0.75f, Math.min(diam / 2f, Math.min(cx, cy) - dp(c, 2))) : dp(c, 2f + 7.5f * frac);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(Math.max(1, dp(c, chosen ? 1.6f : 1)));
-            p.setColor(color(c, chosen ? R.color.accent : R.color.outline));
-            if (r < ring - dp(c, 2)) cv.drawCircle(cx, cy, ring, p);
+            float cx = getWidth() / 2f, cy = getHeight() / 2f, ring = dp(c, 13f);
+            float r = diam >= 0 ? Math.max(1.2f, Math.min(diam / 2f, dp(c, 9.5f))) : dp(c, 2.0f + 7.4f * frac);
+            if (chosen) {
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(color(c, R.color.accent_container));
+                cv.drawCircle(cx, cy, ring, p);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(c, 1.8f));
+                p.setColor(color(c, R.color.accent));
+                cv.drawCircle(cx, cy, ring, p);
+            } else {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(Math.max(1f, hairline(c)));
+                p.setColor(color(c, R.color.outline));
+                cv.drawCircle(cx, cy, ring, p);
+            }
             p.setStyle(Paint.Style.FILL);
             p.setColor(tint != 0 ? tint : color(c, R.color.icon));
+            cv.drawCircle(cx, cy, r, p);
+            // Subtle hairline so pale / white tints stay visible on light surfaces
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(hairline(c));
+            p.setColor(dark(c) ? 0x40ffffff : 0x26000000);
             cv.drawCircle(cx, cy, r, p);
         }
     }
@@ -427,6 +479,15 @@ final class Ui {
         t.setElevation(on ? dp(c, 1) : 0);
     }
 
+    static void setSegmented(android.widget.LinearLayout row, int sel) {
+        if (row == null) return;
+        Context c = row.getContext();
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View ch = row.getChildAt(i);
+            if (ch instanceof TextView) styleSeg(c, (TextView) ch, i == sel);
+        }
+    }
+
     /** Title + subtitle + switch row. */
     static View switchRow(Context c, String title, String sub, boolean on, java.util.function.Consumer<Boolean> cb) {
         android.widget.LinearLayout row = new android.widget.LinearLayout(c);
@@ -535,12 +596,23 @@ final class Ui {
             }
             SegBuf b = new SegBuf();
             s.emitAll(0, b);
-            if (Stroke.isHl(tool)) p.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DARKEN));
-            else p.setXfermode(null);
-            p.setColor(color);
+            int rawA = (color >>> 24) & 0xff;
+            if (Stroke.isHl(tool)) {
+                p.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DARKEN));
+                float af = rawA / 255f;
+                int r = Math.round(255 * (1f - af) + ((color >> 16) & 255) * af);
+                int g = Math.round(255 * (1f - af) + ((color >> 8) & 255) * af);
+                int bl = Math.round(255 * (1f - af) + (color & 255) * af);
+                p.setColor(0xff000000 | (r << 16) | (g << 8) | bl);
+            } else {
+                p.setXfermode(null);
+                p.setColor(color | 0xff000000);
+            }
             cv.save();
+            int layerSv = (!Stroke.isHl(tool) && rawA < 255) ? cv.saveLayerAlpha(0, 0, w, h, rawA) : -1;
             cv.scale(k, k);
             Render.segs(cv, b, p);
+            if (layerSv >= 0) cv.restoreToCount(layerSv);
             cv.restore();
         }
     }

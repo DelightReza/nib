@@ -34,7 +34,7 @@ final class Render {
     static int inkColor(int c, boolean darkPaper) {
         if (!darkPaper) return c;
         float l = (0.2126f * ((c >> 16) & 255) + 0.7152f * ((c >> 8) & 255) + 0.0722f * (c & 255)) / 255f;
-        return l < 0.22f ? 0xffe8eaed : c;
+        return l < 0.22f ? ((c & 0xff000000) | 0x00e8eaed) : c;
     }
 
     /** PDF source of a notebook; one page rendered at a time (PdfRenderer isn't thread-safe). */
@@ -425,8 +425,23 @@ final class Render {
             }
         }
         // layer by layer (bottom first); hidden layers aren't drawn, so not exported either
-        for (Notebook.Item it : nb.itemsInDrawOrder(p.items())) if (it.type != Notebook.Item.TAPE && nb.layerVisible(it.layer)) item(c, dir, it, dark(nb));
         boolean dk = dark(nb);
+        java.util.List<Notebook.Item> ordered = nb.itemsInDrawOrder(p.items());
+        // Pass 1: Behind-ink items (IMAGE, TEXT, and SHAPE items with zOrder < 0 — default behind handwriting!)
+        java.util.ArrayList<Notebook.Item> behindShapes = new java.util.ArrayList<>();
+        java.util.ArrayList<Notebook.Item> frontShapes = new java.util.ArrayList<>();
+        for (Notebook.Item it : ordered) {
+            if (!nb.layerVisible(it.layer)) continue;
+            if (it.type == Notebook.Item.TAPE) continue;
+            if (it.type == Notebook.Item.SHAPE) {
+                if (ShapeSpec.isBehindInk(it)) behindShapes.add(it); else frontShapes.add(it);
+            } else {
+                item(c, dir, it, dk);
+            }
+        }
+        behindShapes.sort((a, b) -> Integer.compare(ShapeSpec.zOrderOf(a), ShapeSpec.zOrderOf(b)));
+        for (Notebook.Item it : behindShapes) ShapeSpec.draw(c, it, dk);
+
         SegBuf tmp = new SegBuf();
         Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
         ink.setStrokeCap(Paint.Cap.ROUND);
@@ -445,16 +460,41 @@ final class Render {
                 boolean isHl = s.hl();
                 if ((pass == 0) != isHl) continue;
                 Paint pt = isHl ? hl : ink;
-                int col = isHl ? s.color : inkColor(s.color, dk);
-                if (isHl && forPdf) col = (col & 0x00ffffff) | 0x70000000;
-                else if (isHl && dk) col = scale(col, 0.6f);
-                pt.setColor(col);
+                int rawA = (s.color >>> 24) & 0xff;
+                if (rawA == 0) continue;
+                float af = rawA / 255f;
+                int col;
+                if (isHl) {
+                    if (forPdf) {
+                        int pa = Math.round(af * 0.55f * 255f);
+                        col = (s.color & 0x00ffffff) | (Math.max(1, Math.min(255, pa)) << 24);
+                    } else if (dk) {
+                        col = scale(s.color, 0.65f * af);
+                    } else {
+                        col = mix(0xffffffff, s.color | 0xff000000, af);
+                    }
+                } else {
+                    col = inkColor(s.color, dk);
+                }
                 tmp.clear();
                 s.emitAll(dy, tmp);
-                segs(c, tmp, pt);
+                if (!isHl && rawA < 255 && !forPdf) {
+                    int sv = c.saveLayerAlpha(null, rawA);
+                    pt.setColor(col | 0xff000000);
+                    segs(c, tmp, pt);
+                    c.restoreToCount(sv);
+                } else {
+                    pt.setColor(col);
+                    segs(c, tmp, pt);
+                }
             }
         }
-        for (Notebook.Item it : nb.itemsInDrawOrder(p.items()))
+        // Pass 2: Front-of-ink SHAPE items (explicitly brought in front of handwriting via Bring to Front / Forward)
+        frontShapes.sort((a, b) -> Integer.compare(ShapeSpec.zOrderOf(a), ShapeSpec.zOrderOf(b)));
+        for (Notebook.Item it : frontShapes) ShapeSpec.draw(c, it, dk);
+
+        // Pass 3: Study tape on top
+        for (Notebook.Item it : ordered)
             if (it.type == Notebook.Item.TAPE && nb.layerVisible(it.layer)) tape(c, it, it.revealed() ? TAPE_OPEN_ALPHA : 1f);
     }
 
@@ -777,6 +817,8 @@ final class Render {
                 c.drawBitmap(b, null, new RectF(it.x, it.y, it.x + it.w, it.y + it.h), new Paint(Paint.FILTER_BITMAP_FLAG));
                 b.recycle();
             }
+        } else if (it.type == Notebook.Item.SHAPE) {
+            ShapeSpec.draw(c, it, darkPaper);
         } else {
             StaticLayout sl = textLayout(it.text, it.size, inkColor(it.color, darkPaper), it.w, it.hand(), it.style, darkPaper);
             c.save();
@@ -837,8 +879,9 @@ final class Render {
             }
         }
         for (Notebook.Item it : p.items()) {
-            if (r.isEmpty() && r.left == 0 && r.right == 0) r.set(it.x, it.y, it.x + it.w, it.y + it.h);
-            else r.union(it.x, it.y, it.x + it.w, it.y + it.h);
+            RectF ib = it.type == Notebook.Item.SHAPE ? ShapeSpec.renderBounds(it) : new RectF(it.x, it.y, it.x + it.w, it.y + it.h);
+            if (r.isEmpty() && r.left == 0 && r.right == 0) r.set(ib);
+            else r.union(ib);
         }
         return r;
     }
