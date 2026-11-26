@@ -61,11 +61,12 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private static final float PEN_MIN = 0.5f, PEN_MAX = 16f, HL_MIN = 6f, HL_MAX = 64f;
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
-    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16;
+    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16, REQ_STYLE_IMAGE = 17, REQ_STYLE_PDF = 18;
     private File pendingSave; // exported PDF waiting for the user to pick where to save it
     private int pendingPagePos = Engine.POS_AFTER;
     private Engine pendingPageEngine;
     private Runnable afterPageImport;
+    private java.util.function.Consumer<org.json.JSONObject> afterStyleImport;
 
     private Engine engine;
     private SharedPreferences prefs;
@@ -2650,7 +2651,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (pop != null) pop.dismiss();
         final Doc target = cur;
         float aspect = state != null && state.pageAspect > 0f ? state.pageAspect : (Notebook.PH / Notebook.PW);
-        int paperIdx = state != null ? Math.max(0, Math.min(2, state.paper)) : 0;
+        int paperIdx = state != null ? Math.max(0, Math.min(Render.PAPER.length - 1, state.paper)) : 0;
         int paperBg = Render.PAPER[paperIdx][0];
         if (fromToolButton) moveRowFor = gridB;
         pop = GridSettingsPanel.show(this, anchor, target.gridCfg, aspect, paperBg, target.title, new GridSettingsPanel.Host() {
@@ -3125,221 +3126,235 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void showStyle(View anchor) {
         if (state == null) return;
-        final int[] bg = {state.bg};
-        final float[] sp = {state.spacing}, st = {state.strength};
-        final int[] col = {state.lineColor}, mg = {state.margins};
-        final boolean canvasNb = state.canvas;
-        Runnable apply = () -> engine.setLook(false, sp[0], st[0], col[0], mg[0]);
+        if (pop != null) pop.dismiss();
+        PageStyleDialog.show(this, state, new PageStyleDialog.Host() {
+            @Override public void onApply(boolean allPages, int bg, int paper, float spacing, float strength,
+                                          int lineColor, int margins, float pageH, String bgImage, boolean setAsDefault) {
+                engine.applyPageTemplate(allPages, bg, paper, spacing, strength, lineColor, margins, pageH, bgImage);
+                if (setAsDefault) {
+                    prefs.edit().putString("defStyle",
+                            lookJson("Default", bg, spacing, strength, lineColor, margins, paper, pageH, bgImage).toString()).apply();
+                }
+                String msg = allPages ? "Applied to all pages" : "Page style applied";
+                if (setAsDefault) msg += " · saved as default";
+                toast(msg);
+            }
 
-        Ui.Popover p = newPop(470).title(canvasNb ? "Background" : "Page style");
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
+            @Override public void onSaveCustomTemplate(String name, int bg, int paper, float spacing, float strength,
+                                                       int lineColor, int margins, float pageH, String bgImage) {
+                org.json.JSONArray a = myTemplates();
+                a.put(lookJson(name, bg, spacing, strength, lineColor, margins, paper, pageH, bgImage));
+                prefs.edit().putString("myTpl", a.toString()).apply();
+                toast("Saved \"" + name + "\" under Custom");
+            }
 
-        // templates
-        body.addView(section("Template"));
-        GridLayout g = new GridLayout(this);
-        g.setColumnCount(4);
-        for (int i = 0; i < Notebook.BG_NAMES.length; i++) {
-            final int bgId = i;
-            View tile = styleTile(Notebook.BG_NAMES[i], i, state.paper, null, i == bg[0]);
-            tile.setOnClickListener(v -> { engine.setBackground(bgId); pop.dismiss(); });
-            tile.setOnLongClickListener(v -> { engine.pageOp("bgAll", 0, bgId); toast("Applied to all pages"); pop.dismiss(); return true; });
-            g.addView(tile);
+            @Override public void onImportCustomImage(java.util.function.Consumer<org.json.JSONObject> onImported) {
+                afterStyleImport = onImported;
+                Intent in = new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*");
+                startActivityForResult(in, REQ_STYLE_IMAGE);
+            }
+
+            @Override public void onImportCustomPdf(java.util.function.Consumer<org.json.JSONObject> onImported) {
+                afterStyleImport = onImported;
+                Intent in = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                        .addCategory(Intent.CATEGORY_OPENABLE)
+                        .setType("application/pdf");
+                startActivityForResult(in, REQ_STYLE_PDF);
+            }
+
+            @Override public void onRenameCustomTemplate(int index, String newName) {
+                org.json.JSONArray a = myTemplates();
+                if (index >= 0 && index < a.length()) {
+                    org.json.JSONObject o = a.optJSONObject(index);
+                    if (o != null) {
+                        try { o.put("n", newName); } catch (Exception ignored) { }
+                        prefs.edit().putString("myTpl", a.toString()).apply();
+                        toast("Renamed to \"" + newName + "\"");
+                    }
+                }
+            }
+
+            @Override public void onDeleteCustomTemplate(int index) {
+                org.json.JSONArray a = myTemplates();
+                if (index >= 0 && index < a.length()) {
+                    org.json.JSONObject removed = a.optJSONObject(index);
+                    String removedImg = removed != null ? removed.optString("img", "") : "";
+                    a.remove(index);
+                    prefs.edit().putString("myTpl", a.toString()).apply();
+                    if (!removedImg.isEmpty() && !isCustomBgImageReferenced(a, removedImg)) {
+                        new File(Notebook.customTemplatesDir(EditorActivity.this), removedImg).delete();
+                    }
+                    toast("Custom style deleted");
+                }
+            }
+
+            @Override public org.json.JSONArray getCustomTemplates() {
+                return myTemplates();
+            }
+        });
+    }
+
+    private boolean isCustomBgImageReferenced(org.json.JSONArray arr, String imgName) {
+        if (imgName == null || imgName.isEmpty()) return false;
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                org.json.JSONObject o = arr.optJSONObject(i);
+                if (o != null && imgName.equals(o.optString("img", ""))) return true;
+            }
         }
-        body.addView(g);
-        body.addView(hint("Tap: this page · long-press: every page"));
+        String def = prefs.getString("defStyle", null);
+        if (def != null) {
+            try {
+                if (imgName.equals(new org.json.JSONObject(def).optString("img", ""))) return true;
+            } catch (Exception ignored) { }
+        }
+        return false;
+    }
 
-        // my templates
-        org.json.JSONArray mine = myTemplates();
-        if (mine.length() > 0) {
-            body.addView(section("My templates"));
-            GridLayout mg2 = new GridLayout(this);
-            mg2.setColumnCount(4);
-            for (int i = 0; i < mine.length(); i++) {
-                org.json.JSONObject t = mine.optJSONObject(i);
-                if (t == null) continue;
-                final int idx = i;
-                Notebook.Page look = lookOf(t);
-                View tile = styleTile(t.optString("n", "Template"), look.bg, t.optInt("p", state.paper), look, false);
-                tile.setOnClickListener(v -> { applyTemplate(t, false); pop.dismiss(); });
-                tile.setOnLongClickListener(v -> {
-                    PopupMenu pm = new PopupMenu(this, v);
-                    pm.getMenu().add(0, 1, 0, "Apply to every page");
-                    pm.getMenu().add(0, 2, 1, "Delete template");
-                    pm.setOnMenuItemClickListener(it -> {
-                        if (it.getItemId() == 1) applyTemplate(t, true);
-                        else { mine.remove(idx); prefs.edit().putString("myTpl", mine.toString()).apply(); toast("Template deleted"); }
-                        pop.dismiss();
-                        return true;
-                    });
-                    pm.show();
-                    return true;
+    private String queryDisplayName(Uri uri, String fallback) {
+        if (uri == null) return fallback;
+        try (android.database.Cursor c = getContentResolver().query(uri,
+                new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null && !n.trim().isEmpty()) {
+                    int dot = n.lastIndexOf('.');
+                    String base = dot > 0 ? n.substring(0, dot).trim() : n.trim();
+                    if (!base.isEmpty()) return base;
+                }
+            }
+        } catch (Exception ignored) { }
+        return fallback;
+    }
+
+    private void importCustomImageStyle(Uri uri, java.util.function.Consumer<org.json.JSONObject> after) {
+        toast("Importing image as page style…");
+        final int curPaper = state != null ? state.paper : Notebook.PAPER_WHITE;
+        bg.execute(() -> {
+            try {
+                Bitmap b = ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(), uri), (dec, info, src) -> {
+                    int w = info.getSize().getWidth(), h = info.getSize().getHeight(), m = Math.max(w, h);
+                    if (m > 2400) dec.setTargetSize(w * 2400 / m, h * 2400 / m);
+                    dec.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
                 });
-                mg2.addView(tile);
+                boolean alpha = b.hasAlpha();
+                String fileName = "tpl_" + UUID.randomUUID() + (alpha ? ".png" : ".jpg");
+                File out = new File(Notebook.customTemplatesDir(this), fileName);
+                try (FileOutputStream os = new FileOutputStream(out)) {
+                    b.compress(alpha ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, 92, os);
+                }
+                int bw = Math.max(1, b.getWidth()), bh = Math.max(1, b.getHeight());
+                b.recycle();
+                float ph = Math.max(400f, Math.min(3500f, Notebook.PW * bh / (float) bw));
+                String name = queryDisplayName(uri, "Image style");
+                org.json.JSONObject obj = lookJson(name, Notebook.BG_BLANK, 1f, 1f, 0, 0, curPaper, ph, fileName);
+                ui.post(() -> {
+                    org.json.JSONArray arr = myTemplates();
+                    arr.put(obj);
+                    prefs.edit().putString("myTpl", arr.toString()).apply();
+                    toast("Imported \"" + name + "\" as custom page style");
+                    if (after != null) after.accept(obj);
+                });
+            } catch (Exception e) {
+                Log.e(Gl.TAG, "custom image style import", e);
+                ui.post(() -> toast("Couldn't import that image"));
             }
-            body.addView(mg2);
-        }
+        });
+    }
 
-        // lines
-        body.addView(section("Lines"));
-        float base = BASE_UNITS[Math.max(0, Math.min(BASE_UNITS.length - 1, bg[0]))];
-        if (base > 0) {
-            TextView spLabel = Ui.text(this, "", 13, Ui.color(this, R.color.on_surface), null);
-            Runnable spText = () -> spLabel.setText(String.format(java.util.Locale.US, "Spacing  ·  %.1f mm", base * sp[0] * Ruler.MM_PER_UNIT));
-            spText.run();
-            body.addView(spLabel);
-            body.addView(liveSlider(150, Math.round((sp[0] - 0.5f) * 100), v -> { sp[0] = 0.5f + v / 100f; spText.run(); }, apply));
-        }
-        TextView stLabel = Ui.text(this, "", 13, Ui.color(this, R.color.on_surface), null);
-        Runnable stText = () -> stLabel.setText(st[0] < 0.75f ? "Strength  ·  faint" : st[0] > 1.4f ? "Strength  ·  bold" : "Strength  ·  normal");
-        stText.run();
-        stLabel.setPadding(0, Ui.dp(this, 6), 0, 0);
-        body.addView(stLabel);
-        body.addView(liveSlider(220, Math.round((st[0] - 0.3f) * 100), v -> { st[0] = 0.3f + v / 100f; stText.run(); }, apply));
-        TextView cl = Ui.text(this, "Colour", 13, Ui.color(this, R.color.on_surface), null);
-        cl.setPadding(0, Ui.dp(this, 6), 0, Ui.dp(this, 4));
-        body.addView(cl);
-        LinearLayout colors = new LinearLayout(this);
-        colors.setGravity(Gravity.CENTER_VERTICAL);
-        Ui.Swatch[] sws = new Ui.Swatch[LINE_COLORS.length];
-        for (int i = 0; i < LINE_COLORS.length; i++) {
-            final int c = LINE_COLORS[i];
-            Ui.Swatch s2 = new Ui.Swatch(this);
-            s2.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp(this, 40), Ui.dp(this, 40)));
-            s2.set(c == 0 ? Render.PAPER[Math.max(0, Math.min(2, state.paper))][1] : c, c == col[0]);
-            s2.setContentDescription(c == 0 ? "Paper's own colour" : "Line colour");
-            sws[i] = s2;
-            s2.setOnClickListener(v -> {
-                col[0] = c;
-                for (int k2 = 0; k2 < sws.length; k2++) sws[k2].set(sws[k2].color, LINE_COLORS[k2] == c);
-                apply.run();
-            });
-            colors.addView(s2);
-        }
-        body.addView(colors);
-        body.addView(hint("First dot: the paper's own line colour"));
-
-        // margins
-        if (!canvasNb) {
-            body.addView(section("Margins"));
-            LinearLayout mrow = new LinearLayout(this);
-            String[] names = {"Left margin", "Header line", "Border"};
-            int[] bits = {Notebook.MARGIN_LEFT, Notebook.MARGIN_HEADER, Notebook.MARGIN_BORDER};
-            for (int i = 0; i < 3; i++) {
-                final int bit = bits[i];
-                TextView chip = Ui.text(this, names[i], 13, 0, Ui.medium());
-                chip.setGravity(Gravity.CENTER);
-                Runnable paint = () -> {
-                    boolean on = (mg[0] & bit) != 0;
-                    chip.setTextColor(Ui.color(this, on ? R.color.on_accent : R.color.on_surface));
-                    chip.setBackground(Ui.ripple(this, Ui.round(Ui.color(this, on ? R.color.accent : R.color.surface_variant), Ui.dp(this, 8)), Ui.dp(this, 8)));
-                };
-                paint.run();
-                chip.setOnClickListener(v -> { mg[0] ^= bit; paint.run(); apply.run(); });
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, Ui.dp(this, 36), 1f);
-                lp.rightMargin = Ui.dp(this, 6);
-                mrow.addView(chip, lp);
+    private void importCustomPdfStyle(Uri uri, java.util.function.Consumer<org.json.JSONObject> after) {
+        toast("Reading PDF…");
+        final int curPaper = state != null ? state.paper : Notebook.PAPER_WHITE;
+        final String baseName = queryDisplayName(uri, "PDF style");
+        bg.execute(() -> {
+            File tmp = new File(getCacheDir(), "tpl-import-" + UUID.randomUUID() + ".pdf");
+            try {
+                Io.copy(getContentResolver().openInputStream(uri), new FileOutputStream(tmp));
+                int count;
+                try (Render.Pdf pdf = new Render.Pdf(tmp)) {
+                    count = pdf.r.getPageCount();
+                }
+                if (count <= 0) {
+                    tmp.delete();
+                    ui.post(() -> toast("No pages found in that PDF"));
+                    return;
+                }
+                if (count == 1) {
+                    renderPdfPagesAsCustomStyles(tmp, baseName, new int[]{0}, curPaper, after);
+                    return;
+                }
+                // Multi-page PDF: let user pick which page (or first pages) to import as a custom page style
+                final int total = count;
+                ui.post(() -> {
+                    String[] items = new String[total + 1];
+                    items[0] = "Import all pages" + (total > 12 ? " (first 12)" : " (" + total + ")");
+                    for (int i = 0; i < total; i++) items[i + 1] = "Page " + (i + 1);
+                    new AlertDialog.Builder(this)
+                            .setTitle("Import PDF as page style")
+                            .setItems(items, (dg, which) -> {
+                                int[] pick;
+                                if (which == 0) {
+                                    int lim = Math.min(total, 12);
+                                    pick = new int[lim];
+                                    for (int i = 0; i < lim; i++) pick[i] = i;
+                                } else {
+                                    pick = new int[]{which - 1};
+                                }
+                                toast(pick.length == 1 ? "Importing PDF page…" : "Importing " + pick.length + " PDF pages…");
+                                bg.execute(() -> renderPdfPagesAsCustomStyles(tmp, baseName, pick, curPaper, after));
+                            })
+                            .setOnCancelListener(dg -> tmp.delete())
+                            .setNegativeButton("Cancel", (dg, w) -> tmp.delete())
+                            .show();
+                });
+            } catch (Exception e) {
+                tmp.delete();
+                Log.e(Gl.TAG, "custom pdf style import", e);
+                ui.post(() -> toast("Couldn't import that PDF"));
             }
-            body.addView(mrow);
-        }
-
-        // paper
-        body.addView(section("Paper colour"));
-        LinearLayout papers = new LinearLayout(this);
-        String[] pn = {"White", "Cream", "Dark"};
-        for (int i = 0; i < 3; i++) {
-            final int pid = i;
-            LinearLayout pc = new LinearLayout(this);
-            pc.setOrientation(LinearLayout.VERTICAL);
-            pc.setGravity(Gravity.CENTER_HORIZONTAL);
-            pc.setPadding(Ui.dp(this, 8), Ui.dp(this, 2), Ui.dp(this, 8), 0);
-            Ui.Swatch s2 = new Ui.Swatch(this);
-            s2.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp(this, 44), Ui.dp(this, 44)));
-            s2.set(Render.PAPER[i][0], i == state.paper);
-            s2.setOnClickListener(v -> { engine.setPaper(pid); pop.dismiss(); });
-            pc.addView(s2);
-            pc.addView(Ui.text(this, pn[i], 12, Ui.color(this, R.color.on_surface_variant), null));
-            papers.addView(pc);
-        }
-        body.addView(papers);
-
-        // actions
-        LinearLayout.LayoutParams al = new LinearLayout.LayoutParams(-1, -2);
-        al.topMargin = Ui.dp(this, 10);
-        View all = Ui.actionRow(this, R.drawable.ic_pages, "Apply to all pages", "This template and look on every page", v -> {
-            engine.pageOp("bgAll", 0, bg[0]);
-            engine.setLook(true, sp[0], st[0], col[0], mg[0]);
-            toast("Applied to all pages");
-            pop.dismiss();
         });
-        all.setLayoutParams(al);
-        body.addView(all);
-        body.addView(Ui.actionRow(this, R.drawable.ic_star, "Save as my template", "Keep this look to reuse in any notebook",
-                v -> { pop.dismiss(); saveTemplate(bg[0], sp[0], st[0], col[0], mg[0]); }));
-        body.addView(Ui.actionRow(this, R.drawable.ic_page_add, "Use for new notebooks", "New notebooks start with this page style",
-                v -> {
-                    prefs.edit().putString("defStyle", lookJson("Default", bg[0], sp[0], st[0], col[0], mg[0], state.paper).toString()).apply();
-                    toast("New notebooks will use this style");
-                    pop.dismiss();
-                }));
-        if (prefs.contains("defStyle")) body.addView(Ui.actionRow(this, R.drawable.ic_undo, "Reset new-notebook style",
-                "New notebooks go back to plain dotted paper", v -> {
-                    prefs.edit().remove("defStyle").apply();
-                    toast("New notebooks: standard style");
-                    pop.dismiss();
-                }));
-
-        ScrollView sv = new ScrollView(this);
-        sv.addView(body);
-        p.add(sv);
-        sv.setLayoutParams(new LinearLayout.LayoutParams(-1, Math.min(Ui.dp(this, 900), (int) (getResources().getDisplayMetrics().heightPixels * 0.72f))));
-        p.show(anchor);
     }
 
-    private TextView section(String t) {
-        TextView v = Ui.text(this, t, 12.5f, Ui.color(this, R.color.on_surface_variant), Ui.medium());
-        v.setPadding(0, Ui.dp(this, 14), 0, Ui.dp(this, 8));
-        return v;
-    }
-
-    private TextView hint(String t) {
-        TextView v = Ui.text(this, t, 12f, Ui.color(this, R.color.on_surface_variant), null);
-        v.setPadding(0, Ui.dp(this, 2), 0, 0);
-        return v;
-    }
-
-    /** Slider that updates its label while dragging and applies once, when let go (one undo step). */
-    private SeekBar liveSlider(int max, int value, java.util.function.IntConsumer onMove, Runnable onDone) {
-        SeekBar sb = Ui.slider(this, max, value, onMove);
-        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar s, int v, boolean user) { if (user) onMove.accept(v); }
-            @Override public void onStartTrackingTouch(SeekBar s) {}
-            @Override public void onStopTrackingTouch(SeekBar s) { onDone.run(); }
+    private void renderPdfPagesAsCustomStyles(File pdfFile, String baseName, int[] pageIndices, int paper,
+                                              java.util.function.Consumer<org.json.JSONObject> after) {
+        java.util.ArrayList<org.json.JSONObject> added = new java.util.ArrayList<>();
+        try (Render.Pdf pdf = new Render.Pdf(pdfFile)) {
+            File outDir = Notebook.customTemplatesDir(this);
+            for (int pi : pageIndices) {
+                if (pi < 0 || pi >= pdf.r.getPageCount()) continue;
+                float ph;
+                try (android.graphics.pdf.PdfRenderer.Page rp = pdf.r.openPage(pi)) {
+                    ph = Math.max(400f, Math.min(3500f, Notebook.PW * rp.getHeight() / (float) Math.max(1, rp.getWidth())));
+                }
+                Bitmap bm = pdf.render(pi, 2000);
+                if (bm == null) continue;
+                String fileName = "tpl_" + UUID.randomUUID() + ".jpg";
+                try (FileOutputStream os = new FileOutputStream(new File(outDir, fileName))) {
+                    bm.compress(Bitmap.CompressFormat.JPEG, 92, os);
+                }
+                bm.recycle();
+                String nm = (pageIndices.length == 1 && pdf.r.getPageCount() == 1)
+                        ? baseName : (baseName + " · p" + (pi + 1));
+                added.add(lookJson(nm, Notebook.BG_BLANK, 1f, 1f, 0, 0, paper, ph, fileName));
+            }
+        } catch (Exception e) {
+            Log.e(Gl.TAG, "render pdf style", e);
+        } finally {
+            pdfFile.delete();
+        }
+        if (added.isEmpty()) {
+            ui.post(() -> toast("Couldn't render PDF page"));
+            return;
+        }
+        ui.post(() -> {
+            org.json.JSONArray arr = myTemplates();
+            for (org.json.JSONObject o : added) arr.put(o);
+            prefs.edit().putString("myTpl", arr.toString()).apply();
+            toast(added.size() == 1
+                    ? "Imported \"" + added.get(0).optString("n") + "\" as custom page style"
+                    : "Imported " + added.size() + " PDF pages as custom page styles");
+            if (after != null) after.accept(added.get(0));
         });
-        return sb;
-    }
-
-    private View styleTile(String name, int bg, int paper, Notebook.Page look, boolean sel) {
-        LinearLayout tile = new LinearLayout(this);
-        tile.setOrientation(LinearLayout.VERTICAL);
-        tile.setGravity(Gravity.CENTER_HORIZONTAL);
-        tile.setPadding(Ui.dp(this, 5), Ui.dp(this, 4), Ui.dp(this, 5), Ui.dp(this, 8));
-        ImageView iv = new ImageView(this);
-        iv.setImageBitmap(templateBitmap(bg, paper, look));
-        GradientDrawable fr = Ui.round(0, Ui.dp(this, 6));
-        fr.setStroke(sel ? Ui.dp(this, 2) : Ui.hairline(this), Ui.color(this, sel ? R.color.accent : R.color.outline));
-        iv.setForeground(fr);
-        iv.setClipToOutline(true);
-        iv.setBackground(Ui.round(0xffffffff, Ui.dp(this, 6)));
-        tile.addView(iv, new LinearLayout.LayoutParams(Ui.dp(this, 92), Ui.dp(this, 130)));
-        TextView l = Ui.text(this, name, 12, Ui.color(this, sel ? R.color.accent : R.color.on_surface_variant), Ui.medium());
-        l.setSingleLine(true);
-        l.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        l.setMaxWidth(Ui.dp(this, 96));
-        l.setPadding(0, Ui.dp(this, 6), 0, 0);
-        tile.addView(l);
-        tile.setBackground(Ui.ripple(this, null, Ui.dp(this, 12)));
-        return tile;
     }
 
     // ---- my templates ------------------------------------------------------------------------
@@ -3349,9 +3364,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     static org.json.JSONObject lookJson(String name, int bg, float sp, float st, int col, int mg, int paper) {
+        return lookJson(name, bg, sp, st, col, mg, paper, Notebook.PH, null);
+    }
+
+    static org.json.JSONObject lookJson(String name, int bg, float sp, float st, int col, int mg, int paper, float h) {
+        return lookJson(name, bg, sp, st, col, mg, paper, h, null);
+    }
+
+    static org.json.JSONObject lookJson(String name, int bg, float sp, float st, int col, int mg, int paper, float h, String bgImage) {
         org.json.JSONObject o = new org.json.JSONObject();
         try {
-            o.put("n", name).put("bg", bg).put("s", (double) sp).put("t", (double) st).put("c", col).put("m", mg).put("p", paper);
+            o.put("n", name).put("bg", bg).put("s", (double) sp).put("t", (double) st)
+                    .put("c", col).put("m", mg).put("p", paper).put("h", (double) h);
+            if (bgImage != null && !bgImage.isEmpty()) o.put("img", bgImage);
         } catch (Exception ignored) { }
         return o;
     }
@@ -3362,6 +3387,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         pg.strength = (float) t.optDouble("t", 1);
         pg.lineColor = t.optInt("c", 0);
         pg.margins = t.optInt("m", 0);
+        float h = (float) t.optDouble("h", Notebook.PH);
+        if (h > 100f) pg.h = h;
+        String img = t.optString("img", "");
+        if (!img.isEmpty()) pg.bgImage = img;
         return pg;
     }
 
@@ -4383,7 +4412,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         textEdit.setPaintFlags(fl);
         textEdit.setGravity(Gravity.TOP | (st.align == Fonts.Style.CENTRE ? Gravity.CENTER_HORIZONTAL
                 : st.align == Fonts.Style.RIGHT ? Gravity.END : Gravity.START));
-        textEdit.setTextColor(state != null && state.paper == Notebook.PAPER_DARK ? Render.inkColor(e.color, true) : e.color);
+        textEdit.setTextColor(state != null && Notebook.isDarkPaper(state.paper) ? Render.inkColor(e.color, true) : e.color);
     }
 
     /** After a format popover closes: back to typing. */
@@ -4460,7 +4489,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private boolean editHand() { return textReq != null && textReq.item != null && textReq.item.hand(); }
 
     private java.util.function.IntUnaryOperator editInk() {
-        return state != null && state.paper == Notebook.PAPER_DARK ? c -> Render.inkColor(c, true) : null;
+        return state != null && Notebook.isDarkPaper(state.paper) ? c -> Render.inkColor(c, true) : null;
     }
 
     /** The box's style with the runs as they now stand in the editor. */
@@ -4840,6 +4869,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             curStyle.strength = state.strength;
             curStyle.lineColor = state.lineColor;
             curStyle.margins = state.margins;
+            curStyle.bgImage = state.bgImage;
+            if (state.pageH > 100f) curStyle.h = state.pageH;
         }
         AddPageSheet.show(this, target.dir, paper, curStyle, myTemplates(), initialPos, bg, new AddPageSheet.Callback() {
             @Override
@@ -4893,6 +4924,15 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                     Notebook.Page np = new Notebook.Page(sp.pdf >= 0 ? Notebook.BG_BLANK : sp.bg);
                     np.h = sp.h;
                     np.copyStyle(sp);
+                    if (np.bgImage != null && !np.bgImage.isEmpty()) {
+                        File bgSrc = new File(srcImgDir, np.bgImage);
+                        if (!bgSrc.exists()) bgSrc = new File(Notebook.customTemplatesDir(this), np.bgImage);
+                        File bgDst = new File(dstImgDir, np.bgImage);
+                        if (bgSrc.exists() && !bgDst.exists()) {
+                            dstImgDir.mkdirs();
+                            try { Io.copy(new java.io.FileInputStream(bgSrc), new FileOutputStream(bgDst)); } catch (Exception ignored) { }
+                        }
+                    }
                     np.mark = sp.mark;
 
                     java.util.ArrayList<Stroke> strokes = new java.util.ArrayList<>();
@@ -5112,6 +5152,20 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             afterPageImport = null;
             if (res != RESULT_OK || data == null || data.getData() == null) return;
             importPdfPages(target, pos, data.getData(), after);
+            return;
+        }
+        if (req == REQ_STYLE_IMAGE) {
+            java.util.function.Consumer<org.json.JSONObject> cb = afterStyleImport;
+            afterStyleImport = null;
+            if (res != RESULT_OK || data == null || data.getData() == null) return;
+            importCustomImageStyle(data.getData(), cb);
+            return;
+        }
+        if (req == REQ_STYLE_PDF) {
+            java.util.function.Consumer<org.json.JSONObject> cb = afterStyleImport;
+            afterStyleImport = null;
+            if (res != RESULT_OK || data == null || data.getData() == null) return;
+            importCustomPdfStyle(data.getData(), cb);
             return;
         }
         if (req != REQ_IMAGE || res != RESULT_OK || data == null || data.getData() == null) return;

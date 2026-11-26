@@ -54,7 +54,9 @@ final class Engine implements Choreographer.FrameCallback {
         float spacing = 1f, strength = 1f; // current page's look
         int lineColor, margins;
         float z;        // screen px per page unit
+        float pageH = Notebook.PH;
         float pageAspect = Notebook.PH / PW;
+        String bgImage;
         String title;
         boolean zoomLocked, viewKnown;
         // where the view is, to reopen the notebook there: page at the top of the screen, how far down it (× its height),
@@ -475,7 +477,11 @@ final class Engine implements Choreographer.FrameCallback {
         h.post(() -> {
             if (book == null || book.canvas) return;
             Notebook.Page np = new Notebook.Page(look != null ? look.bg : Notebook.BG_LINED);
-            if (look != null) np.copyStyle(look);
+            if (look != null) {
+                np.copyStyle(look);
+                if (look.h > 100f) np.h = look.h;
+                if (np.bgImage != null && !np.bgImage.isEmpty()) Notebook.ensureBgImageInNotebook(app, dir, np.bgImage);
+            }
             doInsertPages(pos, java.util.Collections.singletonList(np));
         });
     }
@@ -524,6 +530,76 @@ final class Engine implements Choreographer.FrameCallback {
             book.paper = paper;
             applyPaper();
             dropTextTextures();
+            dropShapeTextures();
+            edited();
+        });
+    }
+
+    /**
+     * Atomically applies template, paper colour, density (spacing), line width (strength),
+     * line colour, margins, and page height to the current page or all non-PDF pages. Undoable.
+     */
+    void applyPageTemplate(boolean allPages, int bg, int paper, float spacing, float strength,
+                           int lineColor, int margins, float pageH, String bgImage) {
+        final String normBgImg = bgImage != null && !bgImage.isEmpty() ? bgImage : null;
+        h.post(() -> {
+            if (book == null || book.pages.isEmpty()) return;
+            if (normBgImg != null) Notebook.ensureBgImageInNotebook(app, dir, normBgImg);
+            final int clampedPaper = Math.max(0, Math.min(Render.PAPER.length - 1, paper));
+            final float clampedH = pageH > 100f ? Math.max(400f, Math.min(3500f, pageH)) : 0f;
+            ArrayList<Act> acts = new ArrayList<>();
+            boolean paperChanged = book.paper != clampedPaper;
+            if (paperChanged) {
+                final int fromP = book.paper;
+                acts.add(new Act() {
+                    void undo(Notebook b) { b.paper = fromP; }
+                    void redo(Notebook b) { b.paper = clampedPaper; }
+                });
+                book.paper = clampedPaper;
+            }
+            Notebook.Page want = new Notebook.Page(bg);
+            want.spacing = spacing;
+            want.strength = strength;
+            want.lineColor = lineColor;
+            want.margins = margins;
+            want.bgImage = normBgImg;
+            int c = currentPage();
+            boolean relayoutNeeded = false;
+            for (int i = 0; i < book.pages.size(); i++) {
+                Notebook.Page p = book.pages.get(i);
+                if ((!allPages && i != c) || p.pdf >= 0) continue;
+                if (p.bg != bg) {
+                    acts.add(new SetBg(p, p.bg, bg));
+                    p.bg = bg;
+                }
+                if (!p.sameStyle(want)) {
+                    Notebook.Page from = new Notebook.Page(0);
+                    from.copyStyle(p);
+                    acts.add(new SetLook(p, from, want));
+                    p.copyStyle(want);
+                }
+                if (!book.canvas && clampedH > 100f && Math.abs(p.h - clampedH) > 1f) {
+                    final Notebook.Page pg = p;
+                    final float fromH = p.h;
+                    acts.add(new Act() {
+                        void undo(Notebook b) { pg.h = fromH; }
+                        void redo(Notebook b) { pg.h = clampedH; }
+                    });
+                    p.h = clampedH;
+                    relayoutNeeded = true;
+                }
+            }
+            if (acts.isEmpty()) return;
+            push(acts.size() == 1 ? acts.get(0) : new MultiAct(acts));
+            if (paperChanged) {
+                applyPaper();
+                dropTextTextures();
+                dropShapeTextures();
+            }
+            if (relayoutNeeded) {
+                relayout();
+                clampView();
+            }
             edited();
         });
     }
@@ -578,9 +654,14 @@ final class Engine implements Choreographer.FrameCallback {
                     book.pages.add(to, book.pages.remove(i));
                     break;
                 }
-                case "insert":
-                    book.pages.add(i + 1, new Notebook.Page(book.pages.get(i).pdf >= 0 ? Notebook.BG_LINED : book.pages.get(i).bg));
+                case "insert": {
+                    Notebook.Page src = book.pages.get(i);
+                    Notebook.Page np = new Notebook.Page(src.pdf >= 0 ? Notebook.BG_LINED : src.bg);
+                    np.copyStyle(src);
+                    if (src.pdf < 0 && src.h > 100f) np.h = src.h;
+                    book.pages.add(i + 1, np);
                     break;
+                }
                 case "bg":
                     doSetBg(i, arg);
                     return;
@@ -1063,7 +1144,8 @@ final class Engine implements Choreographer.FrameCallback {
         if (p.pdf >= 0) return Beautify.Paper.NONE;
         float k = p.spacing > 0 ? p.spacing : 1f;
         switch (p.bg) {
-            case Notebook.BG_LINED: case Notebook.BG_CORNELL: return new Beautify.Paper(120, 40 * k);
+            case Notebook.BG_LINED: case Notebook.BG_CORNELL: case Notebook.BG_CORNELL_B: case Notebook.BG_LEGAL:
+                return new Beautify.Paper(120, 40 * k);
             case Notebook.BG_NARROW: return new Beautify.Paper(120, 30 * k);
             default: return Beautify.Paper.NONE;
         }
@@ -1440,7 +1522,7 @@ final class Engine implements Choreographer.FrameCallback {
 
     private void applyPaper() {
         if (gl == null || book == null) return;
-        gl.setPaper(Render.PAPER[Math.max(0, Math.min(2, book.paper))], shadow, book.paper == Notebook.PAPER_DARK);
+        gl.setPaper(Render.PAPER[Math.max(0, Math.min(Render.PAPER.length - 1, book.paper))], shadow, Notebook.isDarkPaper(book.paper));
     }
 
     private void fit() {
@@ -1944,10 +2026,12 @@ final class Engine implements Choreographer.FrameCallback {
         boolean hiRes = z > fitZ * 1.5f;
         for (int i = first; i <= last; i++) {
             Notebook.Page p = book.pages.get(i);
-            gl.setLook(p.spacing, p.strength, p.lineColor, canvas() ? 0 : p.margins);
-            if (canvas()) gl.page(ox, oy, W / z, H / z, 0, 0, p.bg, true, false); // paper everywhere you look
-            else gl.page(0, tops[i], PW, p.h, 0, tops[i], p.pdf >= 0 ? 0 : p.bg, true, i > 0);
-            if (p.bg == Notebook.BG_SITE && p.pdf < 0 && !canvas()) { // printed labels of the inspection form
+            boolean hasCustomBg = p.pdf < 0 && p.bgImage != null && !p.bgImage.isEmpty();
+            int drawBg = (p.pdf >= 0 || hasCustomBg) ? Notebook.BG_BLANK : p.bg;
+            gl.setLook(p.spacing, p.strength, p.lineColor, (canvas() || hasCustomBg) ? 0 : p.margins);
+            if (canvas()) gl.page(ox, oy, W / z, H / z, 0, 0, drawBg, true, false); // paper everywhere you look
+            else gl.page(0, tops[i], PW, p.h, 0, tops[i], drawBg, true, i > 0);
+            if (!hasCustomBg && p.bg == Notebook.BG_SITE && p.pdf < 0 && !canvas()) { // printed labels of the inspection form
                 final int pap = book.paper;
                 final float ph = p.h;
                 Tex lt = tex("site:top:" + pap, () -> Render.siteBand(pap, ph, true));
@@ -1955,7 +2039,7 @@ final class Engine implements Choreographer.FrameCallback {
                 Tex lb = tex("site:bot:" + pap + ":" + Math.round(ph), () -> Render.siteBand(pap, ph, false));
                 if (lb != null) gl.tex(lb.id, 0, tops[i] + ph - 260, PW, 220, 1);
             }
-            RectF[] bands = p.pdf < 0 && !canvas() ? Render.labelBands(p.bg, p.h) : null;
+            RectF[] bands = !hasCustomBg && p.pdf < 0 && !canvas() ? Render.labelBands(p.bg, p.h) : null;
             if (bands != null) { // printed labels of the planner templates
                 final int pap = book.paper, bgv = p.bg;
                 final float ph = p.h;
@@ -1963,6 +2047,14 @@ final class Engine implements Choreographer.FrameCallback {
                     final RectF r = bands[bi];
                     Tex lt = tex("lbl:" + bgv + ":" + pap + ":" + bi + ":" + Math.round(ph), () -> Render.labelBand(bgv, pap, ph, r));
                     if (lt != null) gl.tex(lt.id, r.left, tops[i] + r.top, r.width(), r.height(), 1);
+                }
+            }
+            if (hasCustomBg) {
+                final String fn = p.bgImage;
+                Tex bt = tex("bgimg:" + fn, () -> Render.imageFile(Notebook.bgImageFile(app, dir, fn), 2400));
+                if (bt != null) {
+                    if (canvas()) gl.tex(bt.id, 0, 0, PW, p.h, 1);
+                    else gl.tex(bt.id, 0, tops[i], PW, p.h, 1);
                 }
             }
             if (p.pdf >= 0) {
@@ -2058,7 +2150,7 @@ final class Engine implements Choreographer.FrameCallback {
         if (it.type == Notebook.Item.SHAPE) {
             final int lvl = z * 1.3f <= 2 ? 2 : z * 1.3f <= 4 ? 4 : 6;
             final Notebook.Item item = it;
-            final boolean dk = book.paper == Notebook.PAPER_DARK;
+            final boolean dk = Notebook.isDarkPaper(book.paper);
             String base = "shp:" + System.identityHashCode(it) + (dk ? ":d:" : ":l:");
             t = tex(base + lvl, () -> ShapeSpec.toBitmap(item, lvl, dk));
             if (t == null) for (int l : new int[]{2, 4, 6}) {
@@ -2095,7 +2187,7 @@ final class Engine implements Choreographer.FrameCallback {
         } else {
             final int lvl = z * 1.3f <= 2 ? 2 : z * 1.3f <= 4 ? 4 : 6;
             final Notebook.Item item = it;
-            final boolean dk = book.paper == Notebook.PAPER_DARK;
+            final boolean dk = Notebook.isDarkPaper(book.paper);
             String base = "txt:" + System.identityHashCode(it) + ":";
             t = tex(base + lvl, () -> textBitmap(item, lvl, dk));
             if (t == null) for (int l : new int[]{2, 4, 6}) {
@@ -2409,7 +2501,7 @@ final class Engine implements Choreographer.FrameCallback {
     private final java.util.Set<Notebook.Page> inkPending = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
 
     private int greyFor(Stroke s) {
-        boolean dk = book.paper == Notebook.PAPER_DARK;
+        boolean dk = Notebook.isDarkPaper(book.paper);
         return s.hl() ? (dk ? 0xff3a3d44 : 0xffe6e8ec) : (dk ? 0xff5a5f69 : 0xffc6cad2);
     }
 
@@ -2798,6 +2890,7 @@ final class Engine implements Choreographer.FrameCallback {
             Notebook.Page lastP = book.pages.get(book.pages.size() - 1);
             Notebook.Page np = new Notebook.Page(lastP.pdf >= 0 ? Notebook.BG_LINED : lastP.bg);
             np.copyStyle(lastP);
+            if (lastP.pdf < 0 && lastP.h > 100f) np.h = lastP.h;
             book.pages.add(np);
             relayout();
             main.post(this::notifyStateLater);
@@ -3393,7 +3486,7 @@ final class Engine implements Choreographer.FrameCallback {
         predMode = 0;
         overlay = true;
         float lw = dp(0.8f) / z;
-        int seg = 28, ringColor = book.paper == Notebook.PAPER_DARK ? 0xccffffff : 0x99606878;
+        int seg = 28, ringColor = Notebook.isDarkPaper(book.paper) ? 0xccffffff : 0x99606878;
         for (int k = 0; k < seg; k++) {
             double a0 = 2 * Math.PI * k / seg, a1 = 2 * Math.PI * (k + 1) / seg;
             gl.pred.put(x1 + er * (float) Math.cos(a0), y1 + er * (float) Math.sin(a0),
@@ -3886,6 +3979,7 @@ final class Engine implements Choreographer.FrameCallback {
             Notebook.Page lastP = book.pages.get(book.pages.size() - 1);
             Notebook.Page np = new Notebook.Page(lastP.pdf >= 0 ? Notebook.BG_LINED : lastP.bg);
             np.copyStyle(lastP);
+            if (lastP.pdf < 0 && lastP.h > 100f) np.h = lastP.h;
             book.pages.add(np);
             relayout();
             main.post(this::notifyStateLater);
@@ -3963,7 +4057,7 @@ final class Engine implements Choreographer.FrameCallback {
             if (liveDraftShape != null) {
                 final Notebook.Item preview = liveDraftShape;
                 final float pox = ox, poy = oy, pz = z, ptop = top;
-                final boolean dk = book.paper == Notebook.PAPER_DARK;
+                final boolean dk = Notebook.isDarkPaper(book.paper);
                 main.post(() -> listener.onShapeOverlay(preview, pox, poy, pz, ptop, dk, null, null, null));
             }
             return;
@@ -4044,7 +4138,7 @@ final class Engine implements Choreographer.FrameCallback {
         }
         final Notebook.Item preview = drawPreview ? sh : null;
         final float pox = ox, poy = oy, pz = z, ptop = top;
-        final boolean dk = book.paper == Notebook.PAPER_DARK;
+        final boolean dk = Notebook.isDarkPaper(book.paper);
         final float[] boxF = boxCorners;
         main.post(() -> listener.onShapeOverlay(preview, pox, poy, pz, ptop, dk, hScreen, hIds, boxF));
     }
@@ -4575,6 +4669,7 @@ final class Engine implements Choreographer.FrameCallback {
         if (last.pdf >= 0 || (last.strokes().isEmpty() && last.items().isEmpty())) return false;
         Notebook.Page np = new Notebook.Page(last.bg);
         np.copyStyle(last); // the next page looks like this one
+        if (last.h > 100f) np.h = last.h;
         book.pages.add(np);
         relayout();
         return true;
@@ -4588,6 +4683,7 @@ final class Engine implements Choreographer.FrameCallback {
         Notebook.Page cur = book.pages.get(after);
         Notebook.Page np = new Notebook.Page(cur.pdf >= 0 ? Notebook.BG_LINED : cur.bg);
         np.copyStyle(cur);
+        if (cur.pdf < 0 && cur.h > 100f) np.h = cur.h;
         book.pages.add(after + 1, np);
         push(new PagesEdit(before, new ArrayList<>(book.pages)));
         relayout();
@@ -4697,7 +4793,9 @@ final class Engine implements Choreographer.FrameCallback {
             s.viewKnown = true;
         }
         s.z = z;
+        s.pageH = cp.h;
         s.pageAspect = cp.h / PW;
+        s.bgImage = cp.bgImage;
         s.paper = book.paper;
         s.canvas = book.canvas;
         s.title = book.title;

@@ -13,6 +13,7 @@ import android.view.Window;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -87,6 +88,39 @@ final class NewNotebookSheet {
         coverBox.setOrientation(LinearLayout.VERTICAL);
         coverBox.setVisibility(startCanvas ? View.GONE : View.VISIBLE); // a canvas has no pages to put a cover before
 
+        // Page size (defaults to A4: 2480 × 3508)
+        int initPresetIdx = 1; // A4
+        boolean initLandscape = false;
+        if (defLook != null && defLook.h > 100f) {
+            float dh = defLook.h;
+            if (Math.abs(PageStyleDialog.SIZE_PRESETS[1].aspectH - dh) < 25f) {
+                initPresetIdx = 1;
+            } else if (Math.abs((Notebook.PW * PageStyleDialog.SIZE_PRESETS[1].wPx / (float) PageStyleDialog.SIZE_PRESETS[1].hPx) - dh) < 25f) {
+                initPresetIdx = 1;
+                initLandscape = true;
+            } else {
+                for (int i = 0; i < PageStyleDialog.SIZE_PRESETS.length; i++) {
+                    if (i == 0 || i == 2 || i == 3 || i == 4) continue;
+                    PageStyleDialog.SizePreset sp = PageStyleDialog.SIZE_PRESETS[i];
+                    if (Math.abs(sp.aspectH - dh) < 25f) {
+                        initPresetIdx = i;
+                        break;
+                    }
+                    float lh = Notebook.PW * sp.wPx / (float) Math.max(1, sp.hPx);
+                    if (Math.abs(lh - dh) < 25f) {
+                        initPresetIdx = i;
+                        initLandscape = true;
+                        break;
+                    }
+                }
+            }
+        }
+        final int[] sizePresetIdx = {initPresetIdx};
+        final boolean[] sizeLandscape = {initLandscape};
+        final float[] chosenPageH = {
+                defLook != null && defLook.h > 100f ? defLook.h : PageStyleDialog.SIZE_PRESETS[1].aspectH
+        };
+
         // page style: every template, then your own
         ArrayList<Choice> choices = new ArrayList<>();
         for (int i = 0; i < Notebook.BG_NAMES.length; i++) {
@@ -116,7 +150,7 @@ final class NewNotebookSheet {
                 previews.get(i).setImageBitmap(preview(a, ch.look, ch.paper >= 0 && i >= Notebook.BG_NAMES.length ? ch.paper : paper[0]));
             }
         };
-        final LinearLayout[] paperSeg = {null}; // the Paper control below, so a template's paper shows there too
+        final Runnable[] syncPaperSwatches = {null};
         for (int i = 0; i < choices.size(); i++) {
             final int k = i;
             LinearLayout tile = new LinearLayout(a);
@@ -138,10 +172,9 @@ final class NewNotebookSheet {
                 Choice ch = choices.get(k);
                 look[0] = ch.look;
                 if (ch.paper >= 0 && ch.paper != paper[0]) {
-                    paper[0] = ch.paper;
-                    int seg = Math.max(0, Math.min(2, ch.paper));
-                    if (paperSeg[0] != null) paperSeg[0].getChildAt(seg).callOnClick(); // selects it and redraws
-                    else redraw.run();
+                    paper[0] = Math.max(0, Math.min(Render.PAPER.length - 1, ch.paper));
+                    if (syncPaperSwatches[0] != null) syncPaperSwatches[0].run();
+                    redraw.run();
                 }
                 mark.run();
             });
@@ -153,10 +186,105 @@ final class NewNotebookSheet {
         redraw.run();
         box.addView(grid);
 
-        // paper
-        box.addView(caption(a, "Paper"));
-        paperSeg[0] = Ui.segmented(a, new String[]{"White", "Cream", "Dark"}, Math.max(0, Math.min(2, paper[0])), i -> { paper[0] = i; redraw.run(); });
-        box.addView(paperSeg[0]);
+        // page size (defaults to A4; hidden for infinite canvas)
+        if (!startCanvas) {
+            box.addView(caption(a, "Page size"));
+            LinearLayout sizeRow = new LinearLayout(a);
+            sizeRow.setOrientation(LinearLayout.HORIZONTAL);
+            sizeRow.setGravity(Gravity.CENTER_VERTICAL);
+
+            TextView sizeDrop = Ui.text(a, "", 14f, Ui.color(a, R.color.on_surface), Ui.medium());
+            sizeDrop.setPadding(Ui.dp(a, 14), Ui.dp(a, 10), Ui.dp(a, 14), Ui.dp(a, 10));
+            GradientDrawable sbg = Ui.round(Ui.color(a, R.color.surface_variant), Ui.dp(a, 12));
+            sbg.setStroke(Ui.hairline(a), Ui.color(a, R.color.outline));
+            sizeDrop.setBackground(Ui.ripple(a, sbg, Ui.dp(a, 12)));
+
+            ImageView orientBtn = new ImageView(a);
+            orientBtn.setImageResource(R.drawable.ic_swap);
+            orientBtn.setColorFilter(Ui.color(a, R.color.on_surface_variant));
+            int op = Ui.dp(a, 9);
+            orientBtn.setPadding(op, op, op, op);
+            GradientDrawable obg = Ui.round(Ui.color(a, R.color.surface_variant), Ui.dp(a, 12));
+            obg.setStroke(Ui.hairline(a), Ui.color(a, R.color.outline));
+            orientBtn.setBackground(Ui.ripple(a, obg, Ui.dp(a, 12)));
+            orientBtn.setContentDescription("Swap portrait and landscape");
+
+            Runnable syncSizeLabel = () -> {
+                PageStyleDialog.SizePreset sp = PageStyleDialog.SIZE_PRESETS[sizePresetIdx[0]];
+                int wPx = sizeLandscape[0] ? sp.hPx : sp.wPx;
+                int hPx = sizeLandscape[0] ? sp.wPx : sp.hPx;
+                chosenPageH[0] = Math.max(400f, Math.min(3500f, Notebook.PW * hPx / (float) Math.max(1, wPx)));
+                String orient = wPx > hPx ? "Landscape" : (wPx == hPx ? "Square" : "Portrait");
+                sizeDrop.setText(sp.shortName + "  ·  " + wPx + " × " + hPx + "  (" + orient + ")   ▾");
+            };
+            syncSizeLabel.run();
+
+            sizeDrop.setOnClickListener(v -> {
+                PopupMenu pm = new PopupMenu(a, sizeDrop);
+                for (int i = 0; i < PageStyleDialog.SIZE_PRESETS.length; i++) {
+                    PageStyleDialog.SizePreset sp = PageStyleDialog.SIZE_PRESETS[i];
+                    pm.getMenu().add(0, i, i, sp.label + " (" + sp.wPx + " × " + sp.hPx + ")");
+                }
+                pm.setOnMenuItemClickListener(mi -> {
+                    int id = mi.getItemId();
+                    if (id >= 0 && id < PageStyleDialog.SIZE_PRESETS.length) {
+                        sizePresetIdx[0] = id;
+                        sizeLandscape[0] = false;
+                        syncSizeLabel.run();
+                    }
+                    return true;
+                });
+                pm.show();
+            });
+
+            orientBtn.setOnClickListener(v -> {
+                sizeLandscape[0] = !sizeLandscape[0];
+                syncSizeLabel.run();
+            });
+
+            sizeRow.addView(sizeDrop, new LinearLayout.LayoutParams(0, -2, 1f));
+            LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(Ui.dp(a, 42), Ui.dp(a, 42));
+            olp.leftMargin = Ui.dp(a, 8);
+            sizeRow.addView(orientBtn, olp);
+            box.addView(sizeRow);
+        }
+
+        // paper (6 circular paper swatches matching PageStyleDialog)
+        box.addView(caption(a, "Paper colour"));
+        LinearLayout paperRow = new LinearLayout(a);
+        paperRow.setOrientation(LinearLayout.HORIZONTAL);
+        paperRow.setGravity(Gravity.CENTER_VERTICAL);
+        final View[] paperDots = new View[Notebook.PAPER_ORDER.length];
+        syncPaperSwatches[0] = () -> {
+            for (int i = 0; i < Notebook.PAPER_ORDER.length; i++) {
+                int pid = Notebook.PAPER_ORDER[i];
+                boolean sel = pid == paper[0];
+                GradientDrawable gd = new GradientDrawable();
+                gd.setShape(GradientDrawable.OVAL);
+                gd.setColor(Render.PAPER[pid][0]);
+                gd.setStroke(Ui.dp(a, sel ? 3 : 1),
+                        sel ? Ui.color(a, R.color.accent) : Ui.color(a, R.color.outline));
+                paperDots[i].setBackground(gd);
+            }
+        };
+        for (int i = 0; i < Notebook.PAPER_ORDER.length; i++) {
+            final int pid = Notebook.PAPER_ORDER[i];
+            View dot = new View(a);
+            int sz = Ui.dp(a, 36);
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(sz, sz);
+            if (i > 0) dlp.leftMargin = Ui.dp(a, 10);
+            dot.setLayoutParams(dlp);
+            dot.setContentDescription(Notebook.PAPER_NAMES[pid] + " paper");
+            dot.setOnClickListener(v -> {
+                paper[0] = pid;
+                syncPaperSwatches[0].run();
+                redraw.run();
+            });
+            paperDots[i] = dot;
+            paperRow.addView(dot);
+        }
+        syncPaperSwatches[0].run();
+        box.addView(paperRow);
 
         // cover
         coverBox.addView(Ui.switchRow(a, "Cover", "Shown on the notes screen and before page 1", true, on -> {
@@ -173,15 +301,20 @@ final class NewNotebookSheet {
         make.setOnClickListener(v -> {
             String t = name.getText().toString().trim();
             if (t.isEmpty()) t = title;
+            Notebook.Page chosen = look[0] != null ? look[0] : new Notebook.Page(Notebook.BG_DOTS);
+            Notebook.Page pg = new Notebook.Page(chosen.bg);
+            pg.copyStyle(chosen);
+            pg.h = !canvas[0] ? chosenPageH[0] : Notebook.PH;
             if (asDefault[0]) {
                 try {
-                    Notebook.Page pg = look[0] != null ? look[0] : new Notebook.Page(Notebook.BG_DOTS);
-                    saveDefault.accept(new org.json.JSONObject().put("bg", pg.bg).put("s", pg.spacing).put("t", pg.strength)
-                            .put("c", pg.lineColor).put("m", pg.margins).put("p", paper[0]));
+                    org.json.JSONObject defObj = new org.json.JSONObject().put("bg", pg.bg).put("s", pg.spacing).put("t", pg.strength)
+                            .put("c", pg.lineColor).put("m", pg.margins).put("p", paper[0]).put("h", pg.h);
+                    if (pg.bgImage != null && !pg.bgImage.isEmpty()) defObj.put("img", pg.bgImage);
+                    saveDefault.accept(defObj);
                 } catch (org.json.JSONException ignored) { }
             }
             d.dismiss();
-            create.create(t, canvas[0], look[0] != null ? look[0] : new Notebook.Page(Notebook.BG_DOTS), paper[0],
+            create.create(t, canvas[0], pg, paper[0],
                     canvas[0] || !withCover[0] ? null : cover[0]);
         });
 
@@ -209,7 +342,19 @@ final class NewNotebookSheet {
         int w = Ui.dp(a, 70), h = Ui.dp(a, 99);
         Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(b);
+        if (look.bgImage != null && !look.bgImage.isEmpty()) {
+            int[] pal = Render.PAPER[Math.max(0, Math.min(Render.PAPER.length - 1, paper))];
+            c.drawColor(pal[0]);
+            Bitmap img = Render.imageFile(Notebook.bgImageFile(a, null, look.bgImage), Math.max(w, h) * 2);
+            if (img != null) {
+                c.drawBitmap(img, null, new android.graphics.RectF(0, 0, w, h), new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG));
+                img.recycle();
+            }
+            return b;
+        }
         boolean whole = look.bg == Notebook.BG_DAILY || look.bg == Notebook.BG_WEEKLY || look.bg == Notebook.BG_CORNELL
+                || look.bg == Notebook.BG_CORNELL_B || look.bg == Notebook.BG_LEGAL || look.bg == Notebook.BG_ENGINEERING
+                || look.bg == Notebook.BG_MUSIC || look.bg == Notebook.BG_GUITAR_TAB || look.bg == Notebook.BG_GUITAR_SCORE
                 || look.bg == Notebook.BG_SITE;
         float k = w / Notebook.PW * (whole ? 1f : 2.2f);
         c.scale(k, k);

@@ -24,11 +24,14 @@ final class Render {
 
     // paper palette: paper, line, grid, dot (ARGB)
     static final int[][] PAPER = {
-            {0xffffffff, 0xffc2d1e8, 0xffd9e0ec, 0xffa8b2c4},
-            {0xfffffbef, 0xffd9cdb4, 0xffe6dccb, 0xffbfb39c},
-            {0xff1f2125, 0xff3a404b, 0xff30353e, 0xff545b68}};
+            {0xffffffff, 0xffc2d1e8, 0xffd9e0ec, 0xffa8b2c4}, // 0: White
+            {0xfffffbef, 0xffd9cdb4, 0xffe6dccb, 0xffbfb39c}, // 1: Cream
+            {0xff26282c, 0xff464d59, 0xff383e48, 0xff5e6675}, // 2: Charcoal Dark
+            {0xffdfc7a0, 0xffb39a74, 0xffc4ad89, 0xff9b825d}, // 3: Warm Tan
+            {0xffe4ecf7, 0xffb3c4dc, 0xffc7d5e8, 0xff95a8c4}, // 4: Cool Ice
+            {0xff0d0e11, 0xff2f3540, 0xff232830, 0xff4b5362}}; // 5: Pure Black
 
-    static boolean dark(Notebook nb) { return nb.paper == Notebook.PAPER_DARK; }
+    static boolean dark(Notebook nb) { return Notebook.isDarkPaper(nb.paper); }
 
     /** Very dark ink is shown light on dark paper (and the GL shader does the same). */
     static int inkColor(int c, boolean darkPaper) {
@@ -75,11 +78,11 @@ final class Render {
     }
 
     static void paper(Canvas c, Notebook nb, Notebook.Page p) {
-        int[] pal = PAPER[Math.max(0, Math.min(2, nb.paper))];
+        int[] pal = PAPER[Math.max(0, Math.min(PAPER.length - 1, nb.paper))];
         Paint f = new Paint(Paint.ANTI_ALIAS_FLAG);
         f.setColor(pal[0]);
         c.drawRect(0, 0, Notebook.PW, p.h, f);
-        if (p.pdf >= 0) return;
+        if (p.pdf >= 0 || (p.bgImage != null && !p.bgImage.isEmpty())) return;
         float PW = Notebook.PW, h = p.h, k = p.spacing > 0 ? p.spacing : 1f;
         float bold = Math.max(1f, p.strength);
         int alpha = Math.round(255 * Math.max(0.05f, Math.min(1f, p.strength)));
@@ -249,12 +252,61 @@ final class Render {
                 siteLabels(c, nb.paper, h, false);
                 break;
             }
+            case Notebook.BG_CORNELL_B: {
+                float sp = 40f * k;
+                float topY = 110f, botY = Math.max(topY + 120f, h - 220f), cueX = 300f;
+                l.setColor(c1);
+                l.setStrokeWidth(1.4f * bold);
+                for (float y = topY + sp; y < botY - 8f; y += sp) c.drawLine(cueX, y, PW, y, l);
+                for (float y = botY + sp; y < h - 30f; y += sp) c.drawLine(0, y, PW, y, l);
+                l.setStrokeWidth(2f * bold);
+                c.drawLine(0, topY, PW, topY, l);
+                c.drawLine(cueX, topY, cueX, botY, l);
+                c.drawLine(0, botY, PW, botY, l);
+                break;
+            }
+            case Notebook.BG_LEGAL: {
+                float sp = 40f * k;
+                l.setColor(c1);
+                l.setStrokeWidth(1.4f * bold);
+                for (float y = 130f; y < h - 40f; y += sp) c.drawLine(0, y, PW, y, l);
+                Paint m = new Paint(Paint.ANTI_ALIAS_FLAG);
+                m.setStrokeWidth(1.6f * bold);
+                m.setColor(look(Notebook.isDarkPaper(nb.paper) ? 0xffa6535c : 0xffe06666, alpha));
+                c.drawLine(128f, 0, 128f, h, m);
+                c.drawLine(138f, 0, 138f, h, m);
+                break;
+            }
+            case Notebook.BG_GUITAR_TAB: {
+                float st = 14f * k;
+                l.setColor(c1);
+                l.setStrokeWidth(1.4f * bold);
+                for (float top = 120f; top + 5f * st < h - 60f; top += 145f * k) {
+                    for (int i = 0; i < 6; i++) c.drawLine(60f, top + i * st, PW - 60f, top + i * st, l);
+                    c.drawLine(60f, top, 60f, top + 5f * st, l);
+                    c.drawLine(PW - 60f, top, PW - 60f, top + 5f * st, l);
+                }
+                break;
+            }
+            case Notebook.BG_GUITAR_SCORE: {
+                float st = 9f * k, tb = 12f * k, gap = 68f * k;
+                l.setColor(c1);
+                l.setStrokeWidth(1.3f * bold);
+                for (float top = 110f; top + gap + 5f * tb < h - 50f; top += 195f * k) {
+                    for (int i = 0; i < 5; i++) c.drawLine(60f, top + i * st, PW - 60f, top + i * st, l);
+                    float t0 = top + gap;
+                    for (int i = 0; i < 6; i++) c.drawLine(60f, t0 + i * tb, PW - 60f, t0 + i * tb, l);
+                    c.drawLine(60f, top, 60f, t0 + 5f * tb, l);
+                    c.drawLine(PW - 60f, top, PW - 60f, t0 + 5f * tb, l);
+                }
+                break;
+            }
         }
         if (!nb.canvas && p.margins != 0) {
             Paint m = new Paint(Paint.ANTI_ALIAS_FLAG);
             m.setStrokeWidth(1.6f * bold);
             if ((p.margins & Notebook.MARGIN_LEFT) != 0) { // red rule
-                m.setColor(look(nb.paper == Notebook.PAPER_DARK ? 0xff9e545c : 0xffe57878, alpha));
+                m.setColor(look(Notebook.isDarkPaper(nb.paper) ? 0xff9e545c : 0xffe57878, alpha));
                 c.drawLine(125, 0, 125, h, m);
             }
             m.setColor(c1);
@@ -309,8 +361,8 @@ final class Render {
 
     /** The printed text of the daily / weekly planner templates. */
     static void plannerLabels(Canvas c, int bg, int paper, float h) {
-        int strong = paper == Notebook.PAPER_DARK ? 0xffc9ced8 : paper == Notebook.PAPER_CREAM ? 0xff4d4434 : 0xff3a4250;
-        int soft = paper == Notebook.PAPER_DARK ? 0xff8f97a6 : paper == Notebook.PAPER_CREAM ? 0xff8a7c63 : 0xff7a8396;
+        int strong = Notebook.isDarkPaper(paper) ? 0xffc9ced8 : (paper == Notebook.PAPER_CREAM || paper == Notebook.PAPER_TAN) ? 0xff4d4434 : 0xff3a4250;
+        int soft = Notebook.isDarkPaper(paper) ? 0xff8f97a6 : (paper == Notebook.PAPER_CREAM || paper == Notebook.PAPER_TAN) ? 0xff8a7c63 : 0xff7a8396;
         Paint t = new Paint(Paint.ANTI_ALIAS_FLAG);
         if (bg == Notebook.BG_DAILY) {
             t.setTypeface(Ui.font(400));
@@ -352,8 +404,8 @@ final class Render {
 
     /** Printed labels of the site-inspection template: the header band (top) or the sign-off box (bottom). */
     static void siteLabels(Canvas c, int paper, float h, boolean top) {
-        int strong = paper == Notebook.PAPER_DARK ? 0xffc9ced8 : paper == Notebook.PAPER_CREAM ? 0xff4d4434 : 0xff3a4250;
-        int soft = paper == Notebook.PAPER_DARK ? 0xff8f97a6 : paper == Notebook.PAPER_CREAM ? 0xff8a7c63 : 0xff7a8396;
+        int strong = Notebook.isDarkPaper(paper) ? 0xffc9ced8 : (paper == Notebook.PAPER_CREAM || paper == Notebook.PAPER_TAN) ? 0xff4d4434 : 0xff3a4250;
+        int soft = Notebook.isDarkPaper(paper) ? 0xff8f97a6 : (paper == Notebook.PAPER_CREAM || paper == Notebook.PAPER_TAN) ? 0xff8a7c63 : 0xff7a8396;
         Paint t = new Paint(Paint.ANTI_ALIAS_FLAG);
         t.setTypeface(Ui.font(600));
         if (top) {
@@ -419,6 +471,12 @@ final class Render {
         }
         if (p.pdf >= 0 && pdf != null) {
             Bitmap b = pdf.render(p.pdf, pdfPx);
+            if (b != null) {
+                c.drawBitmap(b, null, new RectF(0, 0, Notebook.PW, p.h), new Paint(Paint.FILTER_BITMAP_FLAG));
+                b.recycle();
+            }
+        } else if (p.pdf < 0 && p.bgImage != null && !p.bgImage.isEmpty() && dir != null) {
+            Bitmap b = image(dir, p.bgImage, Math.max(1800, pdfPx));
             if (b != null) {
                 c.drawBitmap(b, null, new RectF(0, 0, Notebook.PW, p.h), new Paint(Paint.FILTER_BITMAP_FLAG));
                 b.recycle();
@@ -855,7 +913,11 @@ final class Render {
     }
 
     static Bitmap image(File dir, String name, int maxPx) {
-        File f = new File(new File(dir, "images"), name);
+        return imageFile(new File(new File(dir, "images"), name), maxPx);
+    }
+
+    static Bitmap imageFile(File f, int maxPx) {
+        if (f == null || !f.exists()) return null;
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
         BitmapFactory.decodeFile(f.getPath(), o);

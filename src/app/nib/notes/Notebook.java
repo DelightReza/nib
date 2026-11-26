@@ -23,17 +23,24 @@ import java.util.Properties;
 final class Notebook {
     static final float PW = 1000f, PH = 1414f;
     static final int BG_BLANK = 0, BG_LINED = 1, BG_GRID = 2, BG_DOTS = 3, BG_NARROW = 4, BG_CORNELL = 5, BG_MUSIC = 6,
-            BG_ENGINEERING = 7, BG_ISO = 8, BG_SITE = 9, BG_GRAPH = 10, BG_FINE_DOTS = 11, BG_HEX = 12, BG_DAILY = 13, BG_WEEKLY = 14;
-    static final String[] BG_NAMES = {"Blank", "Lined", "Grid", "Dotted", "Narrow lined", "Cornell notes", "Music staff",
-            "Engineering", "Isometric", "Site inspection", "Graph 5 mm", "Fine dots", "Hexagon", "Daily planner", "Weekly planner"};
-    static final int PAPER_WHITE = 0, PAPER_CREAM = 1, PAPER_DARK = 2;
-    static final String[] PAPER_NAMES = {"White paper", "Cream paper", "Dark paper"};
+            BG_ENGINEERING = 7, BG_ISO = 8, BG_SITE = 9, BG_GRAPH = 10, BG_FINE_DOTS = 11, BG_HEX = 12, BG_DAILY = 13, BG_WEEKLY = 14,
+            BG_CORNELL_B = 15, BG_LEGAL = 16, BG_GUITAR_TAB = 17, BG_GUITAR_SCORE = 18;
+    static final String[] BG_NAMES = {"Blank", "Rule", "Grid", "Dot", "Narrow rule", "Cornell A", "Music Score",
+            "Engineering Grid", "Isometric", "Site inspection", "Graph 5 mm", "Fine dot", "Hexagonal Grid", "Daily planner", "Weekly planner",
+            "Cornell B", "Legal", "Guitar Tablature", "Guitar Score"};
+    static final int PAPER_WHITE = 0, PAPER_CREAM = 1, PAPER_DARK = 2, PAPER_TAN = 3, PAPER_ICE = 4, PAPER_BLACK = 5;
+    static final String[] PAPER_NAMES = {"White", "Cream", "Dark", "Tan", "Ice", "Black"};
+    /** Visual display order from light to dark paper swatches. */
+    static final int[] PAPER_ORDER = {PAPER_WHITE, PAPER_CREAM, PAPER_TAN, PAPER_ICE, PAPER_DARK, PAPER_BLACK};
+    static boolean isDarkPaper(int paper) { return paper == PAPER_DARK || paper == PAPER_BLACK; }
     private static final int MAGIC1 = 0x4E494231, MAGIC2 = 0x4E494232, MAGIC3 = 0x4E494233, MAGIC4 = 0x4E494234, MAGIC5 = 0x4E494235, MAGIC6 = 0x4E494236, MAGIC7 = 0x4E494237;
     // NIB8 (Nib 2.3): ink.bin is only an index; each page's ink and items are in pages/<id>.bin ("NIBP")
     private static final int MAGIC8 = 0x4E494238, MAGIC_PAGE = 0x4E494250;
     // layers (2.5): a block after the index's pages, and after a page file's items (each item's layer); a stroke's
     // layer rides in the top byte of its tool word, which older Nib masks off
     private static final int MAGIC_LAYERS = 0x4C415952;
+    // custom page style background image (image/PDF page imported as a reusable template): trailing block after layers
+    private static final int MAGIC_BGIMG = 0x4247494D;
     // NIB3 +bookmarks, NIB4 +page style, NIB5 +tape paths, NIB6 +text style, NIB7 = NIB6 with int-length strings.
     // NIB7 is written only when a string is too long for writeUTF (64 KB), so other notebooks stay readable by older Nib.
     static final int MARGIN_LEFT = 1, MARGIN_HEADER = 2, MARGIN_BORDER = 4;
@@ -186,6 +193,7 @@ final class Notebook {
         // line strength (×, 1 = normal), margins (MARGIN_* bits)
         float spacing = 1f, strength = 1f;
         int lineColor, margins;
+        String bgImage; // custom imported image/PDF page style file name (stored in images/ and custom_templates/)
 
         int id;            // its file is pages/<id>.bin; 0 = not given one yet
         File src;          // that file, once it holds this page (null: the page exists only in memory so far)
@@ -194,10 +202,14 @@ final class Notebook {
         private ArrayList<Item> items = new ArrayList<>();
         private Object[] savedS, savedI; // what src holds; null = nothing written yet
 
-        void copyStyle(Page o) { spacing = o.spacing; strength = o.strength; lineColor = o.lineColor; margins = o.margins; }
+        void copyStyle(Page o) {
+            spacing = o.spacing; strength = o.strength; lineColor = o.lineColor; margins = o.margins;
+            bgImage = o.bgImage != null && !o.bgImage.isEmpty() ? o.bgImage : null;
+        }
 
         boolean sameStyle(Page o) {
-            return spacing == o.spacing && strength == o.strength && lineColor == o.lineColor && margins == o.margins;
+            return spacing == o.spacing && strength == o.strength && lineColor == o.lineColor && margins == o.margins
+                    && java.util.Objects.equals(bgImage, o.bgImage);
         }
 
         Page(int bg) { this.bg = bg; }
@@ -446,18 +458,31 @@ final class Notebook {
             p.margins = in.readInt();
             nb.pages.add(p);
         }
-        if (in.available() >= 8 && in.readInt() == MAGIC_LAYERS) {
-            int n = in.readInt();
-            if (n < 1 || n > 256) throw new IOException("bad layer count " + n);
-            ArrayList<Layer> ls = new ArrayList<>();
-            for (int i = 0; i < n; i++) {
-                Layer l = new Layer(in.readInt(), readStr(in, true));
-                l.visible = in.readBoolean();
-                ls.add(l);
+        while (in.available() >= 8) {
+            int tag = in.readInt();
+            if (tag == MAGIC_LAYERS) {
+                int n = in.readInt();
+                if (n < 1 || n > 256) throw new IOException("bad layer count " + n);
+                ArrayList<Layer> ls = new ArrayList<>();
+                for (int i = 0; i < n; i++) {
+                    Layer l = new Layer(in.readInt(), readStr(in, true));
+                    l.visible = in.readBoolean();
+                    ls.add(l);
+                }
+                nb.layers = ls;
+                nb.activeLayer = in.readInt();
+                if (nb.layer(nb.activeLayer) == null) nb.activeLayer = ls.get(ls.size() - 1).id;
+            } else if (tag == MAGIC_BGIMG) {
+                int n = in.readInt();
+                if (n < 0 || n > 100_000) throw new IOException("bad bgImage count " + n);
+                for (int i = 0; i < n; i++) {
+                    boolean has = in.readBoolean();
+                    String fn = has ? readStr(in, true) : null;
+                    if (i < nb.pages.size()) nb.pages.get(i).bgImage = fn != null && !fn.isEmpty() ? fn : null;
+                }
+            } else {
+                break;
             }
-            nb.layers = ls;
-            nb.activeLayer = in.readInt();
-            if (nb.layer(nb.activeLayer) == null) nb.activeLayer = ls.get(ls.size() - 1).id;
         }
     }
 
@@ -631,7 +656,7 @@ final class Notebook {
         // the notes screen's picture of page 1: only redrawn when page 1 or its look changed
         Page first = pages.get(0);
         String key = paper + "|" + first.bg + "|" + first.spacing + "|" + first.strength + "|" + first.lineColor + "|" + first.margins
-                + "|" + first.pdf + "|" + first.h + "|" + System.identityHashCode(first);
+                + "|" + first.pdf + "|" + first.h + "|" + (first.bgImage == null ? "" : first.bgImage) + "|" + System.identityHashCode(first);
         n.thumbWanted = first.dirty() || !key.equals(thumbKey);
         if (forSave) thumbKey = key;
         return n;
@@ -688,6 +713,17 @@ final class Notebook {
                 out.writeBoolean(l.visible);
             }
             out.writeInt(activeLayer);
+            boolean anyBgImg = false;
+            for (Page p : pages) if (p.bgImage != null && !p.bgImage.isEmpty()) { anyBgImg = true; break; }
+            if (anyBgImg) {
+                out.writeInt(MAGIC_BGIMG);
+                out.writeInt(pages.size());
+                for (Page p : pages) {
+                    boolean has = p.bgImage != null && !p.bgImage.isEmpty();
+                    out.writeBoolean(has);
+                    if (has) writeStr(out, p.bgImage, true);
+                }
+            }
             out.flush();
             fo.getFD().sync();
         }
@@ -775,6 +811,41 @@ final class Notebook {
         File f = new File(c.getFilesDir(), "notebooks");
         f.mkdirs();
         return f;
+    }
+
+    /** Directory holding reusable custom page style images/PDF renders imported by the user. */
+    static File customTemplatesDir(Context c) {
+        File f = new File(c.getFilesDir(), "custom_templates");
+        f.mkdirs();
+        return f;
+    }
+
+    /** Resolves a custom page style background image file from the notebook's images/ or global custom_templates/. */
+    static File bgImageFile(Context c, File notebookDir, String name) {
+        if (name == null || name.isEmpty()) return null;
+        if (notebookDir != null) {
+            File local = new File(new File(notebookDir, "images"), name);
+            if (local.exists()) return local;
+        }
+        if (c != null) {
+            File shared = new File(customTemplatesDir(c), name);
+            if (shared.exists()) return shared;
+        }
+        return null;
+    }
+
+    /** Ensures a custom page style image is copied into notebookDir/images/ so the notebook stays self-contained. */
+    static void ensureBgImageInNotebook(Context c, File notebookDir, String name) {
+        if (c == null || notebookDir == null || name == null || name.isEmpty()) return;
+        File dstDir = new File(notebookDir, "images");
+        File dst = new File(dstDir, name);
+        if (dst.exists()) return;
+        File src = new File(customTemplatesDir(c), name);
+        if (!src.exists()) return;
+        dstDir.mkdirs();
+        try {
+            Io.copy(new FileInputStream(src), new FileOutputStream(dst));
+        } catch (IOException ignored) { }
     }
 
     static Properties meta(File dir) {
@@ -923,6 +994,8 @@ final class Notebook {
         nb.created = nb.modified = System.currentTimeMillis();
         Page first = new Page(bg);
         first.copyStyle(proto);
+        if (proto.h > 100f) first.h = proto.h;
+        if (first.bgImage != null && !first.bgImage.isEmpty()) ensureBgImageInNotebook(c, dir, first.bgImage);
         nb.pages.add(first);
         nb.write(dir);
         return dir;

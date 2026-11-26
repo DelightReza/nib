@@ -523,6 +523,31 @@ final class Gl {
             + "  else if(uBg==6){ float y=lp.y-120.0; float st=10.0*k; float m=mod(y,110.0*k);\n"
             + "    float a=(y>-2.0 && lp.y<H-60.0 && m<st*4.5 && lp.x>60.0 && lp.x<uPage.z-60.0)? rows(m,st,w,px):0.0;\n"
             + "    col=mix(col,L1,a*sa); }\n"
+            + "  else if(uBg==15){ float sp=40.0*k; float topY=110.0; float botY=max(topY+120.0,H-220.0); float cueX=300.0;\n" // Cornell B
+            + "    float a=0.0;\n"
+            + "    if(lp.x>cueX && lp.y>topY+sp*0.5 && lp.y<botY-8.0) a=max(a,rows(lp.y-topY,sp,w,px)*clamp(sp/(px*5.0),0.0,1.0));\n"
+            + "    if(lp.y>botY+sp*0.5 && lp.y<H-30.0) a=max(a,rows(lp.y-botY,sp,w,px)*clamp(sp/(px*5.0),0.0,1.0));\n"
+            + "    a=max(a,ln(abs(lp.y-topY),W2,px)); a=max(a,ln(abs(lp.y-botY),W2,px));\n"
+            + "    if(lp.y>=topY && lp.y<=botY) a=max(a,ln(abs(lp.x-cueX),W2,px));\n"
+            + "    col=mix(col,L1,a*sa); }\n"
+            + "  else if(uBg==16){ float sp=40.0*k; float y=lp.y-130.0;\n" // Legal pad (double red margin)
+            + "    float a=(y>-sp*0.5 && lp.y<H-40.0)? rows(y,sp,w,px)*clamp(sp/(px*5.0),0.0,1.0):0.0;\n"
+            + "    col=mix(col,L1,a*sa);\n"
+            + "    float rm=max(ln(abs(lp.x-128.0),max(1.6,px)*bold,px),ln(abs(lp.x-138.0),max(1.6,px)*bold,px));\n"
+            + "    col=mix(col,uMarg,rm*sa); }\n"
+            + "  else if(uBg==17){ float y=lp.y-120.0; float st=14.0*k; float per=145.0*k; float m=mod(y,per); float a=0.0;\n" // Guitar Tablature (6 lines)
+            + "    if(y>-2.0 && lp.y<H-60.0 && m<=st*5.0+2.0 && lp.x>=59.0 && lp.x<=uPage.z-59.0){\n"
+            + "      if(lp.x>60.0 && lp.x<uPage.z-60.0) a=max(a,rows(m,st,w,px));\n"
+            + "      a=max(a,max(ln(abs(lp.x-60.0),w,px),ln(abs(lp.x-(uPage.z-60.0)),w,px))); }\n"
+            + "    col=mix(col,L1,a*sa); }\n"
+            + "  else if(uBg==18){ float y=lp.y-110.0; float st=9.0*k; float tb=12.0*k; float gap=68.0*k; float per=195.0*k; float m=mod(y,per); float a=0.0;\n" // Guitar Score (5+6)
+            + "    float bot=gap+tb*5.0;\n"
+            + "    if(y>-2.0 && lp.y<H-50.0 && m<=bot+2.0 && lp.x>=59.0 && lp.x<=uPage.z-59.0){\n"
+            + "      if(lp.x>60.0 && lp.x<uPage.z-60.0){\n"
+            + "        if(m<=st*4.0+2.0) a=max(a,rows(m,st,w,px));\n"
+            + "        if(m>=gap-2.0) a=max(a,rows(m-gap,tb,w,px)); }\n"
+            + "      a=max(a,max(ln(abs(lp.x-60.0),w,px),ln(abs(lp.x-(uPage.z-60.0)),w,px))); }\n"
+            + "    col=mix(col,L1,a*sa); }\n"
             + "  int mg=int(uLook.w+0.5); float mw=max(1.6,px)*bold;\n"                         // margins
             + "  if((mg&1)!=0) col=mix(col,uMarg,ln(abs(lp.x-125.0),mw,px)*sa);\n"                 // left margin (red rule)
             + "  if((mg&2)!=0) col=mix(col,L1,ln(abs(lp.y-90.0),W2,px)*sa);\n"                     // header line

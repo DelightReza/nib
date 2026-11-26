@@ -208,7 +208,10 @@ final class AddPageSheet {
         for (int i = 0; i < QUICK_BGS.length; i++) {
             int bgId = QUICK_BGS[i];
             Notebook.Page pg = new Notebook.Page(bgId);
-            if (curStyle != null && curStyle.bg == bgId) pg.copyStyle(curStyle);
+            if (curStyle != null) {
+                if (curStyle.bg == bgId) pg.copyStyle(curStyle);
+                if (curStyle.h > 100f) pg.h = curStyle.h;
+            }
             View card = buildPaperCard(a, Notebook.BG_NAMES[bgId], pg, paper, () -> onPickTemplate.accept(pg));
             LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(cardW, -2);
             if (i > 0) clp.leftMargin = cardGap;
@@ -244,17 +247,29 @@ final class AddPageSheet {
 
         body.addView(buildPlacementRow(a, placement));
 
-        TextView builtInCap = Ui.text(a, "Templates", 13, Ui.color(a, R.color.on_surface_variant), Ui.medium());
-        builtInCap.setPadding(0, Ui.dp(a, 16), 0, Ui.dp(a, 10));
-        body.addView(builtInCap);
+        String[] catNames = {"Basic", "Education", "Music", "Planners & Forms"};
+        int[][] catBgs = {
+                {Notebook.BG_BLANK, Notebook.BG_LINED, Notebook.BG_GRID, Notebook.BG_DOTS, Notebook.BG_NARROW, Notebook.BG_FINE_DOTS},
+                {Notebook.BG_HEX, Notebook.BG_CORNELL, Notebook.BG_CORNELL_B, Notebook.BG_LEGAL, Notebook.BG_ENGINEERING, Notebook.BG_GRAPH, Notebook.BG_ISO},
+                {Notebook.BG_MUSIC, Notebook.BG_GUITAR_TAB, Notebook.BG_GUITAR_SCORE},
+                {Notebook.BG_DAILY, Notebook.BG_WEEKLY, Notebook.BG_SITE}
+        };
+        for (int ci = 0; ci < catNames.length; ci++) {
+            TextView cap = Ui.text(a, catNames[ci], 13.5f, Ui.color(a, R.color.on_surface_variant), Ui.medium());
+            cap.setPadding(0, Ui.dp(a, 16), 0, Ui.dp(a, 10));
+            body.addView(cap);
 
-        Ui.Grid grid = new Ui.Grid(a, 108, 10);
-        for (int i = 0; i < Notebook.BG_NAMES.length; i++) {
-            Notebook.Page pg = new Notebook.Page(i);
-            if (curStyle != null && curStyle.bg == i) pg.copyStyle(curStyle);
-            grid.addView(buildPaperCard(a, Notebook.BG_NAMES[i], pg, paper, () -> onPickTemplate.accept(pg)));
+            Ui.Grid grid = new Ui.Grid(a, 108, 10);
+            for (int bgId : catBgs[ci]) {
+                Notebook.Page pg = new Notebook.Page(bgId);
+                if (curStyle != null) {
+                    if (curStyle.bg == bgId) pg.copyStyle(curStyle);
+                    if (curStyle.h > 100f) pg.h = curStyle.h;
+                }
+                grid.addView(buildPaperCard(a, Notebook.BG_NAMES[bgId], pg, paper, () -> onPickTemplate.accept(pg)));
+            }
+            body.addView(grid);
         }
-        body.addView(grid);
 
         if (myTemplates != null && myTemplates.length() > 0) {
             TextView mineCap = Ui.text(a, "My templates", 13, Ui.color(a, R.color.on_surface_variant), Ui.medium());
@@ -642,14 +657,28 @@ final class AddPageSheet {
         int w = Ui.dp(a, 96), h = Ui.dp(a, 128);
         Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(b);
+        if (look.bgImage != null && !look.bgImage.isEmpty()) {
+            int[] pal = Render.PAPER[Math.max(0, Math.min(Render.PAPER.length - 1, paper))];
+            c.drawColor(pal[0]);
+            Bitmap img = Render.imageFile(Notebook.bgImageFile(a, null, look.bgImage), Math.max(w, h) * 2);
+            if (img != null) {
+                c.drawBitmap(img, null, new android.graphics.RectF(0, 0, w, h), new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG));
+                img.recycle();
+            }
+            return b;
+        }
         boolean whole = look.bg == Notebook.BG_DAILY || look.bg == Notebook.BG_WEEKLY
-                || look.bg == Notebook.BG_CORNELL || look.bg == Notebook.BG_SITE;
+                || look.bg == Notebook.BG_CORNELL || look.bg == Notebook.BG_CORNELL_B
+                || look.bg == Notebook.BG_LEGAL || look.bg == Notebook.BG_ENGINEERING
+                || look.bg == Notebook.BG_MUSIC || look.bg == Notebook.BG_GUITAR_TAB
+                || look.bg == Notebook.BG_GUITAR_SCORE || look.bg == Notebook.BG_SITE;
         float k = w / Notebook.PW * (whole ? 1f : 1.7f);
         c.scale(k, k);
         Notebook nb = new Notebook();
         nb.paper = paper;
         Notebook.Page pg = new Notebook.Page(look.bg);
         pg.copyStyle(look);
+        if (look.h > 100f) pg.h = look.h;
         Render.paper(c, nb, pg);
         if (pg.bg == Notebook.BG_DAILY || pg.bg == Notebook.BG_WEEKLY) {
             Render.plannerLabels(c, pg.bg, paper, pg.h);
