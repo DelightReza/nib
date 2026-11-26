@@ -347,6 +347,14 @@ final class Engine implements Choreographer.FrameCallback {
 
     void setEraserSize(float dpRadius) { h.post(() -> eraserDp = dpRadius); }
 
+    private volatile boolean motionPrimaryErase, motionSecondaryLasso;
+
+    /** Controls whether holding a stylus barrel button on touch-down forces temporary erase/lasso. */
+    void setStylusMotionHold(boolean primaryErase, boolean secondaryLasso) {
+        motionPrimaryErase = primaryErase;
+        motionSecondaryLasso = secondaryLasso;
+    }
+
     void setTitle(String t) {
         h.post(() -> {
             if (book == null || t.trim().isEmpty()) return;
@@ -2586,8 +2594,8 @@ final class Engine implements Choreographer.FrameCallback {
                 else if (!front && canFront()) present();
                 int btn = ev.getButtonState();
                 boolean erase = tt == MotionEvent.TOOL_TYPE_ERASER || tool == TOOL_ERASER || tempEraser
-                        || (btn & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
-                boolean lassoBtn = (btn & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0;
+                        || (motionPrimaryErase && (btn & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0);
+                boolean lassoBtn = motionSecondaryLasso && (btn & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0;
                 if (lassoBtn && !erase && tool != TOOL_LASSO) {
                     tool = TOOL_LASSO; // so the selection it makes can be moved straight away
                     main.post(() -> listener.onTool(TOOL_LASSO));

@@ -70,9 +70,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private Engine engine;
     private SharedPreferences prefs;
     private DrawPrefs drawPrefs;
+    private StylusButtons stylusButtons;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
-    private int tool, prevTool = Engine.TOOL_PEN;
+    private int tool, prevTool = Engine.TOOL_PEN, lastTool = Engine.TOOL_PEN;
+    private long lastStylusKeyUpMs;
     private int penType, prediction;
     private float textPt;          // size of new text boxes, in points
     private String textStyleEnc;   // font + style of new text boxes (Fonts.Style, encoded)
@@ -80,7 +82,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private Engine fontImportEngine;
     private Runnable afterFontImport;      // refreshes the panel the import came from
     private float penW, hlW, eraserDp;
-    private boolean fingerDraw, hud, partialErase, shapeSnap, penButton, taper;
+    private boolean fingerDraw, hud, partialErase, shapeSnap, taper;
     private boolean hlFlat, holdErase, erasePreview;
     private int hlStraight;
     private static final int[] LASER_COLORS = {0xffff3b30, 0xff34c759, 0xff0a84ff, 0xffaf52de, 0xffff9f0a, 0xffff2d92};
@@ -142,6 +144,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         }
         prefs = getSharedPreferences("nib", MODE_PRIVATE);
         drawPrefs = DrawPrefs.load(prefs);
+        stylusButtons = StylusButtons.load(prefs);
         tool = prefs.getInt("tool", Engine.TOOL_PEN);
         if (tool == Engine.TOOL_LASSO || tool == Engine.TOOL_TEXT || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE) tool = Engine.TOOL_PEN;
         penW = drawPrefs.penWidth();
@@ -156,7 +159,6 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         hud = prefs.getBoolean("hud", false);
         partialErase = prefs.getBoolean("partialErase", false);
         shapeSnap = prefs.getBoolean("shapeSnap", true);
-        penButton = prefs.getBoolean("penButton", true);
         autoHide = prefs.getBoolean("autoHide", true);
         hlFlat = prefs.getBoolean("hlFlat", false);
         hlStraight = prefs.getInt("hlStraight", 1);
@@ -227,8 +229,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         engine.setTaper(taper);
         engine.setZoomLimit(maxZoomPct / 100f);
         engine.setShapeConfig(drawPrefs.makeShapeSpec(), drawPrefs.shapeLockCircle);
+        pushStylusMotionHold();
         pushLaser();
         pushTape();
+    }
+
+    private void pushStylusMotionHold() {
+        if (stylusButtons == null) return;
+        boolean pErase = StylusButtons.ACT_TOGGLE_PEN_ERASER.equals(stylusButtons.primaryAction)
+                || StylusButtons.ACT_SELECT_ERASER.equals(stylusButtons.primaryAction);
+        boolean sLasso = StylusButtons.ACT_TOGGLE_LASSO.equals(stylusButtons.secondaryAction)
+                || StylusButtons.ACT_SELECT_LASSO.equals(stylusButtons.secondaryAction);
+        for (Doc d : docs) if (d.engine != null) d.engine.setStylusMotionHold(pErase, sLasso);
+        if (engine != null) engine.setStylusMotionHold(pErase, sLasso);
     }
 
     /** The tape's pattern string: "look~pattern" for the paper looks, just the pattern for flat tape (as before 2.3.1). */
@@ -2155,6 +2168,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (tool != appliedTool && tool != Engine.TOOL_LASSO && tool != Engine.TOOL_SHAPE) hideSelection();
         // a tool was picked (from the bar or the shelf): the shelf closes unless it's pinned open
         if (tool != appliedTool && appliedTool != -1 && shelfOpen && !shelfPinned && pendingToText == null) setShelfOpen(false);
+        if (tool != appliedTool && appliedTool != -1) {
+            lastTool = appliedTool;
+            if (appliedTool != Engine.TOOL_ERASER && appliedTool != Engine.TOOL_LASSO) prevTool = appliedTool;
+        }
         if (tool != appliedTool) {
             for (Doc dd : docs) if (dd.engine != null) dd.engine.setInsets(insetTop(), insetBottom());
             ui.post(this::fitCapsule);
@@ -3412,9 +3429,44 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         col.addView(th);
         col.addView(sectionLabel("Appearance"));
         col.addView(Ui.actionRow(this, R.drawable.ic_palette, "Theme", "Light or dark, accent colour, dark style", v -> ThemeSheet.show(this, this::recreate)));
+        col.addView(sectionLabel("Stylus buttons"));
+        TextView[] primarySub = new TextView[1];
+        TextView[] secondarySub = new TextView[1];
+        TextView[] cycleSub = new TextView[1];
+        Runnable refreshStylusRows = () -> {
+            if (primarySub[0] != null) primarySub[0].setText(StylusButtons.labelForAction(stylusButtons.primaryAction));
+            if (secondarySub[0] != null) secondarySub[0].setText(StylusButtons.labelForAction(stylusButtons.secondaryAction));
+            if (cycleSub[0] != null) cycleSub[0].setText(stylusButtons.cycleSummary());
+        };
+        col.addView(stylusSettingRow(R.drawable.ic_pen, "Primary button",
+                StylusButtons.labelForAction(stylusButtons.primaryAction), primarySub,
+                v -> StylusButtons.showActionPicker(this, "Primary stylus button", stylusButtons.primaryAction, id -> {
+                    stylusButtons.primaryAction = id;
+                    stylusButtons.save(prefs);
+                    pushStylusMotionHold();
+                    refreshStylusRows.run();
+                })));
+        col.addView(stylusSettingRow(R.drawable.ic_shapes, "Secondary button",
+                StylusButtons.labelForAction(stylusButtons.secondaryAction), secondarySub,
+                v -> StylusButtons.showActionPicker(this, "Secondary stylus button", stylusButtons.secondaryAction, id -> {
+                    stylusButtons.secondaryAction = id;
+                    stylusButtons.save(prefs);
+                    pushStylusMotionHold();
+                    refreshStylusRows.run();
+                })));
+        col.addView(stylusSettingRow(R.drawable.ic_sparkle, "Drawing tool cycle",
+                stylusButtons.cycleSummary(), cycleSub,
+                v -> StylusButtons.showCyclePicker(this, stylusButtons, prefs, refreshStylusRows)));
+        col.addView(Ui.actionRow(this, R.drawable.ic_undo, "Reset stylus buttons to default",
+                "Primary: Cycle Pen Colours · Secondary: Cycle Drawing Tools",
+                v -> {
+                    stylusButtons.resetToDefaults(prefs);
+                    pushStylusMotionHold();
+                    refreshStylusRows.run();
+                    toast("Stylus buttons reset to defaults");
+                }));
+
         col.addView(sectionLabel("Pen"));
-        col.addView(Ui.switchRow(this, "Pen buttons", "First button: eraser · second button: lasso · press again to go back",
-                penButton, v -> { penButton = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Taper strokes without pressure", "With a finger (or a stylus that has no pressure) the fountain pen starts and ends thin, like a real nib",
                 taper, v -> { taper = v; saveOptions(); }));
         col.addView(Ui.switchRow(this, "Partial eraser", "Erase just the part of a stroke you touch",
@@ -3473,12 +3525,35 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         return t;
     }
 
+    private View stylusSettingRow(int iconRes, String title, String sub, TextView[] subOut, View.OnClickListener l) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Ui.dp(this, 8), Ui.dp(this, 10), Ui.dp(this, 8), Ui.dp(this, 10));
+        row.setBackground(Ui.ripple(this, null, Ui.dp(this, 10)));
+        android.widget.ImageView iv = new android.widget.ImageView(this);
+        iv.setImageResource(iconRes);
+        iv.setImageTintList(android.content.res.ColorStateList.valueOf(Ui.color(this, R.color.icon)));
+        iv.setScaleType(android.widget.ImageView.ScaleType.CENTER);
+        row.addView(iv, new LinearLayout.LayoutParams(Ui.dp(this, 28), Ui.dp(this, 28)));
+        LinearLayout txt = new LinearLayout(this);
+        txt.setOrientation(LinearLayout.VERTICAL);
+        txt.setPadding(Ui.dp(this, 14), 0, 0, 0);
+        txt.addView(Ui.text(this, title, 14.5f, Ui.color(this, R.color.on_surface), null));
+        TextView s = Ui.text(this, sub, 12.5f, Ui.color(this, R.color.accent), Ui.medium());
+        s.setPadding(0, Ui.dp(this, 3), 0, 0);
+        txt.addView(s);
+        if (subOut != null && subOut.length > 0) subOut[0] = s;
+        row.addView(txt, new LinearLayout.LayoutParams(0, -2, 1f));
+        row.setOnClickListener(l);
+        return row;
+    }
+
     private void saveOptions() {
         prefs.edit().putBoolean("hlFlat", hlFlat).putInt("hlStraight", hlStraight).putBoolean("holdErase", holdErase)
                 .putBoolean("erasePreview", erasePreview).apply();
         prefs.edit().putInt("predLevel", prediction).putBoolean("finger", fingerDraw).putBoolean("hud", hud)
                 .putBoolean("partialErase", partialErase).putBoolean("shapeSnap", shapeSnap)
-                .putBoolean("penButton", penButton).putBoolean("taper", taper).apply();
+                .putBoolean("taper", taper).apply();
         pushOptions();
         if (fingerB != null) fingerB.set(fingerDraw, 0, 0);
     }
@@ -4964,7 +5039,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         });
     }
 
-    // ---- pen side button: single press toggles the eraser -----------------------------------
+    // ---- physical stylus buttons: customisable Primary & Secondary actions -------------------
 
     private static boolean fromPen(KeyEvent e) {
         InputDevice d = e.getDevice();
@@ -4977,26 +5052,132 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         boolean pen = fromPen(e);
         boolean secondary = k == KeyEvent.KEYCODE_STYLUS_BUTTON_SECONDARY || (pen && k == KeyEvent.KEYCODE_PAGE_UP);
         boolean primary = !secondary && (k == KeyEvent.KEYCODE_STYLUS_BUTTON_PRIMARY || pen);
-        if ((primary || secondary) && textEdit == null) {
+        if ((primary || secondary) && textEdit == null && sheet == null) {
             // HyperOS delivers a short press as down+up together on release; long presses are
-            // kept by the system (Quick Notes). Act once, on release.
-            if (e.getAction() == KeyEvent.ACTION_UP && penButton) togglePenTool(secondary ? Engine.TOOL_LASSO : Engine.TOOL_ERASER);
+            // kept by the system (Quick Notes). Ignore key-repeats and act once, on release.
+            if (e.getAction() == KeyEvent.ACTION_DOWN) return true;
+            if (e.getAction() == KeyEvent.ACTION_UP && !e.isCanceled() && stylusButtons != null) {
+                lastStylusKeyUpMs = android.os.SystemClock.uptimeMillis();
+                String action = secondary ? stylusButtons.secondaryAction : stylusButtons.primaryAction;
+                executeStylusAction(action);
+            }
             return true;
         }
         return super.dispatchKeyEvent(e);
     }
 
-    /** Pen side buttons: primary toggles the eraser, secondary the lasso; pressing again goes back. */
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent ev) {
+        if (ev != null && ev.getActionMasked() == MotionEvent.ACTION_BUTTON_RELEASE
+                && textEdit == null && sheet == null && stylusButtons != null) {
+            int ab = ev.getActionButton();
+            boolean primary = ab == MotionEvent.BUTTON_STYLUS_PRIMARY;
+            boolean secondary = ab == MotionEvent.BUTTON_STYLUS_SECONDARY;
+            if (primary || secondary) {
+                long now = android.os.SystemClock.uptimeMillis();
+                // Avoid duplicate firing on styluses that emit both KeyEvent and MotionEvent
+                if (now - lastStylusKeyUpMs > 120) {
+                    lastStylusKeyUpMs = now;
+                    String action = secondary ? stylusButtons.secondaryAction : stylusButtons.primaryAction;
+                    executeStylusAction(action);
+                }
+                return true;
+            }
+        }
+        return super.dispatchGenericMotionEvent(ev);
+    }
+
+    /** Central dispatcher for all assignable Primary and Secondary stylus button actions. */
+    private void executeStylusAction(String actionId) {
+        if (actionId == null || StylusButtons.ACT_NONE.equals(actionId)) return;
+        switch (actionId) {
+            case StylusButtons.ACT_CYCLE_PEN_COLOR:
+            case StylusButtons.ACT_NEXT_PEN_COLOR:
+                stepPenColor(+1);
+                break;
+            case StylusButtons.ACT_PREV_PEN_COLOR:
+                stepPenColor(-1);
+                break;
+            case StylusButtons.ACT_SELECT_PEN:
+                switchToolFromStylus(Engine.TOOL_PEN);
+                break;
+            case StylusButtons.ACT_SELECT_HL:
+                switchToolFromStylus(Engine.TOOL_HL);
+                break;
+            case StylusButtons.ACT_SELECT_ERASER:
+                switchToolFromStylus(Engine.TOOL_ERASER);
+                break;
+            case StylusButtons.ACT_TOGGLE_PEN_ERASER:
+                togglePenTool(Engine.TOOL_ERASER);
+                break;
+            case StylusButtons.ACT_CYCLE_TOOLS:
+            case StylusButtons.ACT_NEXT_TOOL:
+                switchToolFromStylus(stylusButtons.stepToolCycle(tool, +1));
+                break;
+            case StylusButtons.ACT_PREV_TOOL_CYCLE:
+                switchToolFromStylus(stylusButtons.stepToolCycle(tool, -1));
+                break;
+            case StylusButtons.ACT_PREVIOUS_TOOL:
+                if (lastTool != tool) switchToolFromStylus(lastTool);
+                break;
+            case StylusButtons.ACT_SELECT_LASSO:
+                switchToolFromStylus(Engine.TOOL_LASSO);
+                break;
+            case StylusButtons.ACT_TOGGLE_LASSO:
+                togglePenTool(Engine.TOOL_LASSO);
+                break;
+            case StylusButtons.ACT_SELECT_SHAPE:
+                switchToolFromStylus(Engine.TOOL_SHAPE);
+                break;
+            case StylusButtons.ACT_SELECT_LASER:
+                switchToolFromStylus(Engine.TOOL_LASER);
+                break;
+            case StylusButtons.ACT_SELECT_TAPE:
+                switchToolFromStylus(Engine.TOOL_TAPE);
+                break;
+            case StylusButtons.ACT_SELECT_TEXT:
+                switchToolFromStylus(Engine.TOOL_TEXT);
+                break;
+            case StylusButtons.ACT_UNDO:
+                if (engine != null) { commitTextEdit(); engine.undo(); }
+                break;
+            case StylusButtons.ACT_REDO:
+                if (engine != null) { commitTextEdit(); engine.redo(); }
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** Advances or reverses the Pen colour slot dynamically across all configured slots (Pen only). */
+    private void stepPenColor(int delta) {
+        if (tool != Engine.TOOL_PEN || drawPrefs == null) return;
+        int n = drawPrefs.slots.length;
+        if (n <= 0) return;
+        drawPrefs.penSlot = ((drawPrefs.penSlot + delta) % n + n) % n;
+        applyTool();
+        toast("Pen colour " + (drawPrefs.penSlot + 1) + " / " + n);
+    }
+
+    /** Switches directly to a tool via stylus button, preserving all individual tool preferences. */
+    private void switchToolFromStylus(int target) {
+        commitTextEdit();
+        if (tool == target) return;
+        tool = target;
+        applyTool();
+        toast(StylusButtons.toolName(target));
+    }
+
+    /** Toggles Eraser or Lasso via stylus button, restoring the previous drawing tool on second press. */
     private void togglePenTool(int target) {
         commitTextEdit();
         if (tool == target) {
             tool = prevTool == target ? Engine.TOOL_PEN : prevTool;
-            toast(tool == Engine.TOOL_HL ? "Highlighter" : tool == Engine.TOOL_PEN ? "Pen" : "Back to previous tool");
+            toast(StylusButtons.toolName(tool));
         } else {
             if (tool != Engine.TOOL_ERASER && tool != Engine.TOOL_LASSO) prevTool = tool;
             tool = target;
-            toast(target == Engine.TOOL_LASSO ? "Lasso · press the second button again to go back"
-                    : "Eraser · press the button again to go back");
+            toast(StylusButtons.toolName(target));
         }
         applyTool();
     }
