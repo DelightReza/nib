@@ -458,6 +458,15 @@ final class ShapeToolbar {
     static LinearLayout customThicknessControl(Context c, float[] widths, int initialSlot, float initialWidth,
                                                float minW, float maxW, int tintRgb, boolean editingExisting,
                                                ThicknessCallback cb) {
+        return customThicknessControl(c, widths, initialSlot, initialWidth, minW, maxW, tintRgb, editingExisting,
+                DrawPrefs::formatMm, cb);
+    }
+
+    static LinearLayout customThicknessControl(Context c, float[] widths, int initialSlot, float initialWidth,
+                                               float minW, float maxW, int tintRgb, boolean editingExisting,
+                                               java.util.function.Function<Float, String> fmt,
+                                               ThicknessCallback cb) {
+        final java.util.function.Function<Float, String> format = fmt != null ? fmt : DrawPrefs::formatMm;
         LinearLayout wrap = new LinearLayout(c);
         wrap.setOrientation(LinearLayout.VERTICAL);
 
@@ -480,7 +489,7 @@ final class ShapeToolbar {
         srlp.topMargin = Ui.dp(c, 8);
         sliderRow.setLayoutParams(srlp);
 
-        final TextView valTv = Ui.text(c, DrawPrefs.formatMm(initialWidth), 12.5f, Ui.color(c, R.color.on_surface), Ui.medium());
+        final TextView valTv = Ui.text(c, format.apply(initialWidth), 12.5f, Ui.color(c, R.color.on_surface), Ui.medium());
         valTv.setGravity(Gravity.END);
 
         final SeekBar[] barRef = new SeekBar[1];
@@ -493,7 +502,7 @@ final class ShapeToolbar {
                 dots[i].set(DrawPrefs.widthFrac(widths[i], minW, maxW));
                 dots[i].tint(tintRgb);
                 dots[i].chosen(sel);
-                lbls[i].setText(DrawPrefs.formatMm(widths[i]));
+                lbls[i].setText(format.apply(widths[i]));
                 lbls[i].setTextColor(Ui.color(c, sel ? R.color.on_surface : R.color.on_surface_variant));
             }
         };
@@ -504,7 +513,7 @@ final class ShapeToolbar {
             cell.setOrientation(LinearLayout.VERTICAL);
             cell.setGravity(Gravity.CENTER);
             cell.setPadding(Ui.dp(c, 4), Ui.dp(c, 4), Ui.dp(c, 4), Ui.dp(c, 5));
-            cell.setContentDescription("Thickness slot " + (i + 1) + " · " + DrawPrefs.formatMm(widths[i]));
+            cell.setContentDescription("Thickness slot " + (i + 1) + " · " + format.apply(widths[i]));
 
             Ui.SizeDot dot = new Ui.SizeDot(c);
             dot.setClickable(false);
@@ -512,7 +521,7 @@ final class ShapeToolbar {
             dot.setBackground(null);
             cell.addView(dot, new LinearLayout.LayoutParams(Ui.dp(c, 34), Ui.dp(c, 32)));
 
-            TextView lbl = Ui.text(c, DrawPrefs.formatMm(widths[i]), 11.5f, Ui.color(c, R.color.on_surface_variant), Ui.medium());
+            TextView lbl = Ui.text(c, format.apply(widths[i]), 11.5f, Ui.color(c, R.color.on_surface_variant), Ui.medium());
             lbl.setSingleLine(true);
             cell.addView(lbl);
 
@@ -525,7 +534,7 @@ final class ShapeToolbar {
                 float w = widths[idx];
                 syncing[0] = true;
                 if (barRef[0] != null) barRef[0].setProgress(DrawPrefs.widthToSlider(w, minW, maxW));
-                valTv.setText(DrawPrefs.formatMm(w));
+                valTv.setText(format.apply(w));
                 syncing[0] = false;
                 refreshCells.run();
                 if (cb != null) cb.onSelectSlot(idx, w);
@@ -537,7 +546,7 @@ final class ShapeToolbar {
             if (syncing[0]) return;
             float w = DrawPrefs.sliderToWidth(prog, minW, maxW);
             if (!editingExisting) widths[active[0]] = w;
-            valTv.setText(DrawPrefs.formatMm(w));
+            valTv.setText(format.apply(w));
             refreshCells.run();
             if (cb != null) cb.onEditWidth(active[0], w);
         });
@@ -556,7 +565,7 @@ final class ShapeToolbar {
                 float w = widths[active[0]];
                 syncing[0] = true;
                 sb.setProgress(DrawPrefs.widthToSlider(w, minW, maxW));
-                valTv.setText(DrawPrefs.formatMm(w));
+                valTv.setText(format.apply(w));
                 syncing[0] = false;
                 refreshCells.run();
             });

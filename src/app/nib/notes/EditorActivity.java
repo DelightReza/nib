@@ -152,7 +152,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         penType = prefs.getInt("penType", Stroke.PEN);
         textPt = prefs.getFloat("textPt", new float[]{12, 17, 25}[Math.max(0, Math.min(2, prefs.getInt("textSize", 1)))]);
         textStyleEnc = prefs.getString("textStyle", null);
-        eraserDp = prefs.getFloat("eraserDp", 11f);
+        eraserDp = drawPrefs.eraserWidth();
         prediction = prefs.getInt("predLevel", 1);
         fingerDraw = prefs.getBoolean("finger", false);
         taper = prefs.getBoolean("taper", true);
@@ -1099,11 +1099,15 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         Ui.Popover p = newPop(300);
         boolean canvas = state != null && state.canvas;
         if (!canvas) {
-            String pagesSub = state != null ? state.pages + (state.pages == 1 ? " page" : " pages") + " · overview, reorder and bookmarks" : "Overview, reorder and bookmarks";
-            p.add(Ui.actionRow(this, R.drawable.ic_pages, "Pages", pagesSub, v -> { pop.dismiss(); showPages(); }));
-            p.add(Ui.actionRow(this, R.drawable.ic_page_add, "Add page", "Templates, another notebook, images or PDF", v -> { pop.dismiss(); showAddPage(Engine.POS_AFTER, null); }));
+            if (pagesB == null || pagesB.getVisibility() != View.VISIBLE) {
+                String pagesSub = state != null ? state.pages + (state.pages == 1 ? " page" : " pages") + " · overview, reorder and bookmarks" : "Overview, reorder and bookmarks";
+                p.add(Ui.actionRow(this, R.drawable.ic_pages, "Pages", pagesSub, v -> { pop.dismiss(); showPages(); }));
+            }
+            if (addPageB == null || addPageB.getVisibility() != View.VISIBLE) {
+                p.add(Ui.actionRow(this, R.drawable.ic_page_add, "Add page", "Templates, another notebook, images or PDF", v -> { pop.dismiss(); showAddPage(Engine.POS_AFTER, null); }));
+            }
         }
-        if (!canvas && state != null && state.marks != null) {
+        if (!canvas && state != null && state.marks != null && (bookmarkB == null || bookmarkB.getVisibility() != View.VISIBLE)) {
             boolean on = state.marks[state.page] != null;
             p.add(Ui.actionRow(this, on ? R.drawable.ic_bookmark_filled : R.drawable.ic_bookmark, on ? "Rename or remove bookmark" : "Bookmark this page",
                     "Bookmarks list under All pages → Bookmarks", v -> { pop.dismiss(); nameBookmark(state.page, null); }));
@@ -1967,12 +1971,13 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private boolean toolHasThickness() {
-        return tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_SHAPE;
+        return tool == Engine.TOOL_PEN || tool == Engine.TOOL_HL || tool == Engine.TOOL_SHAPE || tool == Engine.TOOL_ERASER;
     }
 
     private int activeThickSlotForTool() {
         if (tool == Engine.TOOL_HL) return drawPrefs.hlThick;
         if (tool == Engine.TOOL_SHAPE) return drawPrefs.shapeThick;
+        if (tool == Engine.TOOL_ERASER) return drawPrefs.eraserThick;
         return drawPrefs.penThick;
     }
 
@@ -1980,21 +1985,29 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         int c = DrawPrefs.clamp(idx, 0, DrawPrefs.THICK_COUNT - 1);
         if (tool == Engine.TOOL_HL) drawPrefs.hlThick = c;
         else if (tool == Engine.TOOL_SHAPE) drawPrefs.shapeThick = c;
+        else if (tool == Engine.TOOL_ERASER) drawPrefs.eraserThick = c;
         else drawPrefs.penThick = c;
     }
 
     private float[] thickWidthsForTool() {
         if (tool == Engine.TOOL_HL) return drawPrefs.hlWidths;
         if (tool == Engine.TOOL_SHAPE) return drawPrefs.shapeWidths;
+        if (tool == Engine.TOOL_ERASER) return drawPrefs.eraserWidths;
         return drawPrefs.penWidths;
     }
 
     private float thickMinForTool() {
-        return tool == Engine.TOOL_HL ? DrawPrefs.HL_MIN : tool == Engine.TOOL_SHAPE ? DrawPrefs.SHAPE_MIN : DrawPrefs.PEN_MIN;
+        if (tool == Engine.TOOL_HL) return DrawPrefs.HL_MIN;
+        if (tool == Engine.TOOL_SHAPE) return DrawPrefs.SHAPE_MIN;
+        if (tool == Engine.TOOL_ERASER) return DrawPrefs.ERASER_MIN;
+        return DrawPrefs.PEN_MIN;
     }
 
     private float thickMaxForTool() {
-        return tool == Engine.TOOL_HL ? DrawPrefs.HL_MAX : tool == Engine.TOOL_SHAPE ? DrawPrefs.SHAPE_MAX : DrawPrefs.PEN_MAX;
+        if (tool == Engine.TOOL_HL) return DrawPrefs.HL_MAX;
+        if (tool == Engine.TOOL_SHAPE) return DrawPrefs.SHAPE_MAX;
+        if (tool == Engine.TOOL_ERASER) return DrawPrefs.ERASER_MAX;
+        return DrawPrefs.PEN_MAX;
     }
 
     /** Tap a toolbar thickness slot: selects it, or re-tapping the active slot opens the customiser popover. */
@@ -2015,13 +2028,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         final int targetTool = toolHasThickness() ? tool : Engine.TOOL_PEN;
         final boolean hl = targetTool == Engine.TOOL_HL;
         final boolean sh = targetTool == Engine.TOOL_SHAPE;
-        Ui.Popover p = newPop(356).title(hl ? "Highlighter thickness" : sh ? "Shape border thickness" : "Pen thickness");
+        final boolean er = targetTool == Engine.TOOL_ERASER;
+        Ui.Popover p = newPop(356).title(hl ? "Highlighter thickness" : sh ? "Shape border thickness" : er ? "Eraser thickness" : "Pen thickness");
         TextView sub = Ui.text(this, "Tap a slot to pick it · slide below to define its thickness",
                 12.5f, Ui.color(this, R.color.on_surface_variant), null);
         sub.setPadding(0, 0, 0, Ui.dp(this, 8));
         p.add(sub);
 
-        Ui.StrokePreview prev = !sh ? new Ui.StrokePreview(this) : null;
+        Ui.StrokePreview prev = (!sh && !er) ? new Ui.StrokePreview(this) : null;
         Runnable refreshPrev = () -> {
             if (prev == null) return;
             int tl = hl ? (hlFlat ? Stroke.HL_FLAT : Stroke.HL) : penType;
@@ -2038,17 +2052,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             refreshPrev.run();
         }
 
-        float[] widths = hl ? drawPrefs.hlWidths : sh ? drawPrefs.shapeWidths : drawPrefs.penWidths;
-        float minW = hl ? DrawPrefs.HL_MIN : sh ? DrawPrefs.SHAPE_MIN : DrawPrefs.PEN_MIN;
-        float maxW = hl ? DrawPrefs.HL_MAX : sh ? DrawPrefs.SHAPE_MAX : DrawPrefs.PEN_MAX;
-        int tintRgb = hl ? drawPrefs.hlColorRgb() : sh ? drawPrefs.shapeStrokeRgb() : drawPrefs.penColorRgb();
+        float[] widths = hl ? drawPrefs.hlWidths : sh ? drawPrefs.shapeWidths : er ? drawPrefs.eraserWidths : drawPrefs.penWidths;
+        float minW = hl ? DrawPrefs.HL_MIN : sh ? DrawPrefs.SHAPE_MIN : er ? DrawPrefs.ERASER_MIN : DrawPrefs.PEN_MIN;
+        float maxW = hl ? DrawPrefs.HL_MAX : sh ? DrawPrefs.SHAPE_MAX : er ? DrawPrefs.ERASER_MAX : DrawPrefs.PEN_MAX;
+        int tintRgb = hl ? drawPrefs.hlColorRgb() : sh ? drawPrefs.shapeStrokeRgb() : er ? 0 : drawPrefs.penColorRgb();
         float curW = widths[DrawPrefs.clamp(initialSlot, 0, DrawPrefs.THICK_COUNT - 1)];
 
         p.add(ShapeToolbar.customThicknessControl(this, widths, initialSlot, curW, minW, maxW, tintRgb, false,
+                er ? DrawPrefs::formatDp : DrawPrefs::formatMm,
                 new ShapeToolbar.ThicknessCallback() {
                     @Override public void onSelectSlot(int slotIdx, float width) {
                         if (hl) drawPrefs.hlThick = slotIdx;
                         else if (sh) drawPrefs.shapeThick = slotIdx;
+                        else if (er) drawPrefs.eraserThick = slotIdx;
                         else drawPrefs.penThick = slotIdx;
                         applyTool();
                         refreshPrev.run();
@@ -2063,6 +2079,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                                 sp.strokeWidth = width;
                                 engine.selUpdateShape(sp);
                             }
+                        } else if (er) {
+                            drawPrefs.eraserThick = slotIdx;
+                            drawPrefs.eraserWidths[slotIdx] = width;
                         } else { drawPrefs.penThick = slotIdx; drawPrefs.penWidths[slotIdx] = width; }
                         applyTool();
                         refreshPrev.run();
@@ -2070,6 +2089,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                     @Override public void onResetDefaults() {
                         if (hl) drawPrefs.resetHlWidths();
                         else if (sh) drawPrefs.resetShapeWidths();
+                        else if (er) drawPrefs.resetEraserWidths();
                         else drawPrefs.resetPenWidths();
                         applyTool();
                         refreshPrev.run();
@@ -2109,6 +2129,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void applyTool() {
         penW = drawPrefs.penWidth();
         hlW = drawPrefs.hlWidth();
+        eraserDp = drawPrefs.eraserWidth();
         penB.set(tool == Engine.TOOL_PEN, drawPrefs.penColorRgb(), drawPrefs.penColorRgb());
         hlB.set(tool == Engine.TOOL_HL, drawPrefs.hlColorRgb(), drawPrefs.hlColorRgb());
         eraserB.set(tool == Engine.TOOL_ERASER, 0, 0);
@@ -2137,19 +2158,21 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 float[] ws = thickWidthsForTool();
                 float mn = thickMinForTool(), mx = thickMaxForTool();
                 int activeT = activeThickSlotForTool();
-                int tintRgb = hl ? drawPrefs.hlColorRgb() : tool == Engine.TOOL_SHAPE ? drawPrefs.shapeStrokeRgb() : drawPrefs.penColorRgb();
+                boolean er = tool == Engine.TOOL_ERASER;
+                int tintRgb = hl ? drawPrefs.hlColorRgb() : tool == Engine.TOOL_SHAPE ? drawPrefs.shapeStrokeRgb() : er ? 0 : drawPrefs.penColorRgb();
                 for (int i = 0; i < DrawPrefs.THICK_COUNT; i++) {
                     thickBtns[i].set(DrawPrefs.widthFrac(ws[i], mn, mx));
                     thickBtns[i].tint(tintRgb);
                     thickBtns[i].chosen(i == activeT);
-                    thickBtns[i].setContentDescription("Thickness slot " + (i + 1) + " (" + DrawPrefs.formatMm(ws[i]) + ") · tap again or long-press to customise");
+                    String sz = er ? DrawPrefs.formatDp(ws[i]) : DrawPrefs.formatMm(ws[i]);
+                    thickBtns[i].setContentDescription("Thickness slot " + (i + 1) + " (" + sz + ") · tap again or long-press to customise");
                 }
             }
         }
         float frac = hl ? DrawPrefs.widthFrac(hlW, DrawPrefs.HL_MIN, DrawPrefs.HL_MAX)
                 : tool == Engine.TOOL_SHAPE ? DrawPrefs.widthFrac(drawPrefs.shapeWidth(), DrawPrefs.SHAPE_MIN, DrawPrefs.SHAPE_MAX)
                 : tool == Engine.TOOL_TEXT ? (textPt - Fonts.PT_MIN) / (40 - Fonts.PT_MIN)
-                : tool == Engine.TOOL_ERASER ? (eraserDp - 6) / 24f
+                : tool == Engine.TOOL_ERASER ? DrawPrefs.widthFrac(eraserDp, DrawPrefs.ERASER_MIN, DrawPrefs.ERASER_MAX)
                 : DrawPrefs.widthFrac(penW, DrawPrefs.PEN_MIN, DrawPrefs.PEN_MAX);
         sizeB.set(Math.max(0, Math.min(1, frac)));
         sizeB.setVisibility(tool == Engine.TOOL_LASSO || tool == Engine.TOOL_LASER || tool == Engine.TOOL_TAPE ? View.GONE : View.VISIBLE);
@@ -2742,8 +2765,25 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             prefs.edit().putBoolean("partialErase", partialErase).apply();
             pushOptions();
         }));
-        p.section("Size");
-        p.add(Ui.slider(this, 24, Math.round(eraserDp - 6), v -> { eraserDp = 6 + v; applyTool(); }));
+        p.section("Thickness (3 custom slots)");
+        p.add(ShapeToolbar.customThicknessControl(this, drawPrefs.eraserWidths, drawPrefs.eraserThick,
+                drawPrefs.eraserWidth(), DrawPrefs.ERASER_MIN, DrawPrefs.ERASER_MAX, 0, false,
+                DrawPrefs::formatDp, new ShapeToolbar.ThicknessCallback() {
+                    @Override public void onSelectSlot(int slotIdx, float width) {
+                        drawPrefs.eraserThick = slotIdx;
+                        applyTool();
+                    }
+                    @Override public void onEditWidth(int slotIdx, float width) {
+                        drawPrefs.eraserThick = slotIdx;
+                        drawPrefs.eraserWidths[slotIdx] = width;
+                        applyTool();
+                    }
+                    @Override public void onResetDefaults() {
+                        drawPrefs.resetEraserWidths();
+                        applyTool();
+                        toast("Eraser thickness slots reset to defaults");
+                    }
+                }));
         LinearLayout.LayoutParams ol = fullW(-1);
         ol.topMargin = Ui.dp(this, 6);
         View prevRow = Ui.switchRow(this, "Grey out, delete on lift", "See what you're erasing before it goes",

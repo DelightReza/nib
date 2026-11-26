@@ -31,14 +31,16 @@ final class DrawPrefs {
             0xfff5c400
     };
 
-    /** Min / Max and default 3 customisable thickness slots (in page units) per tool. */
+    /** Min / Max and default 3 customisable thickness slots per tool. */
     static final float PEN_MIN = 0.5f, PEN_MAX = 16.0f;
     static final float HL_MIN = 6.0f, HL_MAX = 64.0f;
     static final float SHAPE_MIN = 0.8f, SHAPE_MAX = 20.0f;
+    static final float ERASER_MIN = 4.0f, ERASER_MAX = 36.0f;
 
     static final float[] DEFAULT_PEN_WIDTHS = {1.3f, 2.8f, 6.0f};
     static final float[] DEFAULT_HL_WIDTHS = {14.0f, 24.0f, 40.0f};
     static final float[] DEFAULT_SHAPE_WIDTHS = {1.8f, 3.8f, 7.2f};
+    static final float[] DEFAULT_ERASER_WIDTHS = {7.0f, 13.0f, 24.0f};
 
     final int[] slots = DEFAULT_SLOTS.clone();
 
@@ -46,6 +48,7 @@ final class DrawPrefs {
     final float[] penWidths = DEFAULT_PEN_WIDTHS.clone();
     final float[] hlWidths = DEFAULT_HL_WIDTHS.clone();
     final float[] shapeWidths = DEFAULT_SHAPE_WIDTHS.clone();
+    final float[] eraserWidths = DEFAULT_ERASER_WIDTHS.clone();
 
     // Independent last-selected colour slot (0..4) per tool
     int penSlot = 0;
@@ -57,6 +60,7 @@ final class DrawPrefs {
     int penThick = THICK_MEDIUM;
     int hlThick = THICK_MEDIUM;
     int shapeThick = THICK_MEDIUM;
+    int eraserThick = THICK_MEDIUM;
 
     // Independent opacity (0..100 %) per tool / channel
     int penOpacity = 100;
@@ -91,6 +95,7 @@ final class DrawPrefs {
             d.penWidths[i] = clampF(p.getFloat("dp_penW_" + i, DEFAULT_PEN_WIDTHS[i]), PEN_MIN, PEN_MAX);
             d.hlWidths[i] = clampF(p.getFloat("dp_hlW_" + i, DEFAULT_HL_WIDTHS[i]), HL_MIN, HL_MAX);
             d.shapeWidths[i] = clampF(p.getFloat("dp_shW_" + i, DEFAULT_SHAPE_WIDTHS[i]), SHAPE_MIN, SHAPE_MAX);
+            d.eraserWidths[i] = clampF(p.getFloat("dp_erW_" + i, DEFAULT_ERASER_WIDTHS[i]), ERASER_MIN, ERASER_MAX);
         }
         d.penSlot = clamp(p.getInt("dp_penSlot", clamp(p.getInt("penColor", 0), 0, SLOT_COUNT - 1)), 0, SLOT_COUNT - 1);
         d.hlSlot = clamp(p.getInt("dp_hlSlot", 4), 0, SLOT_COUNT - 1);
@@ -100,6 +105,7 @@ final class DrawPrefs {
         d.penThick = clamp(p.getInt("dp_penThick", nearestPreset(p.getFloat("penW", d.penWidths[1]), d.penWidths)), 0, THICK_COUNT - 1);
         d.hlThick = clamp(p.getInt("dp_hlThick", nearestPreset(p.getFloat("hlW", d.hlWidths[1]), d.hlWidths)), 0, THICK_COUNT - 1);
         d.shapeThick = clamp(p.getInt("dp_shThick", THICK_MEDIUM), 0, THICK_COUNT - 1);
+        d.eraserThick = clamp(p.getInt("dp_erThick", nearestPreset(p.getFloat("eraserDp", d.eraserWidths[1]), d.eraserWidths)), 0, THICK_COUNT - 1);
 
         d.penOpacity = clamp(p.getInt("dp_penOp", 100), 0, 100);
         d.hlOpacity = clamp(p.getInt("dp_hlOp", 42), 0, 100);
@@ -132,6 +138,7 @@ final class DrawPrefs {
             e.putFloat("dp_penW_" + i, penWidths[i]);
             e.putFloat("dp_hlW_" + i, hlWidths[i]);
             e.putFloat("dp_shW_" + i, shapeWidths[i]);
+            e.putFloat("dp_erW_" + i, eraserWidths[i]);
         }
         e.putInt("dp_penSlot", penSlot);
         e.putInt("dp_hlSlot", hlSlot);
@@ -140,6 +147,7 @@ final class DrawPrefs {
         e.putInt("dp_penThick", penThick);
         e.putInt("dp_hlThick", hlThick);
         e.putInt("dp_shThick", shapeThick);
+        e.putInt("dp_erThick", eraserThick);
         e.putInt("dp_penOp", penOpacity);
         e.putInt("dp_hlOp", hlOpacity);
         e.putInt("dp_shStrokeOp", shapeStrokeOpacity);
@@ -161,6 +169,7 @@ final class DrawPrefs {
     void resetPenWidths() { System.arraycopy(DEFAULT_PEN_WIDTHS, 0, penWidths, 0, THICK_COUNT); }
     void resetHlWidths() { System.arraycopy(DEFAULT_HL_WIDTHS, 0, hlWidths, 0, THICK_COUNT); }
     void resetShapeWidths() { System.arraycopy(DEFAULT_SHAPE_WIDTHS, 0, shapeWidths, 0, THICK_COUNT); }
+    void resetEraserWidths() { System.arraycopy(DEFAULT_ERASER_WIDTHS, 0, eraserWidths, 0, THICK_COUNT); }
 
     int penColorRgb() { return slots[clamp(penSlot, 0, SLOT_COUNT - 1)] | 0xff000000; }
     int hlColorRgb() { return slots[clamp(hlSlot, 0, SLOT_COUNT - 1)] | 0xff000000; }
@@ -176,6 +185,7 @@ final class DrawPrefs {
     float penWidth() { return penWidths[clamp(penThick, 0, THICK_COUNT - 1)]; }
     float hlWidth() { return hlWidths[clamp(hlThick, 0, THICK_COUNT - 1)]; }
     float shapeWidth() { return shapeWidths[clamp(shapeThick, 0, THICK_COUNT - 1)]; }
+    float eraserWidth() { return eraserWidths[clamp(eraserThick, 0, THICK_COUNT - 1)]; }
 
     /** Builds a default ShapeSpec reflecting the user's current Shape tool settings. */
     ShapeSpec makeShapeSpec() {
@@ -217,6 +227,11 @@ final class DrawPrefs {
     static String formatMm(float pageUnits) {
         float mm = Math.max(0.1f, pageUnits * 0.21f);
         return String.format(Locale.US, "%.1f mm", mm);
+    }
+
+    /** Human-readable eraser radius in dp. */
+    static String formatDp(float dpVal) {
+        return Math.round(dpVal) + " dp";
     }
 
     static int withOpacity(int rgb, int pct) {
