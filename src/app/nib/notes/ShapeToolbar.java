@@ -401,12 +401,17 @@ final class ShapeToolbar {
         updateFillVisibility.run();
 
         // 6. Shape-specific controls
-        if (cur.hasCornerRadius()) {
-            TextView crLbl = Ui.text(c, "Corner radius · " + Math.round(cur.cornerRadius * 200) + "%", 12.5f, Ui.color(c, R.color.on_surface_variant), Ui.medium());
+        boolean rectCornerEditable = editingExisting && (ShapeSpec.KIND_RECT.equals(cur.kind) || ShapeSpec.KIND_ROUND_RECT.equals(cur.kind));
+        if (cur.hasCornerRadius() || rectCornerEditable) {
+            int initCr = ShapeSpec.KIND_RECT.equals(cur.kind) ? 0 : Math.round(cur.cornerRadius * 200);
+            TextView crLbl = Ui.text(c, "Corner radius · " + initCr + "%", 12.5f, Ui.color(c, R.color.on_surface_variant), Ui.medium());
             crLbl.setPadding(0, Ui.dp(c, 12), 0, Ui.dp(c, 4));
             pop.add(crLbl);
-            pop.add(Ui.slider(c, 100, Math.round(cur.cornerRadius * 200), v -> {
+            pop.add(Ui.slider(c, 100, initCr, v -> {
                 cur.cornerRadius = v / 200f;
+                if (rectCornerEditable) {
+                    cur.kind = v > 0 ? ShapeSpec.KIND_ROUND_RECT : ShapeSpec.KIND_RECT;
+                }
                 crLbl.setText("Corner radius · " + v + "%");
                 if (!editingExisting) prefs.shapeCornerRadius = cur.cornerRadius;
                 if (cb != null) cb.onSpecChanged(cur.copy());
@@ -425,16 +430,31 @@ final class ShapeToolbar {
             }));
         }
 
-        if (cur.isArrow()) {
+        boolean lineSwitchable = editingExisting && (ShapeSpec.KIND_LINE.equals(cur.kind) || cur.isArrow());
+        if (lineSwitchable || cur.isArrow()) {
+            final LinearLayout arrowWrap = new LinearLayout(c);
+            arrowWrap.setOrientation(LinearLayout.VERTICAL);
+            if (lineSwitchable) {
+                pop.section("Line endpoints");
+                final String[] lineKinds = {ShapeSpec.KIND_LINE, ShapeSpec.KIND_ARROW, ShapeSpec.KIND_DOUBLE_ARROW};
+                int initIdx = ShapeSpec.KIND_DOUBLE_ARROW.equals(cur.kind) ? 2 : ShapeSpec.KIND_ARROW.equals(cur.kind) ? 1 : 0;
+                pop.add(Ui.segmented(c, new String[]{"Line", "Arrow", "Double"}, initIdx, idx -> {
+                    cur.kind = lineKinds[idx];
+                    arrowWrap.setVisibility(cur.isArrow() ? View.VISIBLE : View.GONE);
+                    if (cb != null) cb.onSpecChanged(cur.copy());
+                }));
+            }
             TextView arLbl = Ui.text(c, "Arrowhead size · " + Math.round(cur.arrowSize * 100) + "%", 12.5f, Ui.color(c, R.color.on_surface_variant), Ui.medium());
             arLbl.setPadding(0, Ui.dp(c, 12), 0, Ui.dp(c, 4));
-            pop.add(arLbl);
-            pop.add(Ui.slider(c, 200, Math.round((cur.arrowSize - 0.5f) * 100), v -> {
+            arrowWrap.addView(arLbl);
+            arrowWrap.addView(Ui.slider(c, 200, Math.round((cur.arrowSize - 0.5f) * 100), v -> {
                 cur.arrowSize = 0.5f + v / 100f;
                 arLbl.setText("Arrowhead size · " + Math.round(cur.arrowSize * 100) + "%");
                 if (!editingExisting) prefs.shapeArrowSize = cur.arrowSize;
                 if (cb != null) cb.onSpecChanged(cur.copy());
             }));
+            arrowWrap.setVisibility(cur.isArrow() ? View.VISIBLE : View.GONE);
+            pop.add(arrowWrap);
         }
 
         if (ShapeSpec.KIND_CIRCLE.equals(cur.kind) && !editingExisting) {

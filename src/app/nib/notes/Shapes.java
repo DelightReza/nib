@@ -10,7 +10,86 @@ import java.util.ArrayList;
 final class Shapes {
     private Shapes() {}
 
+    /**
+     * Structured recognition result preserving semantic shape metadata so pen hold-to-snap
+     * shapes can be committed as editable {@link Notebook.Item#SHAPE} items with full Shape Style controls.
+     */
+    static final class Match {
+        final String kind;
+        final float[] densePts;
+        final float[] keyPts;
+        final float l, t, w, h;
+        final int sides;
+        final boolean isLine;
+
+        Match(String kind, float[] densePts, float[] keyPts, float l, float t, float w, float h, int sides, boolean isLine) {
+            this.kind = kind;
+            this.densePts = densePts;
+            this.keyPts = keyPts;
+            this.l = l;
+            this.t = t;
+            this.w = Math.max(4f, w);
+            this.h = Math.max(4f, h);
+            this.sides = sides;
+            this.isLine = isLine;
+        }
+
+        Match withLineEnd(float x1, float y1) {
+            if (!isLine || keyPts == null || keyPts.length < 4) return this;
+            float x0 = keyPts[0], y0 = keyPts[1];
+            float[] kp = new float[]{x0, y0, x1, y1};
+            float[] dp = densify(kp, false);
+            float nl = Math.min(x0, x1), nt = Math.min(y0, y1);
+            float nw = Math.abs(x1 - x0), nh = Math.abs(y1 - y0);
+            return new Match(kind, dp, kp, nl, nt, nw, nh, sides, true);
+        }
+
+        Match scaled(float cx, float cy, float k) {
+            float[] dp = new float[densePts.length];
+            for (int i = 0; i + 1 < dp.length; i += 2) {
+                dp[i] = cx + (densePts[i] - cx) * k;
+                dp[i + 1] = cy + (densePts[i + 1] - cy) * k;
+            }
+            float[] kp = null;
+            if (keyPts != null) {
+                kp = new float[keyPts.length];
+                for (int i = 0; i + 1 < kp.length; i += 2) {
+                    kp[i] = cx + (keyPts[i] - cx) * k;
+                    kp[i + 1] = cy + (keyPts[i + 1] - cy) * k;
+                }
+            }
+            float nl = cx + (l - cx) * k;
+            float nt = cy + (t - cy) * k;
+            float nw = Math.max(4f, w * k);
+            float nh = ShapeSpec.KIND_CIRCLE.equals(kind) ? nw : Math.max(4f, h * k);
+            return new Match(kind, dp, kp, nl, nt, nw, nh, sides, isLine);
+        }
+
+        Notebook.Item toShapeItem(int strokeColor, float strokeWidth, int fillColor, int layer) {
+            ShapeSpec spec = new ShapeSpec();
+            spec.kind = kind;
+            spec.fillStyle = ShapeSpec.STYLE_OUTLINE;
+            spec.strokeColor = strokeColor | 0xff000000;
+            spec.strokeAlpha = 100;
+            spec.strokeWidth = Math.max(0.5f, strokeWidth);
+            spec.fillColor = fillColor | 0xff000000;
+            spec.fillAlpha = 0;
+            spec.sides = sides;
+            spec.zOrder = ShapeSpec.DEFAULT_Z_BEHIND_INK;
+            if (keyPts != null) {
+                return ShapeSpec.fromPoints(spec, keyPts, layer);
+            }
+            return new Notebook.Item(Notebook.Item.SHAPE, l, t, w, h,
+                    spec.kind, spec.strokeWidth, spec.strokeColor, null, spec.encode()).lay(layer);
+        }
+    }
+
     static float[] recognize(Stroke s) {
+        Match m = recognizeMatch(s);
+        return m == null ? null : m.densePts;
+    }
+
+    static Match recognizeMatch(Stroke s) {
         int n = s.n;
         if (n < 6) return null;
         float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, len = 0;
@@ -31,7 +110,9 @@ final class Shapes {
             if (a < 6 || a > 84) { // snap to horizontal / vertical
                 if (Math.abs(x1 - x0) > Math.abs(y1 - y0)) y1 = y0; else x1 = x0;
             }
-            return densify(new float[]{x0, y0, x1, y1}, false);
+            float[] kp = new float[]{x0, y0, x1, y1};
+            return new Match(ShapeSpec.KIND_LINE, densify(kp, false), kp,
+                    Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0), 5, true);
         }
         if (ends > 0.22f * len) return null; // open squiggle: leave it alone
 
@@ -48,7 +129,8 @@ final class Shapes {
             float[] poly = rdp(s, 0.06f * diag);
             int corners = poly.length / 2 - 1;
             if (dev < 0.075f && corners >= 5 || dev < 0.05f) {
-                if (Math.abs(rx - ry) < 0.12f * Math.max(rx, ry)) rx = ry = (rx + ry) / 2;
+                boolean isCircle = Math.abs(rx - ry) < 0.12f * Math.max(rx, ry);
+                if (isCircle) rx = ry = (rx + ry) / 2;
                 int m = Math.max(24, Math.min(240, (int) (Math.PI * (rx + ry) / 2.5f)));
                 float[] out = new float[(m + 1) * 2];
                 for (int i = 0; i <= m; i++) {
@@ -56,7 +138,8 @@ final class Shapes {
                     out[2 * i] = cx + rx * (float) Math.cos(t);
                     out[2 * i + 1] = cy + ry * (float) Math.sin(t);
                 }
-                return out;
+                return new Match(isCircle ? ShapeSpec.KIND_CIRCLE : ShapeSpec.KIND_ELLIPSE,
+                        out, null, cx - rx, cy - ry, rx * 2f, ry * 2f, 5, false);
             }
         }
 
@@ -66,7 +149,9 @@ final class Shapes {
         // drop the closing vertex if it sits on the first one
         if (k > 2 && Math.hypot(poly[2 * k - 2] - poly[0], poly[2 * k - 1] - poly[1]) < 0.2f * diag) k--;
         if (k == 3) {
-            return densify(new float[]{poly[0], poly[1], poly[2], poly[3], poly[4], poly[5], poly[0], poly[1]}, true);
+            float[] kp = new float[]{poly[0], poly[1], poly[2], poly[3], poly[4], poly[5]};
+            float[] closed = new float[]{poly[0], poly[1], poly[2], poly[3], poly[4], poly[5], poly[0], poly[1]};
+            return new Match(ShapeSpec.KIND_TRIANGLE, densify(closed, true), kp, minX, minY, w, h, 3, false);
         }
         if (k == 4) {
             boolean axis = true;
@@ -76,8 +161,13 @@ final class Shapes {
                 a = ((a % 90) + 90) % 90;
                 if (a > 12 && a < 78) axis = false;
             }
-            if (axis) return densify(new float[]{minX, minY, maxX, minY, maxX, maxY, minX, maxY, minX, minY}, true);
-            return densify(new float[]{poly[0], poly[1], poly[2], poly[3], poly[4], poly[5], poly[6], poly[7], poly[0], poly[1]}, true);
+            if (axis) {
+                float[] closed = new float[]{minX, minY, maxX, minY, maxX, maxY, minX, maxY, minX, minY};
+                return new Match(ShapeSpec.KIND_RECT, densify(closed, true), null, minX, minY, w, h, 4, false);
+            }
+            float[] kp = new float[]{poly[0], poly[1], poly[2], poly[3], poly[4], poly[5], poly[6], poly[7]};
+            float[] closed = new float[]{poly[0], poly[1], poly[2], poly[3], poly[4], poly[5], poly[6], poly[7], poly[0], poly[1]};
+            return new Match(ShapeSpec.KIND_POLYGON, densify(closed, true), kp, minX, minY, w, h, 4, false);
         }
         return null;
     }

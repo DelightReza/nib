@@ -1402,7 +1402,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 applyTool();
             }
             @Override public void onOpenShapeStyle(View anchor) {
-                showShapeStylePanel(anchor, false);
+                showShapeStylePanel(anchor, state != null && state.selShape);
             }
             @Override public void onExpandChanged(boolean expanded) {
                 placeShapeToolbar();
@@ -2280,9 +2280,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private void pickThickSlot(int idx, View anchor) {
         int prev = activeThickSlotForTool();
         setActiveThickSlot(idx);
-        if (state != null && state.selShape && state.selShapeStyle != null && tool == Engine.TOOL_SHAPE) {
+        if (state != null && state.selShape && state.selShapeStyle != null
+                && (tool == Engine.TOOL_SHAPE || tool == Engine.TOOL_PEN)) {
             ShapeSpec sp = ShapeSpec.parse(state.selShapeStyle);
-            sp.strokeWidth = drawPrefs.shapeWidth();
+            sp.strokeWidth = tool == Engine.TOOL_SHAPE ? drawPrefs.shapeWidth() : drawPrefs.penWidth();
             engine.selUpdateShape(sp);
         }
         applyTool();
@@ -2332,6 +2333,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                         else if (sh) drawPrefs.shapeThick = slotIdx;
                         else if (er) drawPrefs.eraserThick = slotIdx;
                         else drawPrefs.penThick = slotIdx;
+                        if (!hl && !er && state != null && state.selShape && state.selShapeStyle != null) {
+                            ShapeSpec sp = ShapeSpec.parse(state.selShapeStyle);
+                            sp.strokeWidth = width;
+                            engine.selUpdateShape(sp);
+                        }
                         applyTool();
                         refreshPrev.run();
                     }
@@ -2340,15 +2346,18 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                         else if (sh) {
                             drawPrefs.shapeThick = slotIdx;
                             drawPrefs.shapeWidths[slotIdx] = width;
-                            if (state != null && state.selShape && state.selShapeStyle != null) {
-                                ShapeSpec sp = ShapeSpec.parse(state.selShapeStyle);
-                                sp.strokeWidth = width;
-                                engine.selUpdateShape(sp);
-                            }
                         } else if (er) {
                             drawPrefs.eraserThick = slotIdx;
                             drawPrefs.eraserWidths[slotIdx] = width;
-                        } else { drawPrefs.penThick = slotIdx; drawPrefs.penWidths[slotIdx] = width; }
+                        } else {
+                            drawPrefs.penThick = slotIdx;
+                            drawPrefs.penWidths[slotIdx] = width;
+                        }
+                        if (!hl && !er && state != null && state.selShape && state.selShapeStyle != null) {
+                            ShapeSpec sp = ShapeSpec.parse(state.selShapeStyle);
+                            sp.strokeWidth = width;
+                            engine.selUpdateShape(sp);
+                        }
                         applyTool();
                         refreshPrev.run();
                     }
@@ -4426,6 +4435,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         editTextB.setVisibility(View.GONE);
         selBar.addView(editTextB);
         shapeStyleB = selAction(R.drawable.ic_palette, "Style", v -> showShapeStylePanel(v, true));
+        if (shapeStyleB instanceof LinearLayout) {
+            LinearLayout sb = (LinearLayout) shapeStyleB;
+            int acc = Ui.color(this, R.color.accent);
+            if (sb.getChildCount() >= 2) {
+                ((ImageView) sb.getChildAt(0)).setImageTintList(android.content.res.ColorStateList.valueOf(acc));
+                ((TextView) sb.getChildAt(1)).setTextColor(acc);
+            }
+        }
         shapeStyleB.setVisibility(View.GONE);
         selBar.addView(shapeStyleB);
         shapeOrderB = selAction(R.drawable.ic_layer_front, "Order", this::showShapeOrderMenu);
