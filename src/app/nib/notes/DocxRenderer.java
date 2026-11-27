@@ -1283,15 +1283,30 @@ final class DocxRenderer {
             }
         }
 
+        private boolean closed;
+
         void finish(File outPdf) throws IOException {
             try {
-                if (page != null) doc.finishPage(page);
+                if (page != null) {
+                    doc.finishPage(page);
+                    page = null;
+                }
                 try (FileOutputStream fos = new FileOutputStream(outPdf)) {
                     doc.writeTo(fos);
                 }
             } finally {
-                doc.close();
+                closeSafely();
             }
+        }
+
+        void closeSafely() {
+            if (closed) return;
+            closed = true;
+            if (page != null) {
+                try { doc.finishPage(page); } catch (Exception ignored) { }
+                page = null;
+            }
+            try { doc.close(); } catch (Exception ignored) { }
         }
     }
 
@@ -1327,9 +1342,8 @@ final class DocxRenderer {
             }
             if (cb != null) cb.onProgress(total, total, "Writing PDF file…");
             pw.finish(outPdf);
-        } catch (IOException e) {
-            pw.doc.close();
-            throw e;
+        } finally {
+            pw.closeSafely();
         }
     }
 

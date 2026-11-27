@@ -255,9 +255,13 @@ final class FolderDialogs {
         container.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
         scroll.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             if (b - t > maxH) {
-                LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) scroll.getLayoutParams();
-                lp.height = maxH;
-                scroll.setLayoutParams(lp);
+                scroll.post(() -> {
+                    LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) scroll.getLayoutParams();
+                    if (lp != null && lp.height != maxH) {
+                        lp.height = maxH;
+                        scroll.setLayoutParams(lp);
+                    }
+                });
             }
         });
 

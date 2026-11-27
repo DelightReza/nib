@@ -33,6 +33,19 @@ final class Exporter {
         return s.isEmpty() ? "Notebook" : s;
     }
 
+    /** Allocates a unique file inside cache/exports so batch exports with duplicate titles don't overwrite each other. */
+    static File uniqueExportFile(Context c, String baseName, String ext, java.util.Set<String> usedLower) {
+        String safe = safeName(baseName);
+        String candidate = safe + ext;
+        int n = 2;
+        while (usedLower.contains(candidate.toLowerCase(java.util.Locale.US))) {
+            candidate = safe + " (" + n + ")" + ext;
+            n++;
+        }
+        usedLower.add(candidate.toLowerCase(java.util.Locale.US));
+        return new File(exportDir(c), candidate);
+    }
+
     /** All pages (or one, if page >= 0) as a PDF; A4 width in points. */
     static File pdf(Context c, Notebook nb, File dir, int page) throws IOException {
         return pdf(c, nb, dir, page, null);
@@ -41,6 +54,11 @@ final class Exporter {
     /** All pages (or one, if page >= 0) as a PDF with optional progress callbacks. */
     static File pdf(Context c, Notebook nb, File dir, int page, ProgressPopup.Listener cb) throws IOException {
         File out = new File(exportDir(c), safeName(nb.title) + (page >= 0 ? " p" + (page + 1) : "") + ".pdf");
+        return pdf(c, nb, dir, page, out, cb);
+    }
+
+    /** All pages (or one, if page >= 0) as a PDF written to the specified output file. */
+    static File pdf(Context c, Notebook nb, File dir, int page, File out, ProgressPopup.Listener cb) throws IOException {
         PdfDocument doc = new PdfDocument();
         Render.Pdf src = Render.Pdf.open(dir);
         int totalPages = page >= 0 ? 1 : Math.max(1, nb.pages.size());

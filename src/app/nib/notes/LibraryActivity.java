@@ -753,8 +753,8 @@ public final class LibraryActivity extends Activity {
             String prefix = "\u2003".repeat(depth(f)) + (FolderStore.isPinned(this, f) ? "📌 " : "📁 ");
             m.add(1, 100 + i, 10 + i, prefix + leaf(f));
         }
-        m.add(2, 4, 100, "New folder…");
-        m.add(2, 5, 101, "Settings & backup…");
+        m.add(2, 4, 10000, "New folder…");
+        m.add(2, 5, 10001, "Settings & backup…");
         pm.setOnMenuItemClickListener(it -> {
             int id = it.getItemId();
             if (id == 1) setFilter("");
@@ -1395,15 +1395,18 @@ public final class LibraryActivity extends Activity {
                 total == 1 ? "Preparing PDF…" : "Exporting 1 of " + total + "…");
         bg.execute(() -> {
             ArrayList<File> files = new ArrayList<>();
+            HashSet<String> usedNames = new HashSet<>();
             for (int i = 0; i < total; i++) {
                 Notebook.Entry e = es.get(i);
                 final int idx = i;
                 try {
+                    Notebook nb = Notebook.load(e.dir);
+                    File out = Exporter.uniqueExportFile(this, nb.title, ".pdf", usedNames);
                     if (total == 1) {
-                        files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1, prog.asListener()));
+                        files.add(Exporter.pdf(this, nb, e.dir, -1, out, prog.asListener()));
                     } else {
                         prog.update(idx, total, "Exporting " + e.title + " (" + (idx + 1) + " of " + total + ")…");
-                        files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1));
+                        files.add(Exporter.pdf(this, nb, e.dir, -1, out, null));
                         prog.update(idx + 1, total, "Exported " + (idx + 1) + " of " + total + "…");
                     }
                 } catch (Exception ex) { Log.e(Gl.TAG, "export", ex); }
@@ -1662,14 +1665,17 @@ public final class LibraryActivity extends Activity {
                 total == 1 ? "Preparing PDF…" : "Exporting 1 of " + total + "…");
         bg.execute(() -> {
             ArrayList<File> files = new ArrayList<>();
+            HashSet<String> usedNames = new HashSet<>();
             for (int i = 0; i < total; i++) {
                 Notebook.Entry e = es.get(i);
                 try {
+                    Notebook nb = Notebook.load(e.dir);
+                    File out = Exporter.uniqueExportFile(this, nb.title, ".pdf", usedNames);
                     if (total == 1) {
-                        files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1, prog.asListener()));
+                        files.add(Exporter.pdf(this, nb, e.dir, -1, out, prog.asListener()));
                     } else {
                         prog.update(i, total, "Exporting " + e.title + " (" + (i + 1) + " of " + total + ")…");
-                        files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1));
+                        files.add(Exporter.pdf(this, nb, e.dir, -1, out, null));
                         prog.update(i + 1, total, "Exported " + (i + 1) + " of " + total + "…");
                     }
                 } catch (Exception ex) { Log.e(Gl.TAG, "export folder", ex); }
