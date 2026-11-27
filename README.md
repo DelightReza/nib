@@ -2,7 +2,7 @@
 
 **Low-latency handwritten notes for Android tablets.** Nib draws your ink straight into the display's front
 buffer, so strokes appear under the pen tip with almost no lag. Around that sits a calm, distraction-free
-notebook: pages that fill the screen, floating tools that step aside while you write, tabs, split view,
+notebook: pages that fill the screen, floating tools that can step aside while you write, tabs, split view,
 and handwriting that turns into text in English, Punjabi, Hindi or Arabic.
 
 <p>
@@ -43,21 +43,24 @@ and handwriting that turns into text in English, Punjabi, Hindi or Arabic.
 - Style selected words or the whole box: font, size in points, bold, italic, underline, strike-through and colour; left, centre or right alignment
 - A format bar sits over the box while you type and shows the style at the cursor
 
-**Pages**
-- Pages fill the screen and run continuously; a new page appears as soon as you write on the last one
+**Pages & Layers**
+- Pages fill the screen and run continuously with a subtle gap between pages; a new page appears as soon as you write on the last one
 - Infinite canvas notebooks
-- Templates: blank, lined, narrow lined, grid, dotted, Cornell, music staff, engineering, isometric, site inspection
-- Page style: line spacing (mm), line colour and strength, left margin, header line, border; white, cream or dark paper
+- Templates: blank, lined, narrow lined, grid, dotted, fine dot, graph 5 mm, Cornell A & B, legal, daily & weekly planners, music staff, guitar tablature & score, engineering, isometric, hexagonal grid, site inspection — plus custom image/PDF page styles
+- Page style: line spacing (mm), line colour and strength, left margin, header line, border; six paper tones (white, cream, tan, ice, dark, black)
 - Save your own templates, and choose the style new notebooks start with
-- Bookmarks with names, page overview and outline; double-tap to fit the page width
+- Whole-notebook layers: separate lectures, notes and answers; hide layers to study or omit them from exports
+- Bookmarks with names, portrait/landscape page overview, outline, **Jump to page** from the page/zoom indicator, and double-tap to fit width
 
-**Notebooks**
+**Notebooks & Folders**
 - Tabs for open notebooks, and split view with two notebooks side by side or stacked, both editable; drag the divider to resize
-- Notes screen with favourites, recent, unfiled, folders with subfolders, and a trash that keeps deleted notebooks for 30 days
-- Notebooks show their real first page; small, medium or large; select several to move, favourite, export or delete
+- Library with **Home** (top-level folders + unfiled notes), **All notes**, **Favourites** (starred notes + pinned folders), **Recent**, **Trash** (30 days), and a collapsible sidebar on tablets
+- Folders with custom colours, pinning, nested subfolders, breadcrumb navigation, easy moving (single menu, pull notes into a folder, or tap-to-drop in select mode), and batch folder PDF export
+- Notebooks show their real first page or custom cover; small, medium or large; select several to move, favourite, export or delete
 - Handwriting search: finds words you wrote (on-device recognition: English, Punjabi, Hindi, Arabic)
-- Import PDFs (or "Open with Nib" / share from any app) and write on them; export notebooks or pages as PDF or PNG
-- Backup and restore to a folder you choose
+- Import PDFs (or "Open with Nib" / share from any app), offline **DOCX**, **PPTX**, **TXT/Markdown**, photos, `.nib` archives, or scan multi-page documents with the camera
+- Save exported PDFs, PNGs, `.nib` archives, and multi-file batches directly to **Files** (with live progress popups), or share straight to another app
+- Backup and restore (including folders, colours, pins, fonts, stickers and templates) to a folder you choose
 - Themes: light, dark or follow the system; eight accent colours or your own; graphite or true-black dark style
 
 ## Install
@@ -102,9 +105,13 @@ Release builds: set `NIB_KEYSTORE`, `NIB_KS_PASS` and `NIB_KEY_ALIAS`. The Magis
 | `src/app/nib/notes/Engine.java` | Ink engine: input, strokes, pages, undo, front-buffer rendering |
 | `src/app/nib/notes/Gl.java` | OpenGL ES: instanced SDF stroke segments, page shader (templates, page style) |
 | `src/app/nib/notes/EditorActivity.java` | Writing screen: floating tools, panels, tabs and split view |
-| `src/app/nib/notes/LibraryActivity.java` | Notebook list, folders, search, import |
-| `src/app/nib/notes/Notebook.java` | File format (`ink.bin`, NIB5) and notebook storage |
+| `src/app/nib/notes/LibraryActivity.java` | Notebook list, folders, search, import, and batch export |
+| `src/app/nib/notes/FolderStore.java` | Hierarchical folders, colours, pins, and folder operations |
+| `src/app/nib/notes/DocConverter.java` | Offline DOCX, PPTX, TXT and Markdown to PDF conversion |
+| `src/app/nib/notes/ScanSheet.java` | Multi-page camera document scanner and PDF compiler |
+| `src/app/nib/notes/Notebook.java` | File format (`ink.bin` + per-page `pages/*.bin`, NIB8) and storage |
 | `src/app/nib/notes/Render.java` | Canvas rendering for thumbnails and PDF/PNG export |
+| `src/app/nib/notes/Exporter.java` | Vector PDF / PNG export, Files picker saving, and sharing |
 | `src/app/nib/notes/Handwriting.java` | Handwriting search (ML Kit digital ink) |
 | `tools/` | Library fetch/unpack, manifest merger, Magisk module packer |
 
