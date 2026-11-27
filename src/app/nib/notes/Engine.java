@@ -2963,7 +2963,8 @@ final class Engine implements Choreographer.FrameCallback {
             if (pen) {
                 stopFling();
                 gesturing = false;
-                if (hasSel() && tool != TOOL_LASSO) clearSelection(); // writing next to a shape just carries on
+                boolean dismissedSel = hasSel() && tool != TOOL_LASSO;
+                if (dismissedSel) clearSelection(); // writing or tapping next to a shape dismisses it cleanly
                 checkFront();
                 // ink is drawn into the cache, so it must hold this view; then back into front-buffer mode if we can
                 if (!cacheValid()) renderNow();
@@ -3004,9 +3005,11 @@ final class Engine implements Choreographer.FrameCallback {
                 } else {
                     gest = G_INK;
                     downDelay = (recv - ev.getEventTimeNanos()) / 1e6f;
+                    inkDismissedSel = dismissedSel;
                     inkBegin(ev, recv);
                 }
-            } else if (SystemClock.uptimeMillis() - penNear < 450 || ev.getTouchMajor() > dp(40)) {
+            } else if (ev.getTouchMajor() > dp(40)
+                    || SystemClock.uptimeMillis() - penNear < (hasSel() ? 120 : 450)) {
                 gest = G_IGNORE; // pen hovering / just lifted, or palm-sized contact
             } else if (tool == TOOL_TEXT) {
                 gest = G_TAP; // a finger tap places text too; a finger drag scrolls
@@ -3160,6 +3163,7 @@ final class Engine implements Choreographer.FrameCallback {
     private static final long HOLD_ERASE_MS = 450;
     private float startX, startY, lastX, lastY; // screen px
     private boolean movedFromStart;
+    private boolean inkDismissedSel;
     private final Runnable holdEraseR = this::holdToErase;
 
     private void holdToErase() {
@@ -3356,6 +3360,17 @@ final class Engine implements Choreographer.FrameCallback {
                 z / fitZ * 100, stFront, stSwap, stFrames, stFrames > 0 ? stFrameNs / 1e6 / stFrames : 0, stFrameMax / 1e6, stScenes,
                 snapped ? " (shape)" : ""));
         Notebook.Page p = book.pages.get(livePage);
+        if (inkDismissedSel && !snapped && !movedFromStart && dur < 300) {
+            inkDismissedSel = false;
+            buf().truncate(liveFirst); // quick tap outside only dismissed the selection; leave no stray ink dot
+            live = null;
+            overlay = false;
+            gest = G_NONE;
+            needCache = true;
+            requestFrame();
+            return;
+        }
+        inkDismissedSel = false;
         if (!snapped && dur < 260 && live.n > 0 && live.r - live.l < live.width + 6 && live.b - live.t < live.width + 6
                 && toggleTapeAt(live.x(0), live.y(0) + liveTop, true)) {
             buf().truncate(liveFirst); // the tap only peeled the tape back; no dot
@@ -3951,17 +3966,9 @@ final class Engine implements Choreographer.FrameCallback {
                 for (Stroke s : p.strokes()) if (lassoed(s, xs, ys, ln)) ss.add(s);
                 for (Notebook.Item it : p.items()) {
                     if (it.layer != book.activeLayer) continue;
-                    boolean hit = Geo.inside(it.x + it.w / 2, it.y + it.h / 2, xs, ys, ln);
-                    if (!hit && it.type == Notebook.Item.SHAPE) {
-                        RectF rb = ShapeSpec.renderBounds(it);
-                        hit = Geo.inside(rb.centerX(), rb.centerY(), xs, ys, ln);
-                        if (!hit && it.pts != null) {
-                            for (int pi = 0; pi + 1 < it.pts.length; pi += 2) {
-                                float[] pp = ShapeSpec.toPage(it, it.pts[pi], it.pts[pi + 1]);
-                                if (Geo.inside(pp[0], pp[1], xs, ys, ln)) { hit = true; break; }
-                            }
-                        }
-                    }
+                    boolean hit = it.type == Notebook.Item.SHAPE
+                            ? ShapeSpec.hitsLasso(it, xs, ys, ln)
+                            : Geo.inside(it.x + it.w / 2, it.y + it.h / 2, xs, ys, ln);
                     if (hit) si.add(it);
                 }
                 // strokes started on a neighbouring page that run into this one
@@ -3975,15 +3982,32 @@ final class Engine implements Choreographer.FrameCallback {
                         if (lassoed(s, xs, ysj, ln)) other.computeIfAbsent(j, k -> new ArrayList<>()).add(s);
                 }
             }
-            // a tap (or tiny lasso) selects what's under it: a picture, text box, shape or tape, else a stroke
+            // a tap (or tiny lasso) selects what's under it: a picture, text box, tape, shape border, stroke, or shape area
             if (ss.isEmpty() && si.isEmpty()) {
                 float cx = xs[0], cy = ys[0];
+                float pad = dp(10) / z;
                 for (int i = p.items().size() - 1; i >= 0; i--) {
                     Notebook.Item it = p.items().get(i);
-                    if (it.layer == book.activeLayer && it.contains(cx, cy, dp(8) / z)) {
+                    if (it.layer != book.activeLayer || it.type == Notebook.Item.SHAPE) continue;
+                    if (it.contains(cx, cy, dp(8) / z)) {
                         si.add(it);
                         break;
                     }
+                }
+                Notebook.Item shapeAreaHit = null;
+                if (si.isEmpty()) {
+                    Notebook.Item shapeBorderHit = null;
+                    for (int pass = 0; pass < 2 && shapeBorderHit == null; pass++) {
+                        boolean wantBehind = pass == 1;
+                        ArrayList<Notebook.Item> list = ShapeSpec.filterAndSort(p.items(), wantBehind);
+                        for (int i = list.size() - 1; i >= 0; i--) {
+                            Notebook.Item it = list.get(i);
+                            if (it.layer != book.activeLayer) continue;
+                            if (ShapeSpec.hitBorder(it, cx, cy, pad)) { shapeBorderHit = it; break; }
+                            if (shapeAreaHit == null && ShapeSpec.hitTest(it, cx, cy, pad)) shapeAreaHit = it;
+                        }
+                    }
+                    if (shapeBorderHit != null) si.add(shapeBorderHit);
                 }
                 if (si.isEmpty() && other.isEmpty()) {
                     float reach = dp(10) / z;
@@ -4005,6 +4029,9 @@ final class Engine implements Choreographer.FrameCallback {
                                     break;
                                 }
                         }
+                    }
+                    if (ss.isEmpty() && other.isEmpty() && shapeAreaHit != null) {
+                        si.add(shapeAreaHit);
                     }
                 }
             }
@@ -4342,27 +4369,10 @@ final class Engine implements Choreographer.FrameCallback {
             penNear = SystemClock.uptimeMillis();
             liveDraftShape = null;
             if (!shMoved) {
-                // Quick tap in Shape mode: select existing shape under tap, or deselect cleanly
+                // Quick tap in Shape mode only dismisses any open selection toolbar;
+                // once closed, existing shapes are re-selected exclusively via the Lasso tool.
                 main.post(() -> listener.onShapeOverlay(null, 0, 0, 1, 0, false, null, null, null));
-                Notebook.Page p = book.pages.get(shPage);
-                float pad = dp(10) / z;
-                Notebook.Item hit = null;
-                // Prefer topmost (front-of-ink first, then behind-ink)
-                for (int pass = 0; pass < 2 && hit == null; pass++) {
-                    boolean wantBehind = pass == 1;
-                    ArrayList<Notebook.Item> list = ShapeSpec.filterAndSort(p.items(), wantBehind);
-                    for (int i = list.size() - 1; i >= 0; i--) {
-                        Notebook.Item it = list.get(i);
-                        if (it.layer == book.activeLayer && ShapeSpec.hitTest(it, shX0, shY0, pad)) { hit = it; break; }
-                    }
-                }
-                if (hit != null) {
-                    ArrayList<Notebook.Item> one = new ArrayList<>();
-                    one.add(hit);
-                    select(shPage, new ArrayList<>(), one);
-                } else {
-                    clearSelection();
-                }
+                clearSelection();
                 return;
             }
             Notebook.Item made = ShapeSpec.KIND_FREEFORM.equals(shapeSpec.kind)
@@ -4754,7 +4764,10 @@ final class Engine implements Choreographer.FrameCallback {
                 break;
             }
             case MotionEvent.ACTION_UP: {
-                if (!moved && ev.getEventTime() - downT < 300) {
+                if (!moved && maxPtr == 1 && hasSel() && ev.getEventTime() - downT < 500) {
+                    lastTapT = 0;
+                    clearSelection(); // single-finger tap anywhere outside dismisses selection & shape tools
+                } else if (!moved && ev.getEventTime() - downT < 300) {
                     if (maxPtr == 3) doRedo(true); // two-finger tap undo removed (owner's choice): it fired by accident
                     else if (maxPtr == 1 && toggleTapeAt(ox + ev.getX() / z, oy + ev.getY() / z, false)) {
                         lastTapT = 0; // a tap on tape peels it; it doesn't start a double-tap
