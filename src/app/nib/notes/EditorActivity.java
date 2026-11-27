@@ -61,7 +61,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private static final float PEN_MIN = 0.5f, PEN_MAX = 16f, HL_MIN = 6f, HL_MAX = 64f;
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
-    private static final int REQ_IMAGE = 11, REQ_SAVE_FILE = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16, REQ_STYLE_IMAGE = 17, REQ_STYLE_PDF = 18;
+    private static final int REQ_IMAGE = 11, REQ_SAVE_FILE = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16, REQ_STYLE_IMAGE = 17, REQ_STYLE_PDF = 18, REQ_RECORD_AUDIO = 19;
     private File pendingSave; // exported file (PDF, PNG, or .nib) waiting for the user to pick where to save it
     private ProgressPopup activeProgress;
     private int pendingPagePos = Engine.POS_AFTER;
@@ -223,7 +223,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             return insets;
         });
         activate(cur);
-        root.addOnLayoutChangeListener((v, l, t, r, bt, ol, ot, or, ob) -> { if (r - l != or - ol) ui.post(this::fitCapsule); });
+        root.addOnLayoutChangeListener((v, l, t, r, bt, ol, ot, or, ob) -> {
+            if (r - l != or - ol) ui.post(this::fitCapsule);
+            if ((r - l != or - ol || bt - t != ob - ot) && recordOverlay != null) recordOverlay.clampLater();
+        });
     }
 
     private void pushOptions() {
@@ -667,6 +670,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         state = d.state;
         selView = d.sel;
         drawScale = d.scale;
+        if (recorder != null && recorder.isActive() && recordingEngine != engine) {
+            if (recordingEngine != null) recordingEngine.detachRecorderSync();
+            recordingEngine = engine;
+            if (engine != null) engine.setRecorder(recorder);
+        }
         pushOptions();
         if (penB != null) applyTool();
         if (state != null && undoB != null) onState(state);
@@ -920,8 +928,16 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void closeDoc(Doc d) {
+        if (docs.size() <= 1) {
+            if (recordOverlay != null && recordOverlay.isSaving()) { toast("Finalizing video…"); return; }
+            if (recorder != null && recorder.isActive()) { confirmStopRecordingBeforeLeaving(); return; }
+        }
         commitTextEdit();
         if (d.engine != null) {
+            if (d.engine == recordingEngine) {
+                recordingEngine.detachRecorderSync();
+                recordingEngine = null;
+            }
             saveView(d); // reopen where it was left, like leaving the app does
             d.engine.saveNow();
             Handwriting.indexLater(getApplicationContext(), d.dir);
@@ -1131,7 +1147,11 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         capLeft.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0);
         Ui.capsule(capLeft, this, 14);
         Ui.IconButton back = icon(R.drawable.ic_back, "Back to notebooks");
-        back.setOnClickListener(v -> finish());
+        back.setOnClickListener(v -> {
+            if (recordOverlay != null && recordOverlay.isSaving()) { toast("Finalizing video…"); return; }
+            if (recorder != null && recorder.isActive()) { confirmStopRecordingBeforeLeaving(); return; }
+            finish();
+        });
         capLeft.addView(back);
         tabScroll = new android.widget.HorizontalScrollView(this);
         tabScroll.setHorizontalScrollBarEnabled(false);
@@ -1289,6 +1309,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         layersB = icon(R.drawable.ic_layers, "Layers");
         layersB.setOnClickListener(v -> showLayers(shelfAnchor(v)));
         advRow.addView(layersB);
+        recordB = icon(R.drawable.ic_record, "Record canvas video");
+        recordB.setTooltipText("Record video");
+        recordB.setOnClickListener(v -> { if (inShelf(v)) shelfUsed(); openRecordOverlay(); });
+        advRow.addView(recordB);
         advDiv1 = Ui.divider(this);
         advDiv2 = Ui.divider(this);
         pinB = icon(R.drawable.ic_pin, "Keep these tools open");
@@ -1387,9 +1411,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         shapeToolbar.setSelectedKind(drawPrefs.shapeKind);
         shapeToolbar.container.setVisibility(View.GONE);
         root.addView(shapeToolbar.container, new FrameLayout.LayoutParams(-2, Ui.dp(this, 48), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
-        View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, gridB, fingerB, beaut, toText, layersB};
+        View[] tv = {penB, hlB, eraserB, lassoB, textB, shapeB, tapeB, laserB, imgB, rulerB, gridB, fingerB, beaut, toText, layersB, recordB};
         System.arraycopy(tv, 0, toolViews, 0, tv.length);
-        for (View v : new View[]{imgB, rulerB, fingerB, beaut, toText, layersB}) v.setOnLongClickListener(this::showMoveMenu);
+        for (View v : new View[]{imgB, rulerB, fingerB, beaut, toText, layersB, recordB}) v.setOnLongClickListener(this::showMoveMenu);
         applyToolLayout();
     }
 
@@ -1527,9 +1551,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     // ---- which tools sit in the bar and which on the shelf: the owner's choice (long-press a tool → Move …) -------
 
     /** Every movable button in one fixed order; each side shows its own in this order. */
-    private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "grid", "finger", "beautify", "totext", "layers"};
+    private static final String[] TOOL_IDS = {"pen", "hl", "eraser", "lasso", "text", "shape", "tape", "laser", "image", "ruler", "grid", "finger", "beautify", "totext", "layers", "record"};
     private static final String[] TOOL_NAMES = {"Pen", "Highlighter", "Eraser", "Lasso", "Text", "Shapes", "Tape", "Laser pointer", "Image or sticker",
-            "Ruler", "Grid", "Write with finger", "Beautify", "Handwriting to text", "Layers"};
+            "Ruler", "Grid", "Write with finger", "Beautify", "Handwriting to text", "Layers", "Record video"};
     private static final String BASIC_DEFAULT = "pen,hl,eraser,lasso,shape";
     private final View[] toolViews = new View[TOOL_IDS.length];
     private final java.util.HashSet<String> basicIds = new java.util.HashSet<>();
@@ -1570,7 +1594,8 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         for (int i = 0; i < TOOL_IDS.length; i++) {
             View v = toolViews[i];
             if (basicIds.contains(TOOL_IDS[i])) { capTools.addView(v, at++); continue; }
-            boolean action = TOOL_IDS[i].equals("beautify") || TOOL_IDS[i].equals("totext") || TOOL_IDS[i].equals("layers");
+            boolean action = TOOL_IDS[i].equals("beautify") || TOOL_IDS[i].equals("totext")
+                    || TOOL_IDS[i].equals("layers") || TOOL_IDS[i].equals("record");
             if (action && anyTool && !anyAction) advRow.addView(advDiv1); // tools, then actions on the selection / page
             advRow.addView(v);
             if (action) anyAction = true; else anyTool = true;
@@ -1629,9 +1654,153 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     // ---- layers: one list for the whole notebook; new writing goes on the active one -----------------------------
 
-    private Ui.IconButton layersB;
+    private Ui.IconButton layersB, recordB;
     private View toLayerB;
     private LinearLayout layersBox; // the open Layers panel's list (redrawn when the engine reports a change)
+
+    // ---- canvas video recording (canvas-only GL capture + optional mic audio) ----------------------------
+
+    private RecordOverlay recordOverlay;
+    private CanvasRecorder recorder;
+    private Engine recordingEngine;
+    private CanvasRecorder.Settings recordSettings;
+    private boolean pendingRecordStart;
+
+    private void ensureRecordOverlay() {
+        if (recordSettings == null) recordSettings = CanvasRecorder.Settings.load(prefs);
+        if (recordOverlay != null) return;
+        recordOverlay = new RecordOverlay(this, new RecordOverlay.Host() {
+            @Override public CanvasRecorder.Settings getSettings() { return recordSettings; }
+            @Override public void onSettingsChanged(CanvasRecorder.Settings s) {
+                recordSettings = s;
+                s.save(prefs);
+            }
+            @Override public int getCanvasWidth() {
+                int w = panes[focusPane] != null ? panes[focusPane].getWidth() : 0;
+                return w > 0 ? w : (root.getWidth() > 0 ? root.getWidth() : 1080);
+            }
+            @Override public int getCanvasHeight() {
+                int h = panes[focusPane] != null ? panes[focusPane].getHeight() : 0;
+                return h > 0 ? h : (root.getHeight() > 0 ? root.getHeight() : 1920);
+            }
+            @Override public void onStartRecording() { startRecordingWithPermission(); }
+            @Override public void onPauseResume() { toggleRecordPauseResume(); }
+            @Override public void onStopRecording() { stopRecording(false); }
+            @Override public void onToggleMicMute() {
+                if (recorder == null || !recorder.hasAudio()) return;
+                boolean muted = !recorder.isMicMuted();
+                recorder.setMicMuted(muted);
+                recordOverlay.setMicMuted(muted);
+                toast(muted ? "Microphone muted" : "Microphone unmuted");
+            }
+            @Override public void onCloseOverlay() {
+                if ((recorder != null && recorder.isActive()) || recordOverlay.isSaving()) return;
+                recordOverlay.hide();
+            }
+        });
+    }
+
+    private void confirmStopRecordingBeforeLeaving() {
+        new AlertDialog.Builder(this)
+                .setTitle("Recording in progress")
+                .setMessage("Stop recording and save your video to Gallery before leaving?")
+                .setPositiveButton("Stop & save", (d, w) -> stopRecording(true))
+                .setNegativeButton("Keep recording", null)
+                .show();
+    }
+
+    private void openRecordOverlay() {
+        ensureRecordOverlay();
+        if (recordOverlay.isVisible()) {
+            if (recorder == null && !recordOverlay.isSaving()) recordOverlay.hide();
+            else { recordOverlay.container.bringToFront(); recordOverlay.clampLater(); }
+            return;
+        }
+        int topY = Ui.dp(this, 68);
+        if (capLeft != null && capLeft.getBottom() > 0) topY = capLeft.getBottom() + Ui.dp(this, 10);
+        recordOverlay.show(root, topY);
+    }
+
+    private void startRecordingWithPermission() {
+        if (recorder != null && recorder.isActive()) return;
+        ensureRecordOverlay();
+        if (recordSettings.recordAudio
+                && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            pendingRecordStart = true;
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, REQ_RECORD_AUDIO);
+            return;
+        }
+        beginRecording(recordSettings.recordAudio);
+    }
+
+    private void beginRecording(boolean allowAudio) {
+        if (engine == null) { toast("Canvas is not ready yet"); return; }
+        ensureRecordOverlay();
+        int cw = panes[focusPane] != null ? panes[focusPane].getWidth() : root.getWidth();
+        int ch = panes[focusPane] != null ? panes[focusPane].getHeight() : root.getHeight();
+        if (cw <= 0 || ch <= 0) { toast("Canvas is not ready yet"); return; }
+        String title = state != null && state.title != null && !state.title.trim().isEmpty()
+                ? state.title : (cur != null && cur.title != null ? cur.title : "Notebook");
+        try {
+            CanvasRecorder rec = CanvasRecorder.start(this, title, cw, ch, recordSettings, allowAudio);
+            recorder = rec;
+            recordingEngine = engine;
+            engine.setRecorder(rec);
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            if (recordB != null) recordB.setSel(true);
+            recordOverlay.setRecording(rec, false);
+            if (rec.getNotice() != null) toast(rec.getNotice());
+        } catch (Exception e) {
+            Log.e(Gl.TAG, "start recording", e);
+            toast("Couldn't start recording");
+            if (recordOverlay != null) recordOverlay.setReady();
+        }
+    }
+
+    private void toggleRecordPauseResume() {
+        if (recorder == null || !recorder.isActive()) return;
+        if (recorder.isPaused()) {
+            recorder.resume();
+            recordOverlay.setRecording(recorder, false);
+        } else {
+            recorder.pause();
+            recordOverlay.setRecording(recorder, true);
+        }
+    }
+
+    private void stopRecording(boolean finishAfter) {
+        final CanvasRecorder rec = recorder;
+        if (rec == null) return;
+        recorder = null;
+        final Engine eng = recordingEngine;
+        recordingEngine = null;
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (recordB != null) recordB.setSel(false);
+        if (recordOverlay != null) recordOverlay.setSaving();
+        if (eng != null) eng.detachRecorderSync();
+        rec.stopAsync(res -> {
+            if (isDestroyed()) return;
+            if (recordOverlay != null) recordOverlay.setReady();
+            if (res.error != null) {
+                toast(res.error);
+            } else {
+                toast("Saved to Movies/Nib · " + RecordOverlay.formatDuration(res.durationMs));
+            }
+            if (finishAfter && !isFinishing()) finish();
+        });
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, String[] perms, int[] grants) {
+        super.onRequestPermissionsResult(req, perms, grants);
+        if (req == REQ_RECORD_AUDIO) {
+            if (!pendingRecordStart) return;
+            pendingRecordStart = false;
+            boolean granted = grants.length > 0 && grants[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            if (!granted) toast("Microphone denied · recording video only");
+            beginRecording(granted);
+        }
+    }
 
     private String layersSummary() {
         if (state == null || state.layerIds.length < 2) return "Keep writing apart: e.g. lecture, notes, answers";
@@ -5601,6 +5770,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         if (textEdit != null) { commitTextEdit(); return; }
         if (sheet != null) { closeSettings(); return; }
         if (pagesPanel != null) { closePages(); return; }
+        if (recordOverlay != null && recordOverlay.isSaving()) { toast("Finalizing video…"); return; }
+        if (recorder != null && recorder.isActive()) { confirmStopRecordingBeforeLeaving(); return; }
+        if (recordOverlay != null && recordOverlay.isVisible()) { recordOverlay.hide(); return; }
         if (state != null && state.hasSelection) { engine.clearSelectionAsync(); return; }
         super.onBackPressed();
     }
@@ -5608,6 +5780,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     @Override
     protected void onPause() {
         super.onPause();
+        if (recorder != null && recorder.isCapturing()) {
+            recorder.pause();
+            if (recordOverlay != null) recordOverlay.setRecording(recorder, true);
+        }
         commitTextEdit();
         if (pop != null) pop.dismiss();
         for (Doc d : docs) {
@@ -5624,6 +5800,13 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     @Override
     protected void onDestroy() {
+        if (recorder != null) {
+            if (recordingEngine != null) recordingEngine.detachRecorderSync();
+            recorder.abortSync();
+            recorder = null;
+            recordingEngine = null;
+        }
+        if (recordOverlay != null) recordOverlay.dismissDialogs();
         if (activeProgress != null) { activeProgress.dismiss(); activeProgress = null; }
         super.onDestroy();
         for (Doc d : docs) if (d.engine != null) d.engine.release();

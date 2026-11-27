@@ -1036,4 +1036,23 @@ final class ShapeSpec {
         draw(c, it, darkPaper);
         return bm;
     }
+
+    /** Fast bounded-size rasterisation of a live SHAPE preview for real-time recording frames. */
+    static Bitmap toPreviewBitmap(Notebook.Item it, float scale, int maxDim, boolean darkPaper) {
+        RectF rb = renderBounds(it);
+        float rw = Math.max(1f, rb.width()), rh = Math.max(1f, rb.height());
+        float sc = Math.max(0.5f, scale);
+        float maxSide = Math.max(rw, rh) * sc;
+        if (maxSide > maxDim) sc *= maxDim / maxSide;
+        int bw = Math.max(2, Math.min(maxDim, (int) Math.ceil(rw * sc)));
+        int bh = Math.max(2, Math.min(maxDim, (int) Math.ceil(rh * sc)));
+        float sx = bw / rw;
+        float sy = bh / rh;
+        Bitmap bm = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(bm);
+        c.scale(sx, sy);
+        c.translate(-rb.left, -rb.top);
+        draw(c, it, darkPaper);
+        return bm;
+    }
 }
