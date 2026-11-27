@@ -72,6 +72,7 @@ public final class ExportProvider extends ContentProvider {
         if (low.endsWith(".png")) return "image/png";
         if (low.endsWith(".jpg") || low.endsWith(".jpeg")) return "image/jpeg";
         if (low.endsWith(".zip")) return "application/zip";
+        if (low.endsWith(".mp4")) return "video/mp4";
         return "application/octet-stream";
     }
 

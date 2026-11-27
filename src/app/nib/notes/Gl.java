@@ -31,17 +31,22 @@ final class Gl {
     static final int EGL_FRONT_BUFFER_AUTO_REFRESH_ANDROID = 0x314C;
     static final int EGL_CONTEXT_PRIORITY_LEVEL_IMG = 0x3100;
     static final int EGL_CONTEXT_PRIORITY_HIGH_IMG = 0x3101;
+    static final int EGL_RECORDABLE_ANDROID = 0x3142;
 
     EGLDisplay dpy;
     EGLConfig cfg;
+    EGLConfig recordCfg;
     EGLContext ctx;
+    EGLContext encCtx = EGL14.EGL_NO_CONTEXT;
     EGLSurface surf = EGL14.EGL_NO_SURFACE;
+    EGLSurface encSurf = EGL14.EGL_NO_SURFACE;
+    int encW, encH;
     boolean mutable;
     int W, H;
     float ox, oy, z = 1f;
 
-    private int quad, segProg, pageProg, blitProg, texProg;
-    private int sView, sSize, sMode, sXf, sXt, sClip, pView, pSize, pPage, pBg, pShadow, pPal, pOrigin, pStyle, pLook, pLine, pMarg, bTex;
+    private int quad, segProg, pageProg, blitProg, scaleBlitProg, texProg;
+    private int sView, sSize, sMode, sXf, sXt, sClip, pView, pSize, pPage, pBg, pShadow, pPal, pOrigin, pStyle, pLook, pLine, pMarg, bTex, sbTex;
     // page look for the next page() call (Notebook.Page spacing / strength / lineColor / margins)
     private float lookK = 1, lookS = 1;
     private int lookColor, lookMargins;
@@ -60,9 +65,14 @@ final class Gl {
         dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
         int[] v = new int[2];
         EGL14.eglInitialize(dpy, v, 0, v, 1);
-        cfg = choose(true);
+        cfg = choose(true, true);
+        if (cfg == null) cfg = choose(true, false);
         mutable = cfg != null;
-        if (cfg == null) cfg = choose(false);
+        if (cfg == null) cfg = choose(false, true);
+        if (cfg == null) cfg = choose(false, false);
+        recordCfg = choose(false, true);
+        if (recordCfg == null) recordCfg = choose(false, false);
+        if (recordCfg == null) recordCfg = cfg;
         ctx = EGL14.eglCreateContext(dpy, cfg, EGL14.EGL_NO_CONTEXT, new int[]{
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 3,
                 EGL_CONTEXT_PRIORITY_LEVEL_IMG, EGL_CONTEXT_PRIORITY_HIGH_IMG, EGL14.EGL_NONE}, 0);
@@ -75,12 +85,22 @@ final class Gl {
         Log.i(TAG, "EGL ready, mutable render buffer=" + mutable);
     }
 
-    private EGLConfig choose(boolean mut) {
-        int[] a = {EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+    private EGLConfig choose(boolean mut, boolean recordable) {
+        int surfType = EGL14.EGL_WINDOW_BIT | (mut ? EGL_MUTABLE_RENDER_BUFFER_BIT_KHR : 0);
+        int[] a = recordable ? new int[]{
+                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_DEPTH_SIZE, 0, EGL14.EGL_STENCIL_SIZE, 0,
                 EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
-                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT | (mut ? EGL_MUTABLE_RENDER_BUFFER_BIT_KHR : 0),
-                EGL14.EGL_NONE};
+                EGL14.EGL_SURFACE_TYPE, surfType,
+                EGL_RECORDABLE_ANDROID, 1,
+                EGL14.EGL_NONE
+        } : new int[]{
+                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_DEPTH_SIZE, 0, EGL14.EGL_STENCIL_SIZE, 0,
+                EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
+                EGL14.EGL_SURFACE_TYPE, surfType,
+                EGL14.EGL_NONE
+        };
         EGLConfig[] c = new EGLConfig[16];
         int[] n = new int[1];
         if (!EGL14.eglChooseConfig(dpy, a, 0, c, 0, c.length, n, 0) || n[0] == 0) return null;
@@ -140,9 +160,131 @@ final class Gl {
     void flush() { glFlush(); }
 
     void release() {
+        detachEncoderSurface();
         dropSurface();
         if (ctx != null) EGL14.eglDestroyContext(dpy, ctx);
         EGL14.eglTerminate(dpy);
+    }
+
+    /** Wraps a MediaCodec input Surface in an EGLSurface compatible with our GL context. */
+    boolean attachEncoderSurface(Surface s, int w, int h) {
+        detachEncoderSurface();
+        if (s == null || dpy == null || ctx == null) return false;
+
+        // 1. Prefer creating encSurf with main cfg + ctx (zero context switching when cfg is recordable)
+        EGLSurface es = tryCreateAndBind(cfg, ctx, s);
+        if (es == EGL14.EGL_NO_SURFACE && recordCfg != null && recordCfg != cfg) {
+            // 2. Fallback: create a shared ES3 context on recordCfg so eglMakeCurrent always matches configs
+            EGLContext shared = EGL14.eglCreateContext(dpy, recordCfg, ctx, new int[]{
+                    EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE}, 0);
+            if (shared != null && shared != EGL14.EGL_NO_CONTEXT) {
+                es = tryCreateAndBind(recordCfg, shared, s);
+                if (es != EGL14.EGL_NO_SURFACE) {
+                    encCtx = shared;
+                } else {
+                    EGL14.eglDestroyContext(dpy, shared);
+                }
+            }
+        }
+        if (es == EGL14.EGL_NO_SURFACE) {
+            Log.e(TAG, "attachEncoderSurface failed: eglError=0x" + Integer.toHexString(EGL14.eglGetError()));
+            return false;
+        }
+        encSurf = es;
+        encW = w;
+        encH = h;
+        return true;
+    }
+
+    private EGLSurface tryCreateAndBind(EGLConfig c, EGLContext context, Surface s) {
+        EGLSurface es = EGL14.eglCreateWindowSurface(dpy, c, s, new int[]{EGL14.EGL_NONE}, 0);
+        if (es == null || es == EGL14.EGL_NO_SURFACE) return EGL14.EGL_NO_SURFACE;
+        boolean ok = EGL14.eglMakeCurrent(dpy, es, es, context);
+        restoreMainContext();
+        if (!ok) {
+            EGL14.eglDestroySurface(dpy, es);
+            return EGL14.EGL_NO_SURFACE;
+        }
+        return es;
+    }
+
+    private void restoreMainContext() {
+        if (surf != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglMakeCurrent(dpy, surf, surf, ctx);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, W, H);
+        } else {
+            EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, ctx);
+        }
+    }
+
+    void detachEncoderSurface() {
+        if (encSurf != EGL14.EGL_NO_SURFACE || encCtx != EGL14.EGL_NO_CONTEXT) {
+            restoreMainContext();
+        }
+        if (encSurf != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglDestroySurface(dpy, encSurf);
+            encSurf = EGL14.EGL_NO_SURFACE;
+            encW = encH = 0;
+        }
+        if (encCtx != EGL14.EGL_NO_CONTEXT) {
+            EGL14.eglDestroyContext(dpy, encCtx);
+            encCtx = EGL14.EGL_NO_CONTEXT;
+        }
+    }
+
+    boolean hasEncoderSurface() { return encSurf != EGL14.EGL_NO_SURFACE; }
+
+    /**
+     * Switches to the encoder EGLSurface, clears letterbox areas with deskColor, sets the aspect-preserved
+     * Fit/Fill viewport, and linearly blits the cache texture into it. Caller may draw live pred segments
+     * immediately after, then MUST call endEncoderFrame(ptsNs).
+     */
+    boolean beginEncoderFrame(int deskColor, boolean fillFrame) {
+        if (encSurf == EGL14.EGL_NO_SURFACE || tex == 0 || W <= 0 || H <= 0 || encW <= 0 || encH <= 0) return false;
+        EGLContext targetCtx = encCtx != EGL14.EGL_NO_CONTEXT ? encCtx : ctx;
+        if (targetCtx != ctx) glFlush();
+        if (!EGL14.eglMakeCurrent(dpy, encSurf, encSurf, targetCtx)) {
+            Log.e(TAG, "beginEncoderFrame eglMakeCurrent failed: 0x" + Integer.toHexString(EGL14.eglGetError()));
+            restoreMainContext();
+            return false;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDisable(GL_SCISSOR_TEST);
+        glViewport(0, 0, encW, encH);
+        clear(deskColor);
+        float sx = encW / (float) W, sy = encH / (float) H;
+        float sc = fillFrame ? Math.max(sx, sy) : Math.min(sx, sy);
+        int vw = Math.max(1, Math.round(W * sc));
+        int vh = Math.max(1, Math.round(H * sc));
+        int vx = (encW - vw) / 2;
+        int vy = (encH - vh) / 2;
+        glViewport(vx, vy, vw, vh);
+        blitScaled();
+        return true;
+    }
+
+    /** Presents the encoder frame with its monotonic timestamp and restores the main window surface. */
+    void endEncoderFrame(long ptsNs) {
+        if (encSurf != EGL14.EGL_NO_SURFACE) {
+            EGLExt.eglPresentationTimeANDROID(dpy, encSurf, ptsNs);
+            EGL14.eglSwapBuffers(dpy, encSurf);
+        }
+        restoreMainContext();
+    }
+
+    private void blitScaled() {
+        glDisable(GL_BLEND);
+        glUseProgram(scaleBlitProg);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glUniform1i(sbTex, 0);
+        bindQuad();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     }
 
     // ---- targets -------------------------------------------------------------------------
@@ -309,6 +451,22 @@ final class Gl {
         android.opengl.GLUtils.texImage2D(GL_TEXTURE_2D, 0, b, 0);
         glGenerateMipmap(GL_TEXTURE_2D);
         return t[0];
+    }
+
+    /** Uploads a transient preview bitmap with linear filtering (no mipmaps), reusing texId if non-zero. */
+    int uploadLinear(int texId, android.graphics.Bitmap b) {
+        if (texId == 0) {
+            int[] t = new int[1];
+            glGenTextures(1, t, 0);
+            texId = t[0];
+        }
+        glBindTexture(GL_TEXTURE_2D, texId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        android.opengl.GLUtils.texImage2D(GL_TEXTURE_2D, 0, b, 0);
+        return texId;
     }
 
     void deleteTex(int id) { glDeleteTextures(1, new int[]{id}, 0); }
@@ -578,6 +736,14 @@ final class Gl {
             + "precision mediump float; uniform sampler2D uTex; out vec4 o;\n"
             + "void main(){ o=texelFetch(uTex, ivec2(gl_FragCoord.xy), 0); }\n";
 
+    private static final String SCALE_BLIT_VS = "#version 300 es\n"
+            + "layout(location=0) in vec2 aCorner; out vec2 vUv;\n"
+            + "void main(){ vUv=aCorner*0.5+0.5; gl_Position=vec4(aCorner,0.0,1.0); }\n";
+
+    private static final String SCALE_BLIT_FS = "#version 300 es\n"
+            + "precision mediump float; uniform sampler2D uTex; in vec2 vUv; out vec4 o;\n"
+            + "void main(){ o=texture(uTex, vUv); }\n";
+
     private void buildPrograms() {
         segProg = program(SEG_VS, SEG_FS);
         sView = glGetUniformLocation(segProg, "uView");
@@ -607,6 +773,8 @@ final class Gl {
         pMarg = glGetUniformLocation(pageProg, "uMarg");
         blitProg = program(BLIT_VS, BLIT_FS);
         bTex = glGetUniformLocation(blitProg, "uTex");
+        scaleBlitProg = program(SCALE_BLIT_VS, SCALE_BLIT_FS);
+        sbTex = glGetUniformLocation(scaleBlitProg, "uTex");
         int[] b = new int[1];
         glGenBuffers(1, b, 0);
         quad = b[0];

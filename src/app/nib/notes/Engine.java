@@ -134,6 +134,8 @@ final class Engine implements Choreographer.FrameCallback {
     private int deskColor = 0xffe7e9ee, predMode;
     private float shadow = 0.10f;
     private String frontWhy = "";
+    private volatile CanvasRecorder recorder;
+    private final Runnable recTick = this::onRecordTick;
 
     // temporary visual grid overlay + optional snapping (never persisted to pages or exports)
     private volatile GridOverlay.Config gridConfig;
@@ -1198,12 +1200,14 @@ final class Engine implements Choreographer.FrameCallback {
                     ShapeSpec sp = ShapeSpec.of(it).copy();
                     if (sp.strokeAlpha == 0 && sp.fillStyle != ShapeSpec.STYLE_OUTLINE) sp.fillColor = rgb;
                     else sp.strokeColor = rgb;
-                    ni.add(ShapeSpec.withSpec(it, sp));
+                    Notebook.Item updated = ShapeSpec.withSpec(it, sp);
+                    dropShapeTexture(it);
+                    primeShapeHandoff(updated);
+                    ni.add(updated);
                 } else {
                     ni.add(it);
                 }
             }
-            dropShapeTextures();
             replaceSelection(ns, ni, true);
         });
     }
@@ -1216,9 +1220,10 @@ final class Engine implements Choreographer.FrameCallback {
             if (!itemShapeMode()) return;
             Notebook.Item cur = selItems.get(0);
             Notebook.Item next = ShapeSpec.withSpec(cur, cp);
+            dropShapeTexture(cur);
+            primeShapeHandoff(next);
             ArrayList<Notebook.Item> ni = new ArrayList<>();
             ni.add(next);
-            dropShapeTextures();
             replaceSelection(new ArrayList<>(), ni, true);
         });
     }
@@ -1372,6 +1377,13 @@ final class Engine implements Choreographer.FrameCallback {
             needRebuild = true;
             wantFront = true;
             renderNow();
+            CanvasRecorder rec = recorder;
+            if (rec != null && rec.isActive() && !gl.hasEncoderSurface() && rec.getInputSurface() != null) {
+                if (gl.attachEncoderSurface(rec.getInputSurface(), rec.getWidth(), rec.getHeight())) {
+                    encodeFrame(false, true);
+                    scheduleRecordTick();
+                }
+            }
             try {
                 s.setFrameRate(144f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
             } catch (Exception ignored) {
@@ -1383,7 +1395,9 @@ final class Engine implements Choreographer.FrameCallback {
         CountDownLatch done = new CountDownLatch(1);
         h.post(() -> {
             Diag.log(dir.getName() + ": surface gone");
+            h.removeCallbacks(recTick);
             if (gl != null) {
+                gl.detachEncoderSurface();
                 if (gl.hasSurface()) dropGpu(); // a hidden tab or the app in the background keeps no ink or textures
                 gl.dropSurface();
             }
@@ -1393,6 +1407,166 @@ final class Engine implements Choreographer.FrameCallback {
         try {
             done.await(1, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {
+        }
+    }
+
+    /** Attaches or detaches a canvas-only video recorder on this engine's GL thread. */
+    void setRecorder(CanvasRecorder rec) {
+        h.post(() -> {
+            h.removeCallbacks(recTick);
+            recorder = rec;
+            if (gl == null) return;
+            if (rec == null) {
+                dropRecShapeTex();
+                gl.detachEncoderSurface();
+                wantFront = true;
+                needPresent = true;
+                requestFrame();
+                return;
+            }
+            if (front) {
+                gl.requestFront(false);
+                wantFront = false;
+                setFront(false, "recording");
+            }
+            if (gl.hasSurface() && rec.getInputSurface() != null) {
+                if (gl.attachEncoderSurface(rec.getInputSurface(), rec.getWidth(), rec.getHeight())) {
+                    if (book != null && cacheValid()) encodeFrame(false, true);
+                    else if (book != null) renderNow();
+                    else { needCache = true; requestFrame(); }
+                }
+            }
+            scheduleRecordTick();
+        });
+    }
+
+    /** Synchronously detaches the active recorder EGLSurface (required before tab switch or MediaCodec EOS). */
+    void detachRecorderSync() {
+        CountDownLatch done = new CountDownLatch(1);
+        boolean posted = h.post(() -> {
+            h.removeCallbacks(recTick);
+            recorder = null;
+            dropRecShapeTex();
+            if (gl != null) gl.detachEncoderSurface();
+            wantFront = true;
+            needPresent = true;
+            requestFrame();
+            done.countDown();
+        });
+        if (!posted) return;
+        try {
+            done.await(1500, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
+    private void scheduleRecordTick() {
+        h.removeCallbacks(recTick);
+        CanvasRecorder rec = recorder;
+        if (rec == null || !rec.isActive()) return;
+        int delayMs = Math.max(12, 1000 / Math.max(1, rec.getFps()));
+        h.postDelayed(recTick, delayMs);
+    }
+
+    private void onRecordTick() {
+        CanvasRecorder rec = recorder;
+        if (rec == null || !rec.isActive()) return;
+        if (rec.isCapturing() && gl != null && gl.hasSurface() && book != null) {
+            if (!gl.hasEncoderSurface() && rec.getInputSurface() != null) {
+                gl.attachEncoderSurface(rec.getInputSurface(), rec.getWidth(), rec.getHeight());
+            }
+            if (gl.hasEncoderSurface()) {
+                boolean transientMode = gesturing || flinging || dragging() || laserActive() || gest == G_TAPE;
+                if (!transientMode && !cacheValid()) {
+                    renderNow();
+                } else if (System.nanoTime() - rec.lastFrameWallNs() >= rec.minFrameSpacingNs()) {
+                    encodeFrame(true, true);
+                }
+            }
+        }
+        scheduleRecordTick();
+    }
+
+    private static final class ShapeHandoff {
+        final int texId;
+        final RectF bounds;
+        ShapeHandoff(int texId, RectF bounds) { this.texId = texId; this.bounds = bounds; }
+    }
+
+    private final IdentityHashMap<Notebook.Item, ShapeHandoff> shapeHandoffs = new IdentityHashMap<>();
+    private int recShapeTex;
+    private Notebook.Item recShapeItem;
+    private final RectF recShapeBounds = new RectF();
+
+    private void dropRecShapeTex() {
+        if (recShapeTex != 0 && gl != null) gl.deleteTex(recShapeTex);
+        recShapeTex = 0;
+        recShapeItem = null;
+    }
+
+    private void dropShapeHandoffs() {
+        if (gl != null) {
+            for (ShapeHandoff ho : shapeHandoffs.values()) gl.deleteTex(ho.texId);
+        }
+        shapeHandoffs.clear();
+    }
+
+    /**
+     * Ensures a newly committed or edited SHAPE has an immediate GPU texture ready before the
+     * async high-res {@link ShapeSpec#toBitmap} finishes, eliminating the 1–3 frame blink.
+     */
+    private void primeShapeHandoff(Notebook.Item item) {
+        if (item == null || item.type != Notebook.Item.SHAPE || gl == null || !gl.hasSurface() || book == null) return;
+        ShapeHandoff prev = shapeHandoffs.remove(item);
+        if (prev != null) gl.deleteTex(prev.texId);
+        if (item == recShapeItem && recShapeTex != 0) {
+            shapeHandoffs.put(item, new ShapeHandoff(recShapeTex, new RectF(recShapeBounds)));
+            recShapeTex = 0;
+            recShapeItem = null;
+            return;
+        }
+        float sc = Math.max(1.5f, Math.min(3f, z * 1.25f));
+        Bitmap bm = ShapeSpec.toPreviewBitmap(item, sc, 1280, Notebook.isDarkPaper(book.paper));
+        int tid = gl.uploadLinear(0, bm);
+        bm.recycle();
+        shapeHandoffs.put(item, new ShapeHandoff(tid, ShapeSpec.renderBounds(item)));
+    }
+
+    private void encodeFrame(boolean includeOverlay, boolean force) {
+        CanvasRecorder rec = recorder;
+        if (rec == null || !rec.isCapturing() || gl == null || !gl.hasEncoderSurface()) return;
+        if (!force && System.nanoTime() - rec.lastFrameWallNs() < rec.minFrameSpacingNs()) return;
+
+        // Upload live shape preview (during drag-create or handle resize/rotate) on main GL context
+        Notebook.Item liveSh = liveDraftShape != null ? liveDraftShape : liveEditShape;
+        int liveShPage = liveDraftShape != null ? shPage : selPage;
+        boolean hasLiveSh = liveSh != null && book != null && liveShPage >= 0 && liveShPage < tops.length;
+        if (hasLiveSh) {
+            if (liveSh != recShapeItem) {
+                float sc = Math.max(1.5f, Math.min(3f, z * 1.25f));
+                Bitmap bm = ShapeSpec.toPreviewBitmap(liveSh, sc, 1280, Notebook.isDarkPaper(book.paper));
+                recShapeTex = gl.uploadLinear(recShapeTex, bm);
+                bm.recycle();
+                recShapeBounds.set(ShapeSpec.renderBounds(liveSh));
+                recShapeItem = liveSh;
+            }
+        } else if (recShapeTex != 0) {
+            dropRecShapeTex();
+        }
+
+        if (gl.beginEncoderFrame(deskColor, rec.isFillFrame())) {
+            if (includeOverlay && overlay && gl.pred.count > 0) {
+                gl.setView(ox, oy, z);
+                gl.drawSegs(gl.pred, 0, gl.pred.count, predMode);
+            }
+            if (hasLiveSh && recShapeTex != 0) {
+                gl.setView(ox, oy, z);
+                gl.resetXform();
+                gl.tex(recShapeTex, recShapeBounds.left, recShapeBounds.top + tops[liveShPage],
+                        recShapeBounds.width(), recShapeBounds.height(), 1f);
+            }
+            gl.endEncoderFrame(rec.nextVideoPtsNs());
+            rec.drainVideo(false);
         }
     }
 
@@ -1490,6 +1664,8 @@ final class Engine implements Choreographer.FrameCallback {
     void release() {
         h.post(() -> {
             h.removeCallbacks(saveR);
+            h.removeCallbacks(recTick);
+            recorder = null;
             if (book != null && dirtyDoc) save();
             if (choreo != null) choreo.removeFrameCallback(this);
             if (gl != null) gl.release();
@@ -1633,12 +1809,27 @@ final class Engine implements Choreographer.FrameCallback {
             if (front) gl.requestFront(false);
             wantFront = false;
             gl.setView(ox, oy, z);
-            gl.bindWindow();
-            gl.noScissor();
-            drawScene();
-            if (laser) drawLaser();
-            if (taping) drawTapeDraft();
-            gl.swap();
+            boolean recOn = recorder != null && recorder.isCapturing() && gl.hasEncoderSurface();
+            if (recOn) {
+                gl.bindCache();
+                gl.noScissor();
+                drawScene();
+                if (laser) drawLaser(true);
+                if (taping) drawTapeDraft();
+                needCache = true;
+                gl.bindWindow();
+                gl.noScissor();
+                gl.blit();
+                gl.swap();
+                encodeFrame(false, false);
+            } else {
+                gl.bindWindow();
+                gl.noScissor();
+                drawScene();
+                if (laser) drawLaser(false);
+                if (taping) drawTapeDraft();
+                gl.swap();
+            }
             postViewport(false);
             setFront(gl.isFront(), dragging() ? "moving selection" : flinging ? "fling" : "pan/zoom");
             checkPage();
@@ -1714,7 +1905,7 @@ final class Engine implements Choreographer.FrameCallback {
         return laserDown || hovering || !laserPts.isEmpty() || SystemClock.uptimeMillis() - laserUpAt < LASER_TIP;
     }
 
-    private void drawLaser() {
+    private void drawLaser(boolean toCache) {
         long now = SystemClock.uptimeMillis();
         boolean live = laserDown || hovering;
         float inkA = 1f; // vanishing ink: everything fades together once the pen has rested long enough
@@ -1768,7 +1959,7 @@ final class Engine implements Choreographer.FrameCallback {
         // overlap, the glow no longer doubles up into darker dots
         gl.bindOverlay();
         gl.drawSegs(b, 0, b.count, 4);
-        gl.bindWindow();
+        if (toCache) gl.bindCache(); else gl.bindWindow();
         gl.noScissor();
         gl.blitOverlay();
         if (laserActive()) requestFrame();
@@ -2167,9 +2358,16 @@ final class Engine implements Choreographer.FrameCallback {
                 Tex o = texs.get(base + l);
                 if (o != null) { t = o; break; }
             }
+            ShapeHandoff ho = shapeHandoffs.get(it);
             if (t != null) {
+                if (ho != null) {
+                    shapeHandoffs.remove(it);
+                    gl.deleteTex(ho.texId);
+                }
                 RectF rb = ShapeSpec.renderBounds(it);
                 gl.tex(t.id, rb.left, rb.top + top, rb.width(), rb.height(), 1f);
+            } else if (ho != null) {
+                gl.tex(ho.texId, ho.bounds.left, ho.bounds.top + top, ho.bounds.width(), ho.bounds.height(), 1f);
             }
             return;
         }
@@ -2230,7 +2428,24 @@ final class Engine implements Choreographer.FrameCallback {
         }
     }
 
+    private void dropShapeTexture(Notebook.Item item) {
+        if (item == null) return;
+        String prefix = "shp:" + System.identityHashCode(item) + ":";
+        Iterator<Map.Entry<String, Tex>> it = texs.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, Tex> e = it.next();
+            if (e.getKey().startsWith(prefix)) {
+                gl.deleteTex(e.getValue().id);
+                texBytes -= e.getValue().bytes;
+                it.remove();
+            }
+        }
+        ShapeHandoff ho = shapeHandoffs.remove(item);
+        if (ho != null && gl != null) gl.deleteTex(ho.texId);
+    }
+
     private void dropShapeTextures() {
+        dropShapeHandoffs();
         Iterator<Map.Entry<String, Tex>> it = texs.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<String, Tex> e = it.next();
@@ -2339,8 +2554,8 @@ final class Engine implements Choreographer.FrameCallback {
         return !needCache && !needRebuild && ox == cacheOx && oy == cacheOy && z == cacheZ && W == cacheW && H == cacheH;
     }
 
-    /** Front-buffer ink is possible here (the GPU offers it and the system hasn't kept refusing it). */
-    private boolean canFront() { return gl.mutable && frontRefused < FRONT_TRIES; }
+    /** Front-buffer ink is possible here (the GPU offers it, recording isn't active, and the system hasn't kept refusing it). */
+    private boolean canFront() { return recorder == null && gl.mutable && frontRefused < FRONT_TRIES; }
 
     /**
      * Set when the picture changes without a pen on the screen (a texture finished on the worker). In front-buffer
@@ -2383,6 +2598,7 @@ final class Engine implements Choreographer.FrameCallback {
             }
             setFront(f, "present");
         }
+        encodeFrame(true, false);
         checkPage();
         if (hasSel()) postSelection();
     }
@@ -2693,6 +2909,8 @@ final class Engine implements Choreographer.FrameCallback {
     /** Frees all GPU memory this engine holds except what's needed to draw again (surface gone / changed). */
     private void dropGpu() {
         dropHandoff();
+        dropShapeHandoffs();
+        dropRecShapeTex();
         for (PageInk pk : inks.values()) pk.free();
         inks.clear();
         gl.pen.lost();
@@ -4069,6 +4287,7 @@ final class Engine implements Choreographer.FrameCallback {
                 final float pox = ox, poy = oy, pz = z, ptop = top;
                 final boolean dk = Notebook.isDarkPaper(book.paper);
                 main.post(() -> listener.onShapeOverlay(preview, pox, poy, pz, ptop, dk, null, null, null));
+                encodeFrame(false, false);
             }
             return;
         }
@@ -4112,10 +4331,12 @@ final class Engine implements Choreographer.FrameCallback {
             p.items().add(made);
             push(new PageEdit(p, before, pageState(p)));
             if (shPage == book.pages.size() - 1) ensureTrailingPage();
+            primeShapeHandoff(made);
             ArrayList<Notebook.Item> one = new ArrayList<>();
             one.add(made);
             select(shPage, new ArrayList<>(), one);
             edited();
+            if (gl != null && gl.hasSurface()) renderNow();
         }
     }
 
@@ -4202,7 +4423,12 @@ final class Engine implements Choreographer.FrameCallback {
             itemShapeBefore = pageState(p);
             itemShapeIdx = p.items().indexOf(itemShapeOrig);
             if (itemShapeIdx < 0) { itemShapeHandle = -1; liveEditShape = null; }
-            else { needCache = true; requestFrame(); postSelection(); }
+            else {
+                needCache = true;
+                if (gl != null && gl.hasSurface()) renderNow();
+                else requestFrame();
+                postSelection();
+            }
             return;
         }
         if (shapeHandle >= 0) {
@@ -4232,6 +4458,7 @@ final class Engine implements Choreographer.FrameCallback {
                 }
                 liveEditShape = ShapeSpec.dragHandle(itemShapeOrig, itemShapeHandle, px, py, shapeLockCircle);
                 postSelection();
+                encodeFrame(false, false);
             } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
                 gest = G_NONE;
                 penNear = SystemClock.uptimeMillis();
@@ -4241,11 +4468,13 @@ final class Engine implements Choreographer.FrameCallback {
                 if (a == MotionEvent.ACTION_UP && finalItem != null && finalItem != itemShapeOrig && itemShapeIdx >= 0 && itemShapeIdx < p.items().size()) {
                     p.items().set(itemShapeIdx, finalItem);
                     push(new PageEdit(p, itemShapeBefore, pageState(p)));
-                    dropShapeTextures();
+                    dropShapeTexture(itemShapeOrig);
+                    primeShapeHandoff(finalItem);
                     ArrayList<Notebook.Item> one = new ArrayList<>();
                     one.add(finalItem);
                     select(selPage, new ArrayList<>(), one);
                     edited();
+                    if (gl != null && gl.hasSurface()) renderNow();
                 } else {
                     needCache = true;
                     wantFront = true;
@@ -4305,11 +4534,17 @@ final class Engine implements Choreographer.FrameCallback {
                 ArrayList<Stroke> ns = new ArrayList<>();
                 ArrayList<Notebook.Item> ni = new ArrayList<>();
                 for (Stroke s : selStrokes) ns.add(s.transformed(spx, spy, ss, stx, sty));
-                for (Notebook.Item it : selItems) ni.add(it.moved(spx, spy, ss, stx, sty));
+                for (Notebook.Item it : selItems) {
+                    Notebook.Item mv = it.moved(spx, spy, ss, stx, sty);
+                    if (it.type == Notebook.Item.SHAPE) {
+                        dropShapeTexture(it);
+                        primeShapeHandoff(mv);
+                    }
+                    ni.add(mv);
+                }
                 spx = spy = stx = sty = 0;
                 ss = 1;
                 dropTextTextures();
-                dropShapeTextures();
                 replaceSelection(ns, ni, true);
             } else {
                 spx = spy = stx = sty = 0;

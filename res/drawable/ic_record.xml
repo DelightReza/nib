@@ -1,0 +1,5 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+  <!-- record: outer ring + solid center dot -->
+  <path android:pathData="M12,3.5 A8.5,8.5 0 1,1 11.99,3.5 Z" android:strokeColor="#FF000000" android:strokeWidth="1.85" android:fillColor="#00000000"/>
+  <path android:pathData="M12,8 A4,4 0 1,1 11.99,8 Z" android:fillColor="#FF000000"/>
+</vector>
