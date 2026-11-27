@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PathMeasure;
 import android.graphics.RectF;
 
 import org.json.JSONObject;
@@ -641,6 +642,133 @@ final class ShapeSpec {
         if (it.w <= tol * 2f || it.h <= tol * 2f) return true;
         boolean inInner = x > it.x + tol && x < it.x + it.w - tol && y > it.y + tol && y < it.y + it.h - tol;
         return !inInner;
+    }
+
+    /**
+     * Partial-area lasso test: returns true if the lasso polygon encloses OR crosses ANY portion
+     * of the shape's actual outline/path (corner, edge, arc, line, arrowhead, freeform), OR
+     * grazes its border, OR sits inside a filled shape's interior.
+     * Avoids falsely grabbing a hollow outline shape when lassoing handwriting inside its center.
+     */
+    static boolean hitsLasso(Notebook.Item it, float[] xs, float[] ys, int n) {
+        if (it == null || it.type != Notebook.Item.SHAPE || xs == null || ys == null || n < 3) return false;
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+        for (int i = 0; i < n; i++) {
+            if (xs[i] < minX) minX = xs[i];
+            if (xs[i] > maxX) maxX = xs[i];
+            if (ys[i] < minY) minY = ys[i];
+            if (ys[i] > maxY) maxY = ys[i];
+        }
+        RectF rb = renderBounds(it);
+        if (maxX < rb.left - 4f || minX > rb.right + 4f || maxY < rb.top - 4f || minY > rb.bottom + 4f) {
+            return false;
+        }
+
+        ShapeSpec s = of(it);
+        // Transform lasso vertices into the shape's local (unrotated) coordinate frame once
+        float[] lxs, lys;
+        float lMinX, lMinY, lMaxX, lMaxY;
+        if (Math.abs(s.rotation) < 0.01f) {
+            lxs = xs;
+            lys = ys;
+            lMinX = minX; lMinY = minY; lMaxX = maxX; lMaxY = maxY;
+        } else {
+            lxs = new float[n];
+            lys = new float[n];
+            lMinX = Float.MAX_VALUE; lMinY = Float.MAX_VALUE;
+            lMaxX = -Float.MAX_VALUE; lMaxY = -Float.MAX_VALUE;
+            float cx = it.x + it.w * 0.5f, cy = it.y + it.h * 0.5f;
+            double rad = Math.toRadians(-s.rotation);
+            float cos = (float) Math.cos(rad), sin = (float) Math.sin(rad);
+            for (int i = 0; i < n; i++) {
+                float dx = xs[i] - cx, dy = ys[i] - cy;
+                float lx = cx + dx * cos - dy * sin;
+                float ly = cy + dx * sin + dy * cos;
+                lxs[i] = lx;
+                lys[i] = ly;
+                if (lx < lMinX) lMinX = lx;
+                if (lx > lMaxX) lMaxX = lx;
+                if (ly < lMinY) lMinY = ly;
+                if (ly > lMaxY) lMaxY = ly;
+            }
+        }
+
+        // 1. Sample along the actual vector path (all contours) and check containment or crossing
+        Path path = buildPath(it, s);
+        if (path != null) {
+            PathMeasure pm = new PathMeasure(path, false);
+            float[] pos = new float[2];
+            do {
+                float len = pm.getLength();
+                if (len <= 0f) continue;
+                int steps = Math.max(24, Math.min(240, (int) Math.ceil(len / 8f)));
+                float prevX = 0f, prevY = 0f;
+                for (int i = 0; i <= steps; i++) {
+                    float d = len * i / steps;
+                    if (!pm.getPosTan(d, pos, null)) continue;
+                    float px = pos[0], py = pos[1];
+                    if (px >= lMinX && px <= lMaxX && py >= lMinY && py <= lMaxY
+                            && Geo.inside(px, py, lxs, lys, n)) {
+                        return true;
+                    }
+                    if (i > 0) {
+                        float segMinX = Math.min(prevX, px), segMaxX = Math.max(prevX, px);
+                        float segMinY = Math.min(prevY, py), segMaxY = Math.max(prevY, py);
+                        if (segMaxX >= lMinX && segMinX <= lMaxX && segMaxY >= lMinY && segMinY <= lMaxY) {
+                            for (int k = 0; k < n; k++) {
+                                int kn = (k + 1) % n;
+                                if (segmentsIntersect(prevX, prevY, px, py, lxs[k], lys[k], lxs[kn], lys[kn])) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    prevX = px;
+                    prevY = py;
+                }
+            } while (pm.nextContour());
+        }
+
+        // 2. Check if any lasso point grazes the shape's border (handles thick strokes & tiny loops)
+        // or sits inside a filled shape's area
+        boolean filled = s.supportsFill() && s.fillStyle != STYLE_OUTLINE;
+        float pad = Math.max(4f, s.strokeWidth * 0.6f);
+        int step = Math.max(1, n / 48);
+        for (int i = 0; i < n; i += step) {
+            if (filled ? hitTest(it, xs[i], ys[i], pad) : hitBorder(it, xs[i], ys[i], pad)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean segmentsIntersect(float ax, float ay, float bx, float by,
+                                             float cx, float cy, float dx, float dy) {
+        if (Math.max(ax, bx) < Math.min(cx, dx) || Math.max(cx, dx) < Math.min(ax, bx)
+                || Math.max(ay, by) < Math.min(cy, dy) || Math.max(cy, dy) < Math.min(ay, by)) {
+            return false;
+        }
+        float d1 = cross(cx, cy, dx, dy, ax, ay);
+        float d2 = cross(cx, cy, dx, dy, bx, by);
+        float d3 = cross(ax, ay, bx, by, cx, cy);
+        float d4 = cross(ax, ay, bx, by, dx, dy);
+        if (((d1 > 0f && d2 < 0f) || (d1 < 0f && d2 > 0f))
+                && ((d3 > 0f && d4 < 0f) || (d3 < 0f && d4 > 0f))) {
+            return true;
+        }
+        return (d1 == 0f && onSeg(cx, cy, dx, dy, ax, ay))
+                || (d2 == 0f && onSeg(cx, cy, dx, dy, bx, by))
+                || (d3 == 0f && onSeg(ax, ay, bx, by, cx, cy))
+                || (d4 == 0f && onSeg(ax, ay, bx, by, dx, dy));
+    }
+
+    private static float cross(float ax, float ay, float bx, float by, float cx, float cy) {
+        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    }
+
+    private static boolean onSeg(float ax, float ay, float bx, float by, float px, float py) {
+        return px >= Math.min(ax, bx) - 1e-3f && px <= Math.max(ax, bx) + 1e-3f
+                && py >= Math.min(ay, by) - 1e-3f && py <= Math.max(ay, by) + 1e-3f;
     }
 
     private static boolean hitQuadCurve(float x0, float y0, float cx, float cy, float x1, float y1, float px, float py, float tol) {
