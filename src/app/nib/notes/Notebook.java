@@ -795,7 +795,10 @@ final class Notebook {
 
     void writeMetaFields(File dir) throws IOException {
         Properties m = meta(dir);
-        // folder and favourite belong to the notes screen: an editor save must not undo a move or a star made there
+        // folder and favourite belong to the notes screen: an editor save must not undo a move or a star made there.
+        // Write them only when not yet present on disk (e.g. newly created or freshly imported notebooks).
+        if (!m.containsKey("folder")) m.setProperty("folder", folder == null ? "" : folder);
+        if (!m.containsKey("favorite") && favorite) m.setProperty("favorite", "true");
         m.setProperty("title", title);
         m.setProperty("canvas", Boolean.toString(canvas));
         m.setProperty("paper", Integer.toString(paper));

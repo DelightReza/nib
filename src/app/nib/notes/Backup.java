@@ -156,6 +156,7 @@ final class Backup {
         try {
             org.json.JSONObject o = new org.json.JSONObject();
             o.put("folders", new org.json.JSONArray(p.getStringSet("folders", new java.util.HashSet<>())));
+            o.put("folderMeta", FolderStore.exportMetaJson(c));
             o.put("myTpl", new org.json.JSONArray(p.getString("myTpl", "[]")));
             return o.toString();
         } catch (Exception e) {
@@ -163,7 +164,7 @@ final class Backup {
         }
     }
 
-    /** Adds a backup's empty folders and saved templates to what's here (nothing is replaced). */
+    /** Adds a backup's empty folders, folder styles, and saved templates to what's here (nothing is replaced). */
     private static void mergeLibrary(Context c, String json) {
         try {
             org.json.JSONObject o = new org.json.JSONObject(json);
@@ -171,6 +172,7 @@ final class Backup {
             java.util.HashSet<String> folders = new java.util.HashSet<>(p.getStringSet("folders", new java.util.HashSet<>()));
             org.json.JSONArray f = o.optJSONArray("folders");
             if (f != null) for (int i = 0; i < f.length(); i++) folders.add(f.getString(i));
+            FolderStore.mergeMetaJson(c, o.optJSONObject("folderMeta"));
             org.json.JSONArray mine = new org.json.JSONArray(p.getString("myTpl", "[]")), add = o.optJSONArray("myTpl");
             java.util.HashSet<String> have = new java.util.HashSet<>();
             for (int i = 0; i < mine.length(); i++) have.add(mine.get(i).toString());
