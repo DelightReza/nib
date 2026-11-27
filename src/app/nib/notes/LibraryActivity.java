@@ -55,11 +55,15 @@ import java.util.concurrent.Executors;
 
 public final class LibraryActivity extends Activity {
     private static final int REQ_PDF = 21, REQ_TREE = 22, REQ_RESTORE = 23,
-            REQ_DOC = 24, REQ_PHOTOS = 25, REQ_SCAN = 26;
+            REQ_DOC = 24, REQ_PHOTOS = 25, REQ_SCAN = 26,
+            REQ_SAVE_FILE = 27, REQ_SAVE_MULTI_TREE = 28;
     private static final String FAV = "★";
 
     private ScanSheet scanSheet;
     private File pendingScanFile;
+    private File pendingSaveFile;
+    private List<File> pendingSaveMany;
+    private ProgressPopup activeProgress;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
@@ -100,6 +104,13 @@ public final class LibraryActivity extends Activity {
         else {
             String p = b.getString("pendingScanFile", null);
             if (p != null) pendingScanFile = new File(p);
+            String sf = b.getString("pendingSaveFile", null);
+            if (sf != null) pendingSaveFile = new File(sf);
+            ArrayList<String> sm = b.getStringArrayList("pendingSaveMany");
+            if (sm != null && !sm.isEmpty()) {
+                pendingSaveMany = new ArrayList<>();
+                for (String s : sm) pendingSaveMany.add(new File(s));
+            }
         }
         sort = prefs.getInt("sort", 0);
         filter = prefs.getString("filter", "");
@@ -1130,17 +1141,50 @@ public final class LibraryActivity extends Activity {
         pm.show();
     }
 
+    private ProgressPopup startProgress(String title, String detail) {
+        if (activeProgress != null) activeProgress.dismiss();
+        activeProgress = ProgressPopup.show(this, title, detail);
+        return activeProgress;
+    }
+
+    private void endProgress(ProgressPopup p) {
+        if (p != null) p.dismiss();
+        if (activeProgress == p) activeProgress = null;
+    }
+
     private void exportPicked() {
         List<Notebook.Entry> es = pickedEntries();
-        Toast.makeText(this, "Exporting " + es.size() + "…", Toast.LENGTH_SHORT).show();
+        if (es.isEmpty()) return;
+        int total = es.size();
+        ProgressPopup prog = startProgress("Exporting notebooks",
+                total == 1 ? "Preparing PDF…" : "Exporting 1 of " + total + "…");
         bg.execute(() -> {
             ArrayList<File> files = new ArrayList<>();
-            for (Notebook.Entry e : es) {
-                try { files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1)); } catch (Exception ex) { Log.e(Gl.TAG, "export", ex); }
+            for (int i = 0; i < total; i++) {
+                Notebook.Entry e = es.get(i);
+                final int idx = i;
+                try {
+                    if (total == 1) {
+                        files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1, prog.asListener()));
+                    } else {
+                        prog.update(idx, total, "Exporting " + e.title + " (" + (idx + 1) + " of " + total + ")…");
+                        files.add(Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1));
+                        prog.update(idx + 1, total, "Exported " + (idx + 1) + " of " + total + "…");
+                    }
+                } catch (Exception ex) { Log.e(Gl.TAG, "export", ex); }
             }
             ui.post(() -> {
+                endProgress(prog);
                 if (files.isEmpty()) { Toast.makeText(this, "Export failed", Toast.LENGTH_SHORT).show(); return; }
-                Exporter.shareMany(this, files, "application/pdf");
+                if (files.size() == 1) {
+                    saveExportedFile(files.get(0), "application/pdf");
+                } else {
+                    pendingSaveMany = files;
+                    Toast.makeText(this, "Pick a folder to save " + files.size() + " PDFs", Toast.LENGTH_SHORT).show();
+                    if (!Exporter.launchFolderPicker(this, files, "application/pdf", REQ_SAVE_MULTI_TREE)) {
+                        pendingSaveMany = null;
+                    }
+                }
                 stopSelecting();
             });
         });
@@ -1395,6 +1439,7 @@ public final class LibraryActivity extends Activity {
     }
 
     private void duplicate(Notebook.Entry e) {
+        ProgressPopup prog = startProgress("Duplicating notebook", "Copying " + e.title + "…");
         bg.execute(() -> {
             try {
                 File d = Notebook.newDir(this);
@@ -1402,35 +1447,58 @@ public final class LibraryActivity extends Activity {
                 Notebook.setMeta(d, "title", e.title + " copy");
                 Notebook.setMeta(d, "created", Long.toString(System.currentTimeMillis()));
                 Notebook.setMeta(d, "modified", Long.toString(System.currentTimeMillis()));
-                ui.post(this::refresh);
+                ui.post(() -> {
+                    endProgress(prog);
+                    refresh();
+                });
             } catch (Exception ex) {
-                ui.post(() -> Toast.makeText(this, "Couldn't duplicate", Toast.LENGTH_SHORT).show());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, "Couldn't duplicate", Toast.LENGTH_SHORT).show();
+                });
             }
         });
     }
 
+    private void saveExportedFile(File f, String mime) {
+        pendingSaveFile = f;
+        if (!Exporter.launchSavePicker(this, f, mime, REQ_SAVE_FILE)) pendingSaveFile = null;
+    }
+
     private void exportPdf(Notebook.Entry e) {
-        Toast.makeText(this, "Exporting…", Toast.LENGTH_SHORT).show();
+        ProgressPopup prog = startProgress("Exporting PDF", "Loading " + e.title + "…");
         bg.execute(() -> {
             try {
-                File f = Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1);
-                ui.post(() -> Exporter.share(this, f, "application/pdf"));
+                File f = Exporter.pdf(this, Notebook.load(e.dir), e.dir, -1, prog.asListener());
+                ui.post(() -> {
+                    endProgress(prog);
+                    saveExportedFile(f, "application/pdf");
+                });
             } catch (Exception ex) {
                 Log.e(Gl.TAG, "export", ex);
-                ui.post(() -> Toast.makeText(this, "Export failed", Toast.LENGTH_SHORT).show());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, "Export failed", Toast.LENGTH_SHORT).show();
+                });
             }
         });
     }
 
     private void exportNib(Notebook.Entry e) {
-        Toast.makeText(this, "Packaging notebook…", Toast.LENGTH_SHORT).show();
+        ProgressPopup prog = startProgress("Exporting .nib", "Packaging " + e.title + "…");
         bg.execute(() -> {
             try {
-                File f = Backup.exportNotebook(this, e.dir, e.title);
-                ui.post(() -> Exporter.share(this, f, "application/octet-stream"));
+                File f = Backup.exportNotebook(this, e.dir, e.title, prog.asListener());
+                ui.post(() -> {
+                    endProgress(prog);
+                    saveExportedFile(f, "application/octet-stream");
+                });
             } catch (Exception ex) {
                 Log.e(Gl.TAG, "export nib", ex);
-                ui.post(() -> Toast.makeText(this, "Export failed", Toast.LENGTH_SHORT).show());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, "Export failed", Toast.LENGTH_SHORT).show();
+                });
             }
         });
     }
@@ -1482,14 +1550,20 @@ public final class LibraryActivity extends Activity {
     }
 
     private void backupNow() {
-        Toast.makeText(this, "Backing up…", Toast.LENGTH_SHORT).show();
+        ProgressPopup prog = startProgress("Backing up library", "Preparing backup…");
         bg.execute(() -> {
             try {
-                String name = Backup.run(this);
-                ui.post(() -> Toast.makeText(this, name == null ? "A backup is already running" : "Saved " + name, Toast.LENGTH_LONG).show());
+                String name = Backup.run(this, prog.asListener());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, name == null ? "A backup is already running" : "Saved " + name, Toast.LENGTH_LONG).show();
+                });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "backup", e);
-                ui.post(() -> Toast.makeText(this, "Backup failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, "Backup failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                });
             }
         });
     }
@@ -1498,11 +1572,63 @@ public final class LibraryActivity extends Activity {
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         if (pendingScanFile != null) outState.putString("pendingScanFile", pendingScanFile.getPath());
+        if (pendingSaveFile != null) outState.putString("pendingSaveFile", pendingSaveFile.getPath());
+        if (pendingSaveMany != null && !pendingSaveMany.isEmpty()) {
+            ArrayList<String> paths = new ArrayList<>();
+            for (File f : pendingSaveMany) paths.add(f.getPath());
+            outState.putStringArrayList("pendingSaveMany", paths);
+        }
     }
 
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == REQ_SAVE_FILE) {
+            File f = pendingSaveFile;
+            pendingSaveFile = null;
+            if (res != RESULT_OK || data == null || data.getData() == null || f == null) return;
+            final Uri out = data.getData();
+            ProgressPopup prog = startProgress("Saving file", "Writing " + f.getName() + "…");
+            bg.execute(() -> {
+                try {
+                    Exporter.saveToUri(this, f, out);
+                    ui.post(() -> {
+                        endProgress(prog);
+                        Toast.makeText(this, "Saved " + f.getName(), Toast.LENGTH_SHORT).show();
+                    });
+                } catch (Exception e) {
+                    Log.e(Gl.TAG, "save export", e);
+                    ui.post(() -> {
+                        endProgress(prog);
+                        Toast.makeText(this, "Couldn't save there", Toast.LENGTH_SHORT).show();
+                    });
+                }
+            });
+            return;
+        }
+        if (req == REQ_SAVE_MULTI_TREE) {
+            List<File> files = pendingSaveMany;
+            pendingSaveMany = null;
+            if (res != RESULT_OK || data == null || data.getData() == null || files == null || files.isEmpty()) return;
+            final Uri tree = data.getData();
+            ProgressPopup prog = startProgress("Saving PDFs", "Saving 1 of " + files.size() + "…");
+            bg.execute(() -> {
+                try {
+                    int n = Exporter.saveManyToTree(this, files, "application/pdf", tree, prog.asListener());
+                    ui.post(() -> {
+                        endProgress(prog);
+                        Toast.makeText(this, "Saved " + n + (n == 1 ? " PDF" : " PDFs"), Toast.LENGTH_SHORT).show();
+                    });
+                } catch (Exception e) {
+                    Log.e(Gl.TAG, "save exports", e);
+                    ui.post(() -> {
+                        endProgress(prog);
+                        Toast.makeText(this, "Couldn't save to that folder", Toast.LENGTH_SHORT).show();
+                    });
+                }
+            });
+            return;
+        }
         if (req == REQ_SCAN) {
             File captured = pendingScanFile;
             pendingScanFile = null;
@@ -1539,12 +1665,13 @@ public final class LibraryActivity extends Activity {
             prefs.edit().putString(Backup.PREF_TREE, uri.toString()).apply();
             backupNow();
         } else if (req == REQ_RESTORE) {
-            Toast.makeText(this, "Importing Nib backup…", Toast.LENGTH_SHORT).show();
+            ProgressPopup prog = startProgress("Importing Nib backup", "Opening archive…");
             final String targetFolder = currentFolder();
             bg.execute(() -> {
                 try {
-                    Backup.RestoreResult rr = Backup.restoreAny(this, uri, targetFolder);
+                    Backup.RestoreResult rr = Backup.restoreAny(this, uri, targetFolder, prog.asListener());
                     ui.post(() -> {
+                        endProgress(prog);
                         refresh();
                         if (rr.singleDir != null) {
                             Toast.makeText(this, "Imported notebook", Toast.LENGTH_SHORT).show();
@@ -1557,7 +1684,10 @@ public final class LibraryActivity extends Activity {
                     });
                 } catch (Exception e) {
                     Log.e(Gl.TAG, "restore", e);
-                    ui.post(() -> Toast.makeText(this, e.getMessage() != null ? e.getMessage() : "Could not import Nib file", Toast.LENGTH_LONG).show());
+                    ui.post(() -> {
+                        endProgress(prog);
+                        Toast.makeText(this, e.getMessage() != null ? e.getMessage() : "Could not import Nib file", Toast.LENGTH_LONG).show();
+                    });
                 }
             });
         }
@@ -1573,7 +1703,7 @@ public final class LibraryActivity extends Activity {
     }
 
     private void importDocument(Uri uri) {
-        Toast.makeText(this, "Converting document to PDF…", Toast.LENGTH_SHORT).show();
+        ProgressPopup prog = startProgress("Importing document", "Reading document…");
         bg.execute(() -> {
             File tmpPdf = new File(getCacheDir(), "doc_" + System.currentTimeMillis() + ".pdf");
             try {
@@ -1581,19 +1711,25 @@ public final class LibraryActivity extends Activity {
                 String title = rawName.replaceAll("(?i)\\.(docx|pptx|doc|ppt|txt|md|markdown|pdf)$", "").trim();
                 if (title.isEmpty()) title = "Imported document";
                 String mime = getContentResolver().getType(uri);
-                DocConverter.toPdf(this, uri, rawName, mime, tmpPdf);
-                createPdfNotebookOnBg(tmpPdf, title, true);
+                DocConverter.toPdf(this, uri, rawName, mime, tmpPdf, prog.asListener());
+                prog.setTitle("Creating notebook");
+                createPdfNotebookOnBg(tmpPdf, title, true, prog);
             } catch (Exception e) {
                 Log.e(Gl.TAG, "doc import", e);
                 try { tmpPdf.delete(); } catch (Exception ignored) { }
                 String msg = e.getMessage() != null && !e.getMessage().isEmpty() ? e.getMessage() : "Couldn't convert that document";
-                ui.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+                });
             }
         });
     }
 
     private void importPhotos(List<Uri> uris) {
-        Toast.makeText(this, uris.size() == 1 ? "Importing photo…" : "Importing " + uris.size() + " photos…", Toast.LENGTH_SHORT).show();
+        int total = uris.size();
+        ProgressPopup prog = startProgress("Importing photos",
+                total == 1 ? "Processing photo…" : "Processing photo 1 of " + total + "…");
         final String folder = currentFolder();
         bg.execute(() -> {
             File dir = Notebook.newDir(this);
@@ -1603,7 +1739,7 @@ public final class LibraryActivity extends Activity {
                 imgDir.mkdirs();
                 Notebook nb = new Notebook();
                 String title = "Photos " + new SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(new Date());
-                if (uris.size() == 1) {
+                if (total == 1) {
                     String raw = queryDisplayName(uris.get(0), "");
                     String stripped = raw.replaceAll("(?i)\\.(jpe?g|png|webp|heic|heif|gif|bmp)$", "").trim();
                     if (!stripped.isEmpty()) title = stripped;
@@ -1612,7 +1748,9 @@ public final class LibraryActivity extends Activity {
                 nb.folder = folder;
                 nb.created = nb.modified = System.currentTimeMillis();
 
-                for (Uri u : uris) {
+                for (int i = 0; i < total; i++) {
+                    prog.update(i + 1, total, total == 1 ? "Processing photo…" : "Processing photo " + (i + 1) + " of " + total + "…");
+                    Uri u = uris.get(i);
                     try {
                         Bitmap b = ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(), u), (dec, info, src) -> {
                             int w = info.getSize().getWidth(), h = info.getSize().getHeight(), m = Math.max(w, h);
@@ -1642,33 +1780,47 @@ public final class LibraryActivity extends Activity {
                     }
                 }
                 if (nb.pages.isEmpty()) throw new IllegalStateException("No readable photos selected");
+                prog.update(total, total, "Saving notebook…");
                 nb.write(dir);
-                ui.post(() -> { refresh(); open(dir); });
+                ui.post(() -> {
+                    endProgress(prog);
+                    refresh();
+                    open(dir);
+                });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "photo import", e);
                 Notebook.delete(dir);
-                ui.post(() -> Toast.makeText(this, "Couldn't import those photos", Toast.LENGTH_LONG).show());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, "Couldn't import those photos", Toast.LENGTH_LONG).show();
+                });
             }
         });
     }
 
     private void importPdfFile(File srcPdf, String name, boolean deleteSourceAfter) {
-        Toast.makeText(this, "Creating notebook…", Toast.LENGTH_SHORT).show();
-        bg.execute(() -> createPdfNotebookOnBg(srcPdf, name, deleteSourceAfter));
+        ProgressPopup prog = startProgress("Creating notebook", "Importing PDF…");
+        bg.execute(() -> createPdfNotebookOnBg(srcPdf, name, deleteSourceAfter, prog));
     }
 
-    private void createPdfNotebookOnBg(File srcPdf, String name, boolean deleteSourceAfter) {
+    private void createPdfNotebookOnBg(File srcPdf, String name, boolean deleteSourceAfter, ProgressPopup prog) {
         File dir = Notebook.newDir(this);
         try {
             dir.mkdirs();
             File pdf = new File(dir, "source.pdf");
+            if (prog != null) prog.setIndeterminate("Copying PDF…");
             Io.copy(new FileInputStream(srcPdf), new FileOutputStream(pdf));
             Notebook nb = new Notebook();
             nb.title = name;
             nb.folder = currentFolder();
             nb.created = nb.modified = System.currentTimeMillis();
             try (Render.Pdf r = new Render.Pdf(pdf)) {
-                for (int i = 0; i < r.r.getPageCount(); i++) {
+                int count = r.r.getPageCount();
+                int step = Math.max(1, count / 40);
+                for (int i = 0; i < count; i++) {
+                    if (prog != null && (i == 0 || i % step == 0 || i == count - 1)) {
+                        prog.update(i + 1, count, count == 1 ? "Adding page…" : "Adding page " + (i + 1) + " of " + count + "…");
+                    }
                     try (PdfRenderer.Page p = r.r.openPage(i)) {
                         Notebook.Page pg = new Notebook.Page(Notebook.BG_BLANK);
                         pg.pdf = i;
@@ -1678,12 +1830,20 @@ public final class LibraryActivity extends Activity {
                 }
             }
             if (nb.pages.isEmpty()) throw new IllegalStateException("empty PDF");
+            if (prog != null) prog.update(nb.pages.size(), nb.pages.size(), "Saving notebook…");
             nb.write(dir);
-            ui.post(() -> { refresh(); open(dir); });
+            ui.post(() -> {
+                endProgress(prog);
+                refresh();
+                open(dir);
+            });
         } catch (Exception e) {
             Log.e(Gl.TAG, "pdf file import", e);
             Notebook.delete(dir);
-            ui.post(() -> Toast.makeText(this, "Couldn't open that PDF", Toast.LENGTH_LONG).show());
+            ui.post(() -> {
+                endProgress(prog);
+                Toast.makeText(this, "Couldn't open that PDF", Toast.LENGTH_LONG).show();
+            });
         } finally {
             if (deleteSourceAfter && srcPdf != null) {
                 try { srcPdf.delete(); } catch (Exception ignored) { }
@@ -1692,7 +1852,7 @@ public final class LibraryActivity extends Activity {
     }
 
     private void importPdf(Uri uri) {
-        Toast.makeText(this, "Importing PDF…", Toast.LENGTH_SHORT).show();
+        ProgressPopup prog = startProgress("Importing PDF", "Copying PDF…");
         bg.execute(() -> {
             File dir = Notebook.newDir(this);
             try {
@@ -1706,7 +1866,12 @@ public final class LibraryActivity extends Activity {
                 nb.folder = currentFolder();
                 nb.created = nb.modified = System.currentTimeMillis();
                 try (Render.Pdf r = new Render.Pdf(pdf)) {
-                    for (int i = 0; i < r.r.getPageCount(); i++) {
+                    int count = r.r.getPageCount();
+                    int step = Math.max(1, count / 40);
+                    for (int i = 0; i < count; i++) {
+                        if (i == 0 || i % step == 0 || i == count - 1) {
+                            prog.update(i + 1, count, count == 1 ? "Adding page…" : "Adding page " + (i + 1) + " of " + count + "…");
+                        }
                         try (PdfRenderer.Page p = r.r.openPage(i)) {
                             Notebook.Page pg = new Notebook.Page(Notebook.BG_BLANK);
                             pg.pdf = i;
@@ -1716,18 +1881,27 @@ public final class LibraryActivity extends Activity {
                     }
                 }
                 if (nb.pages.isEmpty()) throw new IllegalStateException("empty PDF");
+                prog.update(nb.pages.size(), nb.pages.size(), "Saving notebook…");
                 nb.write(dir);
-                ui.post(() -> { refresh(); open(dir); });
+                ui.post(() -> {
+                    endProgress(prog);
+                    refresh();
+                    open(dir);
+                });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "pdf import", e);
                 Notebook.delete(dir);
-                ui.post(() -> Toast.makeText(this, "Couldn't open that PDF", Toast.LENGTH_LONG).show());
+                ui.post(() -> {
+                    endProgress(prog);
+                    Toast.makeText(this, "Couldn't open that PDF", Toast.LENGTH_LONG).show();
+                });
             }
         });
     }
 
     @Override
     protected void onDestroy() {
+        if (activeProgress != null) { activeProgress.dismiss(); activeProgress = null; }
         if (scanSheet != null) scanSheet.dismissAndCleanup();
         super.onDestroy();
         bg.shutdown();

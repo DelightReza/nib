@@ -369,12 +369,15 @@ final class ScanSheet {
                 ? "Scan " + new SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(new Date())
                 : rawTitle;
         List<Page> snapshot = new ArrayList<>(pages);
+        ProgressPopup progress = ProgressPopup.show(activity, "Creating scanned PDF",
+                snapshot.size() == 1 ? "Processing page…" : "Processing page 1 of " + snapshot.size() + "…");
 
         bg.execute(() -> {
             File pdfFile = new File(scanDir(activity), "compiled_" + System.currentTimeMillis() + ".pdf");
             try {
-                writePdf(snapshot, pdfFile);
+                writePdf(snapshot, pdfFile, progress.asListener());
                 ui.post(() -> {
+                    progress.dismiss();
                     saving = false;
                     if (dialog != null && dialog.isShowing()) dialog.dismiss();
                     dialog = null;
@@ -384,6 +387,7 @@ final class ScanSheet {
             } catch (Exception e) {
                 try { pdfFile.delete(); } catch (Exception ignored) { }
                 ui.post(() -> {
+                    progress.dismiss();
                     saving = false;
                     if (saveBtn != null) {
                         saveBtn.setEnabled(true);
@@ -396,10 +400,14 @@ final class ScanSheet {
         });
     }
 
-    private static void writePdf(List<Page> scanPages, File outPdf) throws IOException {
+    private static void writePdf(List<Page> scanPages, File outPdf, ProgressPopup.Listener cb) throws IOException {
         PdfDocument doc = new PdfDocument();
         try {
-            for (int i = 0; i < scanPages.size(); i++) {
+            int total = scanPages.size();
+            for (int i = 0; i < total; i++) {
+                if (cb != null) {
+                    cb.onProgress(i + 1, total, total == 1 ? "Processing page…" : "Processing page " + (i + 1) + " of " + total + "…");
+                }
                 Page sp = scanPages.get(i);
                 Bitmap bm = renderPageBitmap(sp.file, sp.rotation, sp.mode, 2000);
                 if (bm == null) continue;
@@ -419,6 +427,7 @@ final class ScanSheet {
                 }
             }
             if (doc.getPages().isEmpty()) throw new IOException("No valid pages to save");
+            if (cb != null) cb.onProgress(total, total, "Writing PDF file…");
             try (FileOutputStream fos = new FileOutputStream(outPdf)) {
                 doc.writeTo(fos);
             }

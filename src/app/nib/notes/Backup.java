@@ -49,30 +49,47 @@ final class Backup {
 
     /** Returns the backup's file name (null if a backup is already running). */
     static String run(Context c) throws IOException {
+        return run(c, null);
+    }
+
+    /** Returns the backup's file name (null if a backup is already running), reporting progress if cb != null. */
+    static String run(Context c, ProgressPopup.Listener cb) throws IOException {
         if (!RUNNING.compareAndSet(false, true)) return null; // the notes screen reopened mid-backup: one is enough
         try {
-            return runOnce(c);
+            return runOnce(c, cb);
         } finally {
             RUNNING.set(false);
         }
     }
 
-    private static String runOnce(Context c) throws IOException {
+    private static String runOnce(Context c, ProgressPopup.Listener cb) throws IOException {
         Uri tree = tree(c);
         if (tree == null) throw new IOException("No backup folder chosen");
         ContentResolver cr = c.getContentResolver();
         Uri parent = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
         String name = "Nib backup " + new SimpleDateFormat("yyyy-MM-dd HHmm", Locale.US).format(new Date()) + ".zip";
+        if (cb != null) cb.onProgress(0, 0, "Creating backup archive…");
         Uri doc = DocumentsContract.createDocument(cr, parent, "application/zip", name);
         if (doc == null) throw new IOException("Could not create " + name);
         try (OutputStream os = cr.openOutputStream(doc); ZipOutputStream zip = new ZipOutputStream(os)) {
             File root = Notebook.root(c);
             File[] dirs = root.listFiles(File::isDirectory);
-            if (dirs != null) for (File d : dirs) addDir(zip, d, d.getName() + "/");
+            int totalSteps = (dirs != null ? dirs.length : 0) + 1;
+            int step = 0;
+            if (dirs != null) {
+                for (File d : dirs) {
+                    step++;
+                    if (cb != null) {
+                        cb.onProgress(step, totalSteps, "Backing up notebook " + step + " of " + dirs.length + "…");
+                    }
+                    addDir(zip, d, d.getName() + "/", null, null, 0);
+                }
+            }
+            if (cb != null) cb.onProgress(totalSteps, totalSteps, "Saving fonts, stickers & settings…");
             File fonts = Fonts.dir(c); // imported fonts, so restored notebooks keep their look
-            if (fonts.isDirectory()) addDir(zip, fonts, Fonts.BACKUP_DIR);
+            if (fonts.isDirectory()) addDir(zip, fonts, Fonts.BACKUP_DIR, null, null, 0);
             File stickers = Stickers.dir(c); // the sticker library
-            if (stickers.isDirectory()) addDir(zip, stickers, Stickers.BACKUP_DIR);
+            if (stickers.isDirectory()) addDir(zip, stickers, Stickers.BACKUP_DIR, null, null, 0);
             zip.putNextEntry(new ZipEntry(LIBRARY));
             zip.write(libraryJson(c).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             zip.closeEntry();
@@ -82,13 +99,24 @@ final class Backup {
         return name;
     }
 
-    private static void addDir(ZipOutputStream zip, File d, String prefix) throws IOException {
+    private static int countFiles(File d) {
+        File[] kids = d.listFiles();
+        if (kids == null) return 0;
+        int n = 0;
+        for (File k : kids) {
+            if (k.getName().endsWith(".tmp") || k.getName().equals("ink.bin.old")) continue;
+            n += k.isDirectory() ? countFiles(k) : 1;
+        }
+        return n;
+    }
+
+    private static void addDir(ZipOutputStream zip, File d, String prefix, ProgressPopup.Listener cb, int[] done, int total) throws IOException {
         File[] kids = d.listFiles();
         if (kids == null) return;
         for (File k : kids) {
             if (k.getName().endsWith(".tmp") || k.getName().equals("ink.bin.old")) continue; // .old: pre-2.3 copy, the pages hold it all
             if (k.isDirectory()) {
-                addDir(zip, k, prefix + k.getName() + "/");
+                addDir(zip, k, prefix + k.getName() + "/", cb, done, total);
                 continue;
             }
             zip.putNextEntry(new ZipEntry(prefix + k.getName()));
@@ -96,6 +124,10 @@ final class Backup {
                 Io.pipe(in, zip);
             }
             zip.closeEntry();
+            if (cb != null && done != null && total > 0) {
+                done[0]++;
+                cb.onProgress(done[0], total, "Packaging files (" + done[0] + " of " + total + ")…");
+            }
         }
     }
 
@@ -159,29 +191,42 @@ final class Backup {
 
     /** Exports a single notebook directory as a shareable .nib archive in cache/exports. */
     static File exportNotebook(Context c, File nbDir, String title) throws IOException {
+        return exportNotebook(c, nbDir, title, null);
+    }
+
+    static File exportNotebook(Context c, File nbDir, String title, ProgressPopup.Listener cb) throws IOException {
         File out = new File(Exporter.exportDir(c), Exporter.safeName(title) + ".nib");
+        int total = cb != null ? Math.max(1, countFiles(nbDir)) : 0;
+        int[] done = cb != null ? new int[]{0} : null;
+        if (cb != null) cb.onProgress(0, total, "Packaging notebook…");
         try (OutputStream os = new FileOutputStream(out); ZipOutputStream zip = new ZipOutputStream(os)) {
-            addDir(zip, nbDir, "");
+            addDir(zip, nbDir, "", cb, done, total);
         }
         return out;
     }
 
     /** Unpacks a backup; notebooks that already exist are restored as copies. Returns count. */
     static int restore(Context c, Uri zipUri) throws IOException {
-        return restoreAny(c, zipUri, null).count;
+        return restoreAny(c, zipUri, null, null).count;
+    }
+
+    static RestoreResult restoreAny(Context c, Uri zipUri, String targetFolder) throws IOException {
+        return restoreAny(c, zipUri, targetFolder, null);
     }
 
     /**
      * Unpacks either a single-notebook .nib archive (files at archive root or inside a single directory)
      * or a full library .zip backup. Returns how many notebooks were restored and the directory if exactly one.
      */
-    static RestoreResult restoreAny(Context c, Uri zipUri, String targetFolder) throws IOException {
+    static RestoreResult restoreAny(Context c, Uri zipUri, String targetFolder, ProgressPopup.Listener cb) throws IOException {
         File root = Notebook.root(c);
         String rootCanon = root.getCanonicalPath();
         java.util.HashMap<String, File> map = new java.util.HashMap<>();
         File rootNotebook = null;
         boolean sawLibrary = false;
+        int extractedFiles = 0;
 
+        if (cb != null) cb.onProgress(0, 0, "Opening archive…");
         try (InputStream is = c.getContentResolver().openInputStream(zipUri)) {
             if (is == null) throw new IOException("Could not open file");
             try (ZipInputStream zin = new ZipInputStream(is)) {
@@ -227,6 +272,9 @@ final class Backup {
                             target = new File(root, nb);
                             if (target.exists()) target = Notebook.newDir(c);
                             map.put(nb, target);
+                            if (cb != null) {
+                                cb.onProgress(0, 0, "Restoring notebook " + map.size() + "…");
+                            }
                         }
                         f = new File(target, n.substring(slash + 1));
                     }
@@ -235,6 +283,10 @@ final class Backup {
                     if (parent != null) parent.mkdirs();
                     try (OutputStream o = new FileOutputStream(f)) {
                         Io.pipe(zin, o);
+                    }
+                    extractedFiles++;
+                    if (cb != null && map.isEmpty() && (extractedFiles == 1 || extractedFiles % 6 == 0)) {
+                        cb.onProgress(0, 0, "Extracting notebook (" + extractedFiles + " files)…");
                     }
                 }
             }

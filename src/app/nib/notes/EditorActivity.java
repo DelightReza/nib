@@ -61,8 +61,9 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     private static final float PEN_MIN = 0.5f, PEN_MAX = 16f, HL_MIN = 6f, HL_MAX = 64f;
     private static final String[] PEN_TYPES = {"Fountain", "Ballpoint", "Fineliner"};
     private static final int[] PEN_TYPE_IDS = {Stroke.PEN, Stroke.BALL, Stroke.FINE};
-    private static final int REQ_IMAGE = 11, REQ_SAVE_PDF = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16, REQ_STYLE_IMAGE = 17, REQ_STYLE_PDF = 18;
-    private File pendingSave; // exported PDF waiting for the user to pick where to save it
+    private static final int REQ_IMAGE = 11, REQ_SAVE_FILE = 12, REQ_FONT = 13, REQ_STICKERS = 14, REQ_PAGE_IMAGES = 15, REQ_PAGE_PDF = 16, REQ_STYLE_IMAGE = 17, REQ_STYLE_PDF = 18;
+    private File pendingSave; // exported file (PDF, PNG, or .nib) waiting for the user to pick where to save it
+    private ProgressPopup activeProgress;
     private int pendingPagePos = Engine.POS_AFTER;
     private Engine pendingPageEngine;
     private Runnable afterPageImport;
@@ -132,6 +133,10 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        if (b != null) {
+            String ps = b.getString("pendingSave", null);
+            if (ps != null) pendingSave = new File(ps);
+        }
         Theme.applyTo(this);
         String dirPath = getIntent().getStringExtra("dir");
         if (dirPath == null) { finish(); return; }
@@ -3513,59 +3518,93 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void showShare(View anchor) {
         Ui.Popover p = newPop(360).title("Export & share");
-        p.add(Ui.actionRow(this, R.drawable.ic_copy, "Whole notebook as PDF", "Vector ink, every page", v -> { pop.dismiss(); export(-1, false); }));
-        p.add(Ui.actionRow(this, R.drawable.ic_template, "This page as PDF", null, v -> { pop.dismiss(); export(state == null ? 0 : state.page, false); }));
-        p.add(Ui.actionRow(this, R.drawable.ic_image, "This page as image", "PNG, 2000 px wide", v -> { pop.dismiss(); export(state == null ? 0 : state.page, true); }));
-        p.add(Ui.actionRow(this, R.drawable.ic_nib_archive, "Export as .nib", "Editable Nib notebook archive", v -> { pop.dismiss(); exportNib(); }));
-        p.add(Ui.actionRow(this, R.drawable.ic_import, "Save PDF to…", "Pick a folder, e.g. Downloads or Drive", v -> { pop.dismiss(); saveTo(); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_copy, "Whole notebook as PDF", "Save vector PDF to Files", v -> { pop.dismiss(); export(-1, false); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_template, "This page as PDF", "Save current page to Files", v -> { pop.dismiss(); export(state == null ? 0 : state.page, false); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_image, "This page as image", "Save PNG (2000 px wide) to Files", v -> { pop.dismiss(); export(state == null ? 0 : state.page, true); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_nib_archive, "Export as .nib", "Save editable Nib archive to Files", v -> { pop.dismiss(); exportNib(); }));
+        p.add(Ui.actionRow(this, R.drawable.ic_share, "Share PDF…", "Send directly to another app", v -> { pop.dismiss(); sharePdf(); }));
         p.show(anchor);
+    }
+
+    private ProgressPopup startProgress(String title, String detail) {
+        if (activeProgress != null) activeProgress.dismiss();
+        activeProgress = ProgressPopup.show(this, title, detail);
+        return activeProgress;
+    }
+
+    private void endProgress(ProgressPopup p) {
+        if (p != null) p.dismiss();
+        if (activeProgress == p) activeProgress = null;
+    }
+
+    private void saveExportedFile(File f, String mime) {
+        pendingSave = f;
+        if (!Exporter.launchSavePicker(this, f, mime, REQ_SAVE_FILE)) pendingSave = null;
     }
 
     private void exportNib() {
         commitTextEdit();
-        toast("Packaging notebook…");
+        ProgressPopup prog = startProgress("Exporting .nib", "Packaging notebook…");
         final File dir = engine.dir;
         final String title = state != null && state.title != null && !state.title.trim().isEmpty()
                 ? state.title : (cur != null && cur.title != null ? cur.title : "Notebook");
         engine.flush(() -> bg.execute(() -> {
             try {
-                File f = Backup.exportNotebook(this, dir, title);
-                ui.post(() -> Exporter.share(this, f, "application/octet-stream"));
+                File f = Backup.exportNotebook(this, dir, title, prog.asListener());
+                ui.post(() -> {
+                    endProgress(prog);
+                    saveExportedFile(f, "application/octet-stream");
+                });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "export nib", e);
-                ui.post(() -> toast("Export failed"));
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("Export failed");
+                });
             }
         }));
     }
 
-    private void saveTo() {
-        toast("Preparing PDF…");
+    private void sharePdf() {
+        commitTextEdit();
+        ProgressPopup prog = startProgress("Preparing PDF", "Rendering pages…");
         final File dir = engine.dir;
         engine.snapshot(nb -> bg.execute(() -> {
             try {
-                File f = Exporter.pdf(this, nb, dir, -1);
+                File f = Exporter.pdf(this, nb, dir, -1, prog.asListener());
                 ui.post(() -> {
-                    pendingSave = f;
-                    startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                            .setType("application/pdf").putExtra(Intent.EXTRA_TITLE, f.getName()), REQ_SAVE_PDF);
+                    endProgress(prog);
+                    Exporter.share(this, f, "application/pdf");
                 });
             } catch (Exception e) {
-                Log.e(Gl.TAG, "export", e);
-                ui.post(() -> toast("Export failed"));
+                Log.e(Gl.TAG, "share pdf", e);
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("Export failed");
+                });
             }
         }));
     }
 
     private void export(int page, boolean png) {
-        toast("Exporting…");
+        commitTextEdit();
+        ProgressPopup prog = startProgress(
+                png ? "Exporting image" : "Exporting PDF",
+                png ? "Rendering PNG (2000 px wide)…" : "Rendering pages…");
         final File dir = engine.dir;
         engine.snapshot(nb -> bg.execute(() -> {
             try {
-                File f = png ? Exporter.png(this, nb, dir, page) : Exporter.pdf(this, nb, dir, page);
-                ui.post(() -> Exporter.share(this, f, png ? "image/png" : "application/pdf"));
+                File f = png ? Exporter.png(this, nb, dir, page) : Exporter.pdf(this, nb, dir, page, prog.asListener());
+                ui.post(() -> {
+                    endProgress(prog);
+                    saveExportedFile(f, png ? "image/png" : "application/pdf");
+                });
             } catch (Exception e) {
                 Log.e(Gl.TAG, "export", e);
-                ui.post(() -> toast("Export failed"));
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("Export failed");
+                });
             }
         }));
     }
@@ -4991,14 +5030,19 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void importNotebookPages(Engine target, int pos, File srcDir, java.util.List<Integer> indices, String srcTitle, Runnable after) {
         if (indices == null || indices.isEmpty()) return;
-        toast("Importing " + indices.size() + (indices.size() == 1 ? " page…" : " pages…"));
+        int total = indices.size();
+        ProgressPopup prog = startProgress("Importing pages",
+                total == 1 ? "Copying page…" : "Copying page 1 of " + total + "…");
         bg.execute(() -> {
             java.util.ArrayList<Notebook.Page> out = new java.util.ArrayList<>();
             File dstImgDir = new File(target.dir, "images");
             File srcImgDir = new File(srcDir, "images");
             try (Render.Pdf srcPdf = Render.Pdf.open(srcDir)) {
                 Notebook srcNb = Notebook.load(srcDir);
+                int step = 0;
                 for (int idx : indices) {
+                    step++;
+                    prog.update(step, total, total == 1 ? "Copying page…" : "Copying page " + step + " of " + total + "…");
                     if (idx < 0 || idx >= srcNb.pages.size()) continue;
                     Notebook.Page sp = srcNb.pages.get(idx);
                     Notebook.Page np = new Notebook.Page(sp.pdf >= 0 ? Notebook.BG_BLANK : sp.bg);
@@ -5055,14 +5099,21 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 }
             } catch (Exception e) {
                 Log.e(Gl.TAG, "import notebook pages", e);
-                ui.post(() -> toast("Couldn't import pages from " + srcTitle));
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("Couldn't import pages from " + srcTitle);
+                });
                 return;
             }
             if (out.isEmpty()) {
-                ui.post(() -> toast("No pages imported"));
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("No pages imported");
+                });
                 return;
             }
             ui.post(() -> {
+                endProgress(prog);
                 target.insertPages(pos, out);
                 int n = out.size();
                 toast("Added " + n + (n == 1 ? " page" : " pages") + " from " + srcTitle);
@@ -5073,12 +5124,16 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     private void importImagePages(Engine target, int pos, java.util.List<Uri> uris, Runnable after) {
         if (uris == null || uris.isEmpty()) return;
-        toast("Adding " + uris.size() + (uris.size() == 1 ? " image page…" : " image pages…"));
+        int total = uris.size();
+        ProgressPopup prog = startProgress("Adding image pages",
+                total == 1 ? "Processing image…" : "Processing image 1 of " + total + "…");
         bg.execute(() -> {
             java.util.ArrayList<Notebook.Page> pages = new java.util.ArrayList<>();
             File imgDir = new File(target.dir, "images");
             imgDir.mkdirs();
-            for (Uri uri : uris) {
+            for (int i = 0; i < total; i++) {
+                prog.update(i + 1, total, total == 1 ? "Processing image…" : "Processing image " + (i + 1) + " of " + total + "…");
+                Uri uri = uris.get(i);
                 try {
                     Bitmap b = ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(), uri), (dec, info, src) -> {
                         int w = info.getSize().getWidth(), h = info.getSize().getHeight(), m = Math.max(w, h);
@@ -5108,10 +5163,14 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 }
             }
             if (pages.isEmpty()) {
-                ui.post(() -> toast("Couldn't add those images"));
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("Couldn't add those images");
+                });
                 return;
             }
             ui.post(() -> {
+                endProgress(prog);
                 target.insertPages(pos, pages);
                 int n = pages.size();
                 toast("Added " + n + (n == 1 ? " image page" : " image pages"));
@@ -5121,7 +5180,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     }
 
     private void importPdfPages(Engine target, int pos, Uri uri, Runnable after) {
-        toast("Importing PDF pages…");
+        ProgressPopup prog = startProgress("Importing PDF pages", "Reading PDF…");
         bg.execute(() -> {
             File tmp = new File(getCacheDir(), "import-" + UUID.randomUUID() + ".pdf");
             java.util.ArrayList<Notebook.Page> pages = new java.util.ArrayList<>();
@@ -5132,6 +5191,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 try (Render.Pdf pdf = new Render.Pdf(tmp)) {
                     int count = pdf.r.getPageCount();
                     for (int i = 0; i < count; i++) {
+                        prog.update(i + 1, count, count == 1 ? "Rendering page…" : "Rendering page " + (i + 1) + " of " + count + "…");
                         float ph;
                         try (android.graphics.pdf.PdfRenderer.Page rp = pdf.r.openPage(i)) {
                             ph = Notebook.PW * rp.getHeight() / (float) Math.max(1, rp.getWidth());
@@ -5153,16 +5213,23 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
                 }
             } catch (Exception e) {
                 Log.e(Gl.TAG, "pdf page import", e);
-                ui.post(() -> toast("Couldn't import that PDF"));
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("Couldn't import that PDF");
+                });
                 return;
             } finally {
                 tmp.delete();
             }
             if (pages.isEmpty()) {
-                ui.post(() -> toast("No pages found in that PDF"));
+                ui.post(() -> {
+                    endProgress(prog);
+                    toast("No pages found in that PDF");
+                });
                 return;
             }
             ui.post(() -> {
+                endProgress(prog);
                 target.insertPages(pos, pages);
                 int n = pages.size();
                 toast("Added " + n + (n == 1 ? " PDF page" : " PDF pages"));
@@ -5174,19 +5241,33 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
     // ---- images --------------------------------------------------------------------------
 
     @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (pendingSave != null) outState.putString("pendingSave", pendingSave.getPath());
+    }
+
+    @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (req == REQ_SAVE_PDF) {
+        if (req == REQ_SAVE_FILE) {
             File f = pendingSave;
             pendingSave = null;
             if (res != RESULT_OK || data == null || data.getData() == null || f == null) return;
             final Uri out = data.getData();
+            ProgressPopup prog = startProgress("Saving file", "Writing " + f.getName() + "…");
             bg.execute(() -> {
                 try {
-                    Io.copy(new java.io.FileInputStream(f), getContentResolver().openOutputStream(out));
-                    ui.post(() -> toast("Saved"));
+                    Exporter.saveToUri(this, f, out);
+                    ui.post(() -> {
+                        endProgress(prog);
+                        toast("Saved " + f.getName());
+                    });
                 } catch (Exception e) {
-                    ui.post(() -> toast("Couldn't save there"));
+                    Log.e(Gl.TAG, "save export", e);
+                    ui.post(() -> {
+                        endProgress(prog);
+                        toast("Couldn't save there");
+                    });
                 }
             });
             return;
@@ -5201,10 +5282,12 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
             java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
             if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
             else if (data.getData() != null) uris.add(data.getData());
-            toast("Adding stickers…");
+            ProgressPopup prog = startProgress("Adding stickers",
+                    uris.size() == 1 ? "Importing sticker…" : "Importing " + uris.size() + " stickers…");
             bg.execute(() -> {
                 int n = Stickers.importUris(this, uris);
                 ui.post(() -> {
+                    endProgress(prog);
                     toast(n == 0 ? "No images found to add" : "Added " + n + (n == 1 ? " sticker" : " stickers"));
                     if (n > 0 && stickerAnchor != null && stickerAnchor.isAttachedToWindow()) showInsert(stickerAnchor);
                 });
@@ -5541,6 +5624,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
 
     @Override
     protected void onDestroy() {
+        if (activeProgress != null) { activeProgress.dismiss(); activeProgress = null; }
         super.onDestroy();
         for (Doc d : docs) if (d.engine != null) d.engine.release();
         bg.shutdown();

@@ -29,6 +29,11 @@ final class DocConverter {
      * Supports .docx, .pptx, .txt, .md, and direct .pdf pass-through.
      */
     static void toPdf(Context c, Uri uri, String displayName, String mime, File outPdf) throws IOException {
+        toPdf(c, uri, displayName, mime, outPdf, null);
+    }
+
+    static void toPdf(Context c, Uri uri, String displayName, String mime, File outPdf, ProgressPopup.Listener cb) throws IOException {
+        if (cb != null) cb.onProgress(0, 0, "Reading document…");
         byte[] raw = readAll(c, uri);
         if (raw.length == 0) throw new IOException("File is empty");
 
@@ -38,6 +43,7 @@ final class DocConverter {
         // Pass-through if user picked a PDF
         if (lower.endsWith(".pdf") || lowerMime.equals("application/pdf")
                 || (raw.length >= 4 && raw[0] == '%' && raw[1] == 'P' && raw[2] == 'D' && raw[3] == 'F')) {
+            if (cb != null) cb.onProgress(0, 0, "Preparing PDF…");
             try (FileOutputStream fos = new FileOutputStream(outPdf)) {
                 fos.write(raw);
             }
@@ -46,16 +52,17 @@ final class DocConverter {
 
         boolean isZip = raw.length >= 4 && raw[0] == 'P' && raw[1] == 'K' && raw[2] == 3 && raw[3] == 4;
         if (isZip) {
+            if (cb != null) cb.onProgress(0, 0, "Unpacking document…");
             Map<String, byte[]> entries = unzip(raw);
             OoxmlUtil.ZipEntries zip = new OoxmlUtil.ZipEntries(entries);
             if (zip.contains("word/document.xml") || lower.endsWith(".docx")
                     || lowerMime.contains("wordprocessingml")) {
-                DocxRenderer.render(entries, outPdf);
+                DocxRenderer.render(entries, outPdf, cb);
                 return;
             }
             if (zip.contains("ppt/presentation.xml") || lower.endsWith(".pptx")
                     || lowerMime.contains("presentationml")) {
-                PptxRenderer.render(entries, outPdf);
+                PptxRenderer.render(entries, outPdf, cb);
                 return;
             }
             throw new IOException("Unsupported archive format. Try DOCX, PPTX, TXT, or PDF.");
@@ -70,7 +77,7 @@ final class DocConverter {
         // Plain text / Markdown fallback
         String text = new String(raw, StandardCharsets.UTF_8);
         boolean isMarkdown = lower.endsWith(".md") || lower.endsWith(".markdown");
-        DocxRenderer.renderPlainText(text, isMarkdown, outPdf);
+        DocxRenderer.renderPlainText(text, isMarkdown, outPdf, cb);
     }
 
     private static byte[] readAll(Context c, Uri uri) throws IOException {

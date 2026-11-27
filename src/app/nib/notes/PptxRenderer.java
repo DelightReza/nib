@@ -194,6 +194,10 @@ final class PptxRenderer {
     // ---- Entry Point -------------------------------------------------------------------------
 
     static void render(Map<String, byte[]> rawEntries, File outPdf) throws IOException {
+        render(rawEntries, outPdf, null);
+    }
+
+    static void render(Map<String, byte[]> rawEntries, File outPdf, ProgressPopup.Listener cb) throws IOException {
         OoxmlUtil.ZipEntries entries = new OoxmlUtil.ZipEntries(rawEntries);
         Document presDoc = OoxmlUtil.parseXml(entries.get("ppt/presentation.xml"));
         Element presRoot = presDoc != null ? presDoc.getDocumentElement() : null;
@@ -228,7 +232,11 @@ final class PptxRenderer {
 
         PdfDocument doc = new PdfDocument();
         try {
-            for (int i = 0; i < slidePaths.size(); i++) {
+            int totalSlides = slidePaths.size();
+            for (int i = 0; i < totalSlides; i++) {
+                if (cb != null) {
+                    cb.onProgress(i + 1, totalSlides, "Converting slide " + (i + 1) + " of " + totalSlides + "…");
+                }
                 String slidePath = slidePaths.get(i);
                 Document sldDoc = OoxmlUtil.parseXml(entries.get(slidePath));
                 Element sldRoot = sldDoc != null ? sldDoc.getDocumentElement() : null;

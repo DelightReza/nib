@@ -316,6 +316,11 @@ final class DocxRenderer {
     // ---- Entry Points ------------------------------------------------------------------------
 
     static void render(Map<String, byte[]> rawEntries, File outPdf) throws IOException {
+        render(rawEntries, outPdf, null);
+    }
+
+    static void render(Map<String, byte[]> rawEntries, File outPdf, ProgressPopup.Listener cb) throws IOException {
+        if (cb != null) cb.onProgress(0, 0, "Parsing document…");
         OoxmlUtil.ZipEntries entries = new OoxmlUtil.ZipEntries(rawEntries);
         Document docXml = OoxmlUtil.parseXml(entries.get("word/document.xml"));
         if (docXml == null) throw new IOException("Invalid DOCX: missing or unreadable word/document.xml");
@@ -389,10 +394,14 @@ final class DocxRenderer {
             empty.text = "(Empty document)";
             allBlocks.add(empty);
         }
-        renderFlowToPdf(initialSec, allBlocks, outPdf);
+        renderFlowToPdf(initialSec, allBlocks, outPdf, cb);
     }
 
     static void renderPlainText(String text, boolean markdown, File outPdf) throws IOException {
+        renderPlainText(text, markdown, outPdf, null);
+    }
+
+    static void renderPlainText(String text, boolean markdown, File outPdf, ProgressPopup.Listener cb) throws IOException {
         ArrayList<Block> blocks = new ArrayList<>();
         String[] lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1);
         for (String line : lines) {
@@ -428,7 +437,7 @@ final class DocxRenderer {
         SectionSpec a4 = new SectionSpec();
         a4.marginLeft = a4.marginRight = 50f;
         a4.marginTop = a4.marginBottom = 54f;
-        renderFlowToPdf(a4, blocks, outPdf);
+        renderFlowToPdf(a4, blocks, outPdf, cb);
     }
 
     private static SpannableStringBuilder styledText(String s, float pt, boolean bold) {
@@ -1286,10 +1295,16 @@ final class DocxRenderer {
         }
     }
 
-    private static void renderFlowToPdf(SectionSpec initialSec, List<Block> blocks, File outPdf) throws IOException {
+    private static void renderFlowToPdf(SectionSpec initialSec, List<Block> blocks, File outPdf, ProgressPopup.Listener cb) throws IOException {
         PageWriter pw = new PageWriter(initialSec);
+        int total = Math.max(1, blocks.size());
+        int step = Math.max(1, total / 40);
         try {
-            for (Block b : blocks) {
+            for (int i = 0; i < blocks.size(); i++) {
+                Block b = blocks.get(i);
+                if (cb != null && (i == 0 || i % step == 0 || i == blocks.size() - 1)) {
+                    cb.onProgress(i + 1, total, "Converting page " + pw.pageNum + "…");
+                }
                 if (b.kind == Block.SECTION_BREAK && b.nextSection != null) {
                     pw.startNewPage(b.nextSection);
                     continue;
@@ -1310,6 +1325,7 @@ final class DocxRenderer {
                     renderParaBlock(pw, b);
                 }
             }
+            if (cb != null) cb.onProgress(total, total, "Writing PDF file…");
             pw.finish(outPdf);
         } catch (IOException e) {
             pw.doc.close();
