@@ -165,7 +165,7 @@ public final class EditorActivity extends Activity implements Engine.Listener, R
         hud = prefs.getBoolean("hud", false);
         partialErase = prefs.getBoolean("partialErase", false);
         shapeSnap = prefs.getBoolean("shapeSnap", true);
-        autoHide = prefs.getBoolean("autoHide", true);
+        autoHide = prefs.getBoolean("autoHide", false);
         hlFlat = prefs.getBoolean("hlFlat", false);
         hlStraight = prefs.getInt("hlStraight", 1);
         holdErase = prefs.getBoolean("holdErase", true);
