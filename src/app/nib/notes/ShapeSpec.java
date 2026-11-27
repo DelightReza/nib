@@ -596,6 +596,53 @@ final class ShapeSpec {
         return x >= it.x - tol && x <= it.x + it.w + tol && y >= it.y - tol && y <= it.y + it.h + tol;
     }
 
+    /**
+     * Border-only hit test for closed shapes (used in Pen/Highlighter mode so dragging the outline
+     * moves the shape while writing inside an open area deselects and lets the user label inside).
+     */
+    static boolean hitBorder(Notebook.Item it, float px, float py, float pad) {
+        if (it == null || it.type != Notebook.Item.SHAPE) return false;
+        ShapeSpec s = of(it);
+        if (s.isLineLike() || KIND_FREEFORM.equals(s.kind) || KIND_BRACKET.equals(s.kind) || KIND_BRACE.equals(s.kind)) {
+            return hitTest(it, px, py, pad);
+        }
+        float[] loc = toLocal(it, px, py);
+        float x = loc[0], y = loc[1];
+        float tol = Math.max(14f, s.strokeWidth * 1.5f + pad);
+
+        if ((KIND_TRIANGLE.equals(s.kind) || KIND_POLYGON.equals(s.kind)) && it.pts != null && it.pts.length >= 6) {
+            int n = it.pts.length / 2;
+            for (int i = 0; i < n; i++) {
+                int j = (i + 1) % n;
+                if (distToSegment(x, y, it.pts[2 * i], it.pts[2 * i + 1], it.pts[2 * j], it.pts[2 * j + 1]) <= tol) return true;
+            }
+            return false;
+        }
+
+        if (KIND_CIRCLE.equals(s.kind) || KIND_ELLIPSE.equals(s.kind)) {
+            float cx = it.x + it.w * 0.5f, cy = it.y + it.h * 0.5f;
+            float rx = it.w * 0.5f, ry = it.h * 0.5f;
+            float dx = x - cx, dy = y - cy;
+            float orx = rx + tol, ory = ry + tol;
+            if ((dx * dx) / (orx * orx) + (dy * dy) / (ory * ory) > 1f) return false;
+            float irx = rx - tol, iry = ry - tol;
+            if (irx <= 2f || iry <= 2f) return true;
+            return (dx * dx) / (irx * irx) + (dy * dy) / (iry * iry) >= 1f;
+        }
+
+        if (KIND_SPEECH_BUBBLE.equals(s.kind) && it.pts != null && it.pts.length >= 2) {
+            float cx = it.x + it.w * 0.5f, cy = it.y + it.h * 0.5f;
+            if (distToSegment(x, y, cx, cy, it.pts[0], it.pts[1]) <= tol * 1.4f) return true;
+        }
+
+        // Rect, RoundRect, SpeechBubble frame border
+        boolean inOuter = x >= it.x - tol && x <= it.x + it.w + tol && y >= it.y - tol && y <= it.y + it.h + tol;
+        if (!inOuter) return false;
+        if (it.w <= tol * 2f || it.h <= tol * 2f) return true;
+        boolean inInner = x > it.x + tol && x < it.x + it.w - tol && y > it.y + tol && y < it.y + it.h - tol;
+        return !inInner;
+    }
+
     private static boolean hitQuadCurve(float x0, float y0, float cx, float cy, float x1, float y1, float px, float py, float tol) {
         float prevX = x0, prevY = y0;
         int steps = 20;

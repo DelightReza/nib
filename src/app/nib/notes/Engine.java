@@ -3127,6 +3127,8 @@ final class Engine implements Choreographer.FrameCallback {
         liveTop = tops[livePage];
         pf = -1;
         snapped = false;
+        snapMatch = null;
+        snapCurMatch = null;
         stN = 0;
         stFront = stSwap = stFrames = stScenes = 0;
         stFrameNs = stFrameMax = 0;
@@ -3185,20 +3187,21 @@ final class Engine implements Choreographer.FrameCallback {
     /** Pen held still mid-stroke: replace the stroke with a clean shape if it looks like one. */
     private void trySnap() {
         if (gest != G_INK || live == null || snapped || !movedFromStart) return; // a pen resting where it landed erases instead
-        float[] pts = Shapes.recognize(live);
-        if (pts == null) return;
+        Shapes.Match m = Shapes.recognizeMatch(live);
+        if (m == null) return;
+        float[] pts = m.densePts;
         float avgP = 0;
         for (int i = 0; i < live.n; i++) avgP += live.p[4 * i + 2];
         avgP /= live.n;
         // remember the clean shape and where the pen is: moving on now stretches / resizes it
+        snapMatch = m;
+        snapCurMatch = m;
         snapPts = pts;
         snapP = avgP;
         snapRefX = live.x(live.n - 1);
         snapRefY = live.y(live.n - 1);
         snapAdjusting = false;
-        float pathLen = 0;
-        for (int i = 2; i + 1 < pts.length; i += 2) pathLen += (float) Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
-        snapLine = pathLen > 0 && Math.hypot(pts[pts.length - 2] - pts[0], pts[pts.length - 1] - pts[1]) / pathLen > 0.995f;
+        snapLine = m.isLine;
         float l = Float.MAX_VALUE, t = Float.MAX_VALUE, r = -Float.MAX_VALUE, b = -Float.MAX_VALUE;
         for (int i = 0; i + 1 < pts.length; i += 2) { l = Math.min(l, pts[i]); r = Math.max(r, pts[i]); t = Math.min(t, pts[i + 1]); b = Math.max(b, pts[i + 1]); }
         snapCx = (l + r) / 2;
@@ -3214,11 +3217,12 @@ final class Engine implements Choreographer.FrameCallback {
         snapped = true;
         needCache = true;
         renderNow();
-        Log.i(Gl.TAG, "shape snapped: " + (pts.length / 2) + " points");
+        Log.i(Gl.TAG, "shape snapped: " + m.kind + " (" + (pts.length / 2) + " points)");
     }
 
     // ---- a snapped shape follows the pen until it lifts: lines stretch / turn, shapes resize --------
 
+    private Shapes.Match snapMatch, snapCurMatch;
     private float[] snapPts;
     private float snapP, snapRefX, snapRefY, snapCx, snapCy;
     private boolean snapLine, snapAdjusting;
@@ -3237,12 +3241,22 @@ final class Engine implements Choreographer.FrameCallback {
                 dx = (float) Math.cos(rad) * len;
                 dy = (float) Math.sin(rad) * len;
             }
-            pts = Shapes.densify(new float[]{ax, ay, ax + dx, ay + dy}, false);
+            if (snapMatch != null) {
+                snapCurMatch = snapMatch.withLineEnd(ax + dx, ay + dy);
+                pts = snapCurMatch.densePts;
+            } else {
+                pts = Shapes.densify(new float[]{ax, ay, ax + dx, ay + dy}, false);
+            }
         } else {
             float r0 = (float) Math.hypot(snapRefX - snapCx, snapRefY - snapCy), r1 = (float) Math.hypot(px - snapCx, py - snapCy);
             float k = r0 < 1 ? 1 : Math.max(0.2f, Math.min(6f, r1 / r0));
-            pts = new float[snapPts.length];
-            for (int i = 0; i + 1 < pts.length; i += 2) { pts[i] = snapCx + (snapPts[i] - snapCx) * k; pts[i + 1] = snapCy + (snapPts[i + 1] - snapCy) * k; }
+            if (snapMatch != null) {
+                snapCurMatch = snapMatch.scaled(snapCx, snapCy, k);
+                pts = snapCurMatch.densePts;
+            } else {
+                pts = new float[snapPts.length];
+                for (int i = 0; i + 1 < pts.length; i += 2) { pts[i] = snapCx + (snapPts[i] - snapCx) * k; pts[i + 1] = snapCy + (snapPts[i + 1] - snapCy) * k; }
+            }
         }
         replaceLive(pts, snapP, snapLine ? Stroke.LINE : Stroke.CLOSED);
     }
@@ -3364,6 +3378,34 @@ final class Engine implements Choreographer.FrameCallback {
             needCache = true;
             requestFrame();
         }
+        // Pen hold-to-snap: convert recognized shape into an editable SHAPE item so Shape Style tools appear
+        if (snapped && snapCurMatch != null && !live.hl()) {
+            buf().truncate(liveFirst);
+            float sw = Math.max(0.8f, live.radius(snapP) * 2f);
+            int fillCol = shapeSpec != null ? shapeSpec.fillColor : live.color;
+            Notebook.Item made = snapCurMatch.toShapeItem(live.color, sw, fillCol, live.layer);
+            Object[] before = pageState(p);
+            p.items().add(made);
+            push(new PageEdit(p, before, pageState(p)));
+            if (livePage == book.pages.size() - 1) ensureTrailingPage();
+            int donePage = livePage;
+            live = null;
+            overlay = false;
+            gest = G_NONE;
+            snapMatch = null;
+            snapCurMatch = null;
+            primeShapeHandoff(made);
+            ArrayList<Notebook.Item> one = new ArrayList<>();
+            one.add(made);
+            select(donePage, new ArrayList<>(), one);
+            needRebuild = true;
+            needCache = true;
+            if (gl != null && gl.hasSurface()) renderNow();
+            else requestFrame();
+            showFront();
+            docChanged();
+            return;
+        }
         Object[] before = pageState(p);
         live.trim();
         p.strokes().add(live);
@@ -3386,6 +3428,8 @@ final class Engine implements Choreographer.FrameCallback {
         live = null;
         overlay = false;
         gest = G_NONE;
+        snapMatch = null;
+        snapCurMatch = null;
         if (snapped) {
             needCache = true;
             requestFrame();
@@ -3419,6 +3463,8 @@ final class Engine implements Choreographer.FrameCallback {
         gl.pred.clear();
         overlay = false;
         gest = G_NONE;
+        snapMatch = null;
+        snapCurMatch = null;
         needCache = true;
         requestFrame();
     }
@@ -4392,6 +4438,7 @@ final class Engine implements Choreographer.FrameCallback {
             selScale = false;
             if (itemShapeHandle >= 0) return true;
             float px = ox + sx / z, py = oy + sy / z - top;
+            if (tool == TOOL_PEN || tool == TOOL_HL) return ShapeSpec.hitBorder(sh, px, py, dp(16) / z);
             return ShapeSpec.hitTest(sh, px, py, dp(14) / z);
         }
         if (shapeMode()) {
